@@ -18,6 +18,13 @@ This repo validates decision quality using the same pipeline contracts as live
 runtime. It does not own live broker credentials or model training
 implementation.
 
+## Runtime Parity
+
+Simulation must reuse runtime decision tasks where practical. The
+`simulate_panel_scoring_decisions()` adapter runs the shared `renquant-pipeline`
+panel-scoring contract for a simulation bar, including feature-contract checks,
+`blocked_by`, decision trace rows, and attributed order intents.
+
 ## Pipeline Rule
 
 Backtest and simulation workflows are `renquant-common` Task/Job/Pipeline

@@ -8,11 +8,20 @@ version = "0.1.0"
 description = "Backtesting and LEAN assembly workflows for RenQuant."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["renquant-common>=0.1.0"]
+dependencies = [
+  "renquant-common>=0.1.0",
+  "renquant-pipeline>=0.1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "../renquant-common/src"]
+pythonpath = [
+  "src",
+  "../renquant-common/src",
+  "../renquant-base-data/src",
+  "../renquant-artifacts/src",
+  "../renquant-pipeline/src",
+]
 testpaths = ["tests"]
