@@ -3,6 +3,17 @@
 Backtesting, LEAN assembly, simulation, and decision-forensics repository for
 RenQuant.
 
+Operating model: https://github.com/hallovorld/RenQuant/blob/main/doc/arch/subrepo-operating-model.md
+
+Repository map: [RENQUANT_REPOS.md](RENQUANT_REPOS.md)
+
+Local automation:
+
+```bash
+make test
+make doctor
+```
+
 This repo validates decision quality using the same pipeline contracts as live
 runtime. It does not own live broker credentials or model training
 implementation.

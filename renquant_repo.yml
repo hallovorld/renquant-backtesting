@@ -1,0 +1,40 @@
+schema_version: 1
+name: renquant-backtesting
+role: backtesting, LEAN assembly, simulation, and decision forensics pipeline
+operating_model: https://github.com/hallovorld/RenQuant/blob/main/doc/arch/subrepo-operating-model.md
+repo_map: RENQUANT_REPOS.md
+pipeline_required: true
+branch_policy:
+  main: stable interface for downstream repos and automation
+  feature_branches: experiments, optimizations, and large upgrades
+source_repo:
+  name: RenQuant
+  never_delete: true
+dependencies:
+  - renquant-common
+  - renquant-strategy-104
+  - renquant-pipeline
+  - renquant-base-data
+  - renquant-artifacts
+inputs:
+  - strategy config bundle
+  - model artifact manifest
+  - data manifest
+  - simulation config
+outputs:
+  - backtest report
+  - walk-forward report
+  - trade-level forensics
+  - LEAN assembly manifest
+owns:
+  - simulation and LEAN assembly
+  - acceptance and walk-forward validation
+  - decision-quality diagnostics
+forbidden:
+  - live broker credentials
+  - broker order submission
+  - production model training
+  - silent local data path fallback
+automation:
+  test: make test
+  doctor: make doctor
