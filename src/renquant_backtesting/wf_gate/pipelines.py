@@ -65,11 +65,16 @@ class WfGateContext:
 # ─── Stage 1: ConfigJob ──────────────────────────────────────────────────────
 
 class LoadArtifactTask(Task):
-    """Load the candidate artifact JSON or sequence-checkpoint sidecar."""
+    """Load the candidate artifact JSON or sequence-checkpoint sidecar.
+
+    Phase 3a: implementation lifted out of runner.py into wf_gate.artifact_loader
+    so the Task is independently testable (no need to load the 2525-line runner
+    to exercise loading semantics).
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
-        from . import runner  # noqa: PLC0415
-        ctx.artifact = runner._load_artifact_payload(ctx.artifact_path)
+        from .artifact_loader import load_artifact_payload  # noqa: PLC0415
+        ctx.artifact = load_artifact_payload(ctx.artifact_path)
         return True
 
 
