@@ -239,9 +239,21 @@ class RecipeMatchJob(Job):
 # ─── Stage 3: WfSimJob ───────────────────────────────────────────────────────
 
 class RunWfSimTask(Task):
-    """Run all 3 WF cuts (sequential or pooled per ``ctx.jobs``)."""
+    """Run all 3 WF cuts (sequential or pooled per ``ctx.jobs``).
+
+    Phase 3e (B8): delegates to ``runner.run_walk_forward`` which is the
+    byte-equivalent copy of umbrella ``scripts/run_wf_gate.py::run_walk_forward``.
+    Stores the full dict in ``ctx.wf_result``. Sets ``ctx.wf_meta`` keys are
+    composed downstream in ``AssembleMetadataTask``.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        from . import runner  # noqa: PLC0415
+        ctx.wf_result = runner.run_walk_forward(
+            ctx.strategy_config,
+            jobs=int(ctx.jobs),
+            trace_dir=ctx.trace_dir,
+        )
         return True
 
 
@@ -257,16 +269,35 @@ class WfSimJob(Job):
 # ─── Stage 4: TradeGateJob ───────────────────────────────────────────────────
 
 class RunTradeContractTask(Task):
-    """Run ``run_trade_contract_gate``."""
+    """Run ``run_trade_contract_gate``.
+
+    Phase 3f (B9): consumes ``ctx.wf_result``; skips when WF wasn't executed.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        if not ctx.wf_result:
+            ctx.trade_contract_result = {"passed": True, "skipped": "no wf_result"}
+            return True
+        from . import runner  # noqa: PLC0415
+        import json  # noqa: PLC0415
+        config = json.loads((ctx.strategy_dir / ctx.strategy_config).read_text()) \
+            if ctx.strategy_dir else {}
+        ctx.trade_contract_result = runner.run_trade_contract_gate(ctx.wf_result, config)
         return True
 
 
 class RunTradeMonotonicityTask(Task):
-    """Run ``run_trade_monotonicity_gate``."""
+    """Run ``run_trade_monotonicity_gate``.
+
+    Phase 3f (B9): consumes ``ctx.wf_result``; skips when WF wasn't executed.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        if not ctx.wf_result:
+            ctx.trade_gate_result = {"passed": True, "skipped": "no wf_result"}
+            return True
+        from . import runner  # noqa: PLC0415
+        ctx.trade_gate_result = runner.run_trade_monotonicity_gate(ctx.wf_result)
         return True
 
 
@@ -282,9 +313,18 @@ class TradeGateJob(Job):
 # ─── Stage 5: SanityJob ──────────────────────────────────────────────────────
 
 class RunSanityBatteryTask(Task):
-    """Run the §5.2 sanity battery (shuffled-label + time-shift placebos)."""
+    """Run the §5.2 sanity battery (shuffled-label + time-shift placebos).
+
+    Phase 3g (B10): delegates to ``runner.run_sanity_battery``. Stores result
+    dict at ``ctx.sanity_result``.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        from . import runner  # noqa: PLC0415
+        ctx.sanity_result = runner.run_sanity_battery(
+            ctx.artifact_path,
+            ctx.recipe_usage,
+        )
         return True
 
 
