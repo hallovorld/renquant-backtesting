@@ -9,8 +9,8 @@ description = "Backtesting and LEAN assembly workflows for RenQuant."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "renquant-common>=0.2,<0.3",
-  "renquant-pipeline>=0.2,<0.3",
+  "renquant-common>=0.3,<0.4",
+  "renquant-pipeline>=0.3,<0.4",
 ]
 
 [tool.setuptools.packages.find]
