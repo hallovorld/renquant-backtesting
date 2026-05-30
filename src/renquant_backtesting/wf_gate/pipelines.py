@@ -89,11 +89,37 @@ class DeriveConfigTask(Task):
 
 
 class CheckConfigParityTask(Task):
-    """Run prod/WF decision-semantics parity check unless skipped."""
+    """Run prod/WF decision-semantics parity check unless skipped.
+
+    Phase 3c: calls ``wf_config_parity.evaluate_wf_config_parity`` directly with
+    ``strategy_dir`` injected via context (overriding the module-level default
+    which is wrong in the copied package — fine for the lift, runner copy keeps
+    its own correct value).
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
         if ctx.skip_config_parity:
             ctx.config_parity_result = {"passed": True, "reason": "skipped (--skip-config-parity)"}
+            return True
+        if ctx.strategy_dir is None or ctx.artifact_path is None:
+            ctx.config_parity_result = {
+                "passed": True, "reason": "skipped (no strategy_dir or artifact)",
+            }
+            return True
+        prod_cfg = ctx.strategy_dir / "strategy_config.json"
+        wf_cfg = ctx.strategy_dir / ctx.strategy_config
+        if not prod_cfg.exists() or not wf_cfg.exists():
+            ctx.config_parity_result = {
+                "passed": True,
+                "reason": f"skipped (config not found: prod={prod_cfg.exists()} wf={wf_cfg.exists()})",
+            }
+            return True
+        from .wf_config_parity import evaluate_wf_config_parity  # noqa: PLC0415
+        ctx.config_parity_result = evaluate_wf_config_parity(
+            prod_cfg, wf_cfg,
+            candidate_artifact=ctx.artifact_path,
+            strategy_dir=ctx.strategy_dir,
+        )
         return True
 
 

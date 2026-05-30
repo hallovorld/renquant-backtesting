@@ -63,6 +63,38 @@ def test_trade_gate_also_skips_when_wf_skipped() -> None:
     assert TradeGateJob().should_skip(ctx) is True
 
 
+def test_check_config_parity_skips_when_no_strategy_dir() -> None:
+    from renquant_backtesting.wf_gate.pipelines import CheckConfigParityTask
+    ctx = WfGateContext(
+        artifact_path=Path("/x"), strategy_config="strategy_config.shadow.json",
+        strategy_dir=None,
+    )
+    CheckConfigParityTask().run(ctx)
+    assert ctx.config_parity_result["passed"] is True
+    assert "skipped" in ctx.config_parity_result["reason"]
+
+
+def test_check_config_parity_honours_skip_flag() -> None:
+    from renquant_backtesting.wf_gate.pipelines import CheckConfigParityTask
+    ctx = WfGateContext(
+        artifact_path=Path("/x"), strategy_config="x.json",
+        strategy_dir=Path("/tmp"), skip_config_parity=True,
+    )
+    CheckConfigParityTask().run(ctx)
+    assert "--skip-config-parity" in ctx.config_parity_result["reason"]
+
+
+def test_check_config_parity_skips_when_configs_missing(tmp_path: Path) -> None:
+    from renquant_backtesting.wf_gate.pipelines import CheckConfigParityTask
+    ctx = WfGateContext(
+        artifact_path=tmp_path / "art.json",
+        strategy_config="missing.json", strategy_dir=tmp_path,
+    )
+    CheckConfigParityTask().run(ctx)
+    assert ctx.config_parity_result["passed"] is True
+    assert "config not found" in ctx.config_parity_result["reason"]
+
+
 def test_pipeline_run_on_empty_context_does_not_raise() -> None:
     """Scaffold-only: a no-config run should pass through all Jobs cleanly
     (the Tasks delegate to runner.py functions only when state is present)."""
