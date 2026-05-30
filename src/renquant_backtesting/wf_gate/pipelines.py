@@ -80,11 +80,61 @@ class LoadArtifactTask(Task):
 
 
 class DeriveConfigTask(Task):
-    """Optionally derive a prod-semantic WF config (--derive-config-from-prod)."""
+    """Derive a prod-semantic WF config (--derive-config-from-prod).
+
+    Phase 3b.3: full lift. Reads prod ``strategy_config.json`` + the
+    user-supplied base WF config, picks the recipe-matching manifest, and
+    writes a derived config to
+    ``<strategy_dir>/artifacts/diagnostics/wf_eval_configs/<base>.prod_semantic.json``.
+    Updates ``ctx.strategy_config`` to point at the derived path (relative to
+    strategy_dir) so downstream Tasks pick it up automatically.
+
+    Skips cleanly when not requested or when prerequisites are missing.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
-        # Delegate kept thin: the legacy main() handles all the derive logic
-        # inline; this Task is a placeholder so Phase 2 can lift it cleanly.
+        import json  # noqa: PLC0415
+        from .recipe_match import matching_manifest_for_recipe  # noqa: PLC0415
+        from .wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
+
+        if not ctx.derive_config_from_prod or ctx.strategy_dir is None:
+            return True
+        base_cfg_path = ctx.strategy_dir / ctx.strategy_config
+        prod_cfg_path = ctx.strategy_dir / "strategy_config.json"
+        if not base_cfg_path.exists() or not prod_cfg_path.exists():
+            return True
+        prod_cfg = json.loads(prod_cfg_path.read_text())
+        base_cfg = json.loads(base_cfg_path.read_text())
+        ctx.base_config = base_cfg
+        manifest_path = (base_cfg.get("walkforward") or {}).get("manifest_path")
+        if not manifest_path:
+            # No manifest pinned — the derive cannot proceed honestly.
+            return True
+        preferred = Path(manifest_path)
+        if not preferred.is_absolute():
+            preferred = ctx.strategy_dir / preferred
+        selected_manifest, _ = matching_manifest_for_recipe(
+            artifact_path=ctx.artifact_path,
+            preferred_manifest=preferred,
+            strategy_dir=ctx.strategy_dir,
+        )
+        if selected_manifest is not None:
+            manifest_path = str(selected_manifest)
+        ctx.manifest_path = Path(manifest_path) if manifest_path else None
+
+        derived_dir = ctx.strategy_dir / "artifacts" / "diagnostics" / "wf_eval_configs"
+        derived_dir.mkdir(parents=True, exist_ok=True)
+        derived_name = f"{Path(ctx.strategy_config).stem}.prod_semantic.json"
+        derived_path = derived_dir / derived_name
+        derived_cfg = build_wf_config_from_prod(
+            prod_cfg,
+            manifest_path=str(manifest_path),
+            base_wf_config=base_cfg,
+            strategy_dir=ctx.strategy_dir,
+            preserve_experiment_overrides=ctx.preserve_experiment_overrides,
+        )
+        derived_path.write_text(json.dumps(derived_cfg, indent=2, sort_keys=False) + "\n")
+        ctx.strategy_config = str(derived_path.relative_to(ctx.strategy_dir))
         return True
 
 

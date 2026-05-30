@@ -200,3 +200,86 @@ def test_manifest_recipe_usage_reports_missing_artifact(tmp_path: Path) -> None:
     out = manifest_recipe_usage(m, a, strategy_dir=tmp_path)
     assert out["recipe_validated"] is False
     assert out["manifest_sample_reports"][0]["exists"] is False
+
+
+# ─── matching_manifest_for_recipe (Phase 3b.3) ─────────────────────────────
+
+from renquant_backtesting.wf_gate.recipe_match import matching_manifest_for_recipe
+
+
+def _make_manifest(tmp_path: Path, name: str, entries: list[Path]) -> Path:
+    """Helper: write a manifest with retrain entries pointing at given artifacts."""
+    m = tmp_path / name
+    m.write_text(json.dumps({"retrains": [{"artifact_uri": str(p)} for p in entries]}))
+    return m
+
+
+def test_matching_manifest_preferred_is_validated_and_returned(tmp_path: Path) -> None:
+    """When --derive-config-from-prod supplies a preferred manifest, we MUST use it."""
+    a = tmp_path / "candidate.json"; _write_artifact(a, _matching_recipe())
+    e1 = tmp_path / "e1.json"; _write_artifact(e1, _matching_recipe())
+    preferred = _make_manifest(tmp_path, "walkforward_manifest_pref.json", [e1])
+    p, usage = matching_manifest_for_recipe(
+        artifact_path=a, preferred_manifest=preferred, strategy_dir=tmp_path,
+    )
+    assert p == preferred
+    assert usage["recipe_validated"] is True
+    assert usage["manifest_selection_policy"] == "preferred_manifest_required"
+
+
+def test_matching_manifest_preferred_mismatch_does_not_silently_substitute(tmp_path: Path) -> None:
+    """Preferred manifest is the evidence contract — fail closed, do NOT swap."""
+    a = tmp_path / "candidate.json"; _write_artifact(a, _matching_recipe())
+    bad = _matching_recipe(); bad["kind"] = "other"
+    e_bad = tmp_path / "bad.json"; _write_artifact(e_bad, bad)
+    preferred = _make_manifest(tmp_path, "walkforward_manifest_pref.json", [e_bad])
+    # Also create a matching manifest elsewhere
+    e_ok = tmp_path / "ok.json"; _write_artifact(e_ok, _matching_recipe())
+    sim_dir = tmp_path / "artifacts" / "sim"; sim_dir.mkdir(parents=True)
+    _make_manifest(sim_dir, "walkforward_manifest_ok.json", [e_ok])
+    p, usage = matching_manifest_for_recipe(
+        artifact_path=a, preferred_manifest=preferred, strategy_dir=tmp_path,
+    )
+    # Preferred is returned with mismatch, NOT silently swapped
+    assert p == preferred
+    assert usage["recipe_validated"] is False
+
+
+def test_matching_manifest_auto_discovers_when_no_preferred(tmp_path: Path) -> None:
+    """No preferred → glob walkforward_manifest*.json in strategy_dir/artifacts/sim."""
+    a = tmp_path / "candidate.json"; _write_artifact(a, _matching_recipe())
+    e_ok = tmp_path / "ok.json"; _write_artifact(e_ok, _matching_recipe())
+    sim_dir = tmp_path / "artifacts" / "sim"; sim_dir.mkdir(parents=True)
+    matching = _make_manifest(sim_dir, "walkforward_manifest_ok.json", [e_ok])
+    p, usage = matching_manifest_for_recipe(
+        artifact_path=a, preferred_manifest=None, strategy_dir=tmp_path,
+    )
+    assert p == matching
+    assert usage["recipe_validated"] is True
+
+
+def test_matching_manifest_picks_most_rows_on_tie(tmp_path: Path) -> None:
+    """Tiebreak: among recipe-matching manifests, prefer the one with more rows."""
+    a = tmp_path / "candidate.json"; _write_artifact(a, _matching_recipe())
+    e1 = tmp_path / "e1.json"; _write_artifact(e1, _matching_recipe())
+    e2 = tmp_path / "e2.json"; _write_artifact(e2, _matching_recipe())
+    e3 = tmp_path / "e3.json"; _write_artifact(e3, _matching_recipe())
+    sim_dir = tmp_path / "artifacts" / "sim"; sim_dir.mkdir(parents=True)
+    small = _make_manifest(sim_dir, "walkforward_manifest_small.json", [e1])
+    big = _make_manifest(sim_dir, "walkforward_manifest_big.json", [e1, e2, e3])
+    p, usage = matching_manifest_for_recipe(
+        artifact_path=a, preferred_manifest=None, strategy_dir=tmp_path,
+    )
+    assert p == big
+    assert usage["manifest_rows_checked"] == 3
+
+
+def test_matching_manifest_no_candidates_returns_none(tmp_path: Path) -> None:
+    """No preferred + no matching manifests → return None with informative reason."""
+    a = tmp_path / "candidate.json"; _write_artifact(a, _matching_recipe())
+    p, usage = matching_manifest_for_recipe(
+        artifact_path=a, preferred_manifest=None, strategy_dir=tmp_path,
+    )
+    assert p is None
+    assert usage["recipe_validated"] is False
+    assert "no walkforward manifests found" in usage["reason"]

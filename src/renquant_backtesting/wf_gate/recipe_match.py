@@ -188,3 +188,76 @@ def manifest_recipe_usage(
             "manifest artifacts do not match candidate recipe"
         ),
     }
+
+
+def matching_manifest_for_recipe(
+    *,
+    artifact_path: Path,
+    preferred_manifest: Path | None,
+    strategy_dir: Path,
+    search_dir: Path | None = None,
+) -> tuple[Path | None, dict]:
+    """Return a WF manifest whose artifacts share the candidate's recipe.
+
+    Phase 3b.3 lift. ``strategy_dir`` is now a required explicit parameter
+    (was ``STRATEGY_DIR`` runner-global). The selection policy preserved from
+    runner._matching_manifest_for_recipe:
+
+    1. If a preferred manifest is supplied: validate it as the evidence
+       contract and fail closed on mismatch (do NOT silently substitute).
+    2. Otherwise auto-discover ``walkforward_manifest*.json`` in ``search_dir``
+       (defaults to ``strategy_dir/artifacts/sim``).
+    3. Pick the recipe-matching candidate with the most rows; tiebreak by URI.
+    4. If nothing matches, return the first checked manifest (so the gate can
+       still fail closed with informative metadata).
+    """
+    checked: list[tuple[Path, dict]] = []
+    seen: set[Path] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        p = path if path.is_absolute() else strategy_dir / path
+        try:
+            key = p.resolve()
+        except Exception:  # noqa: BLE001
+            key = p
+        if key in seen:
+            return
+        seen.add(key)
+        checked.append((p, manifest_recipe_usage(p, artifact_path, strategy_dir=strategy_dir)))
+
+    add(preferred_manifest)
+    if preferred_manifest is not None and checked:
+        p, usage = checked[0]
+        usage = dict(usage)
+        usage["checked_manifest_count"] = 1
+        usage["manifest_selection_policy"] = "preferred_manifest_required"
+        return p, usage
+
+    root = search_dir or (strategy_dir / "artifacts" / "sim")
+    if root.exists():
+        for candidate in sorted(root.glob("walkforward_manifest*.json")):
+            add(candidate)
+
+    matches = [(p, usage) for p, usage in checked if bool(usage.get("recipe_validated"))]
+    if matches:
+        matches.sort(
+            key=lambda item: (
+                int(item[1].get("manifest_rows_checked") or 0),
+                str(item[0]),
+            ),
+            reverse=True,
+        )
+        return matches[0]
+
+    if checked:
+        p, usage = checked[0]
+        usage = dict(usage)
+        usage["checked_manifest_count"] = len(checked)
+        return p, usage
+    return None, {
+        "recipe_validated": False,
+        "reason": "no walkforward manifests found",
+        "checked_manifest_count": 0,
+    }
