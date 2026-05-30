@@ -48,16 +48,20 @@ class WfGateContext:
     # Stage 4
     trade_contract_result: dict | None = None
     trade_gate_result: dict | None = None
+    alpha_economics_result: dict | None = None
     # Stage 5
     sanity_result: dict | None = None
     # Stage 6
     wf_meta: dict = field(default_factory=dict)
     overall_pass: bool = False
+    verdict_blockers: list[str] = field(default_factory=list)
     # CLI knobs that gate stages skip themselves
     skip_wf: bool = False
     skip_sanity: bool = False
     skip_config_parity: bool = False
     skip_trade_gates: bool = False
+    allow_pass_open_trade_monotonicity: bool = False
+    no_trade_trace: bool = False
     derive_config_from_prod: bool = False
     preserve_experiment_overrides: bool = False
     jobs: int = 1
@@ -276,7 +280,13 @@ class RunTradeContractTask(Task):
 
     def run(self, ctx: WfGateContext) -> bool | None:
         if not ctx.wf_result:
-            ctx.trade_contract_result = {"passed": True, "skipped": "no wf_result"}
+            ctx.trade_contract_result = {"passed": False, "reason": "no wf_result"}
+            return True
+        if ctx.trace_dir is None:
+            ctx.trade_contract_result = {
+                "passed": False,
+                "reason": "trade gates require persisted round-trip ledgers",
+            }
             return True
         from . import runner  # noqa: PLC0415
         import json  # noqa: PLC0415
@@ -294,10 +304,42 @@ class RunTradeMonotonicityTask(Task):
 
     def run(self, ctx: WfGateContext) -> bool | None:
         if not ctx.wf_result:
-            ctx.trade_gate_result = {"passed": True, "skipped": "no wf_result"}
+            ctx.trade_gate_result = {"passed": False, "reason": "no wf_result"}
+            return True
+        if ctx.trace_dir is None:
+            ctx.trade_gate_result = {
+                "passed": False,
+                "reason": "trade gates require persisted round-trip ledgers",
+            }
             return True
         from . import runner  # noqa: PLC0415
-        ctx.trade_gate_result = runner.run_trade_monotonicity_gate(ctx.wf_result)
+        ctx.trade_gate_result = runner.run_trade_monotonicity_gate(
+            ctx.wf_result,
+            allow_pass_open=ctx.allow_pass_open_trade_monotonicity,
+        )
+        return True
+
+
+class RunAlphaEconomicsTask(Task):
+    """Run ``run_alpha_economics_gate``.
+
+    The live runner includes this gate in ``_compute_overall_pass``. Keeping it
+    in the package pipeline prevents Phase 5 from stamping weaker metadata than
+    the currently authoritative script.
+    """
+
+    def run(self, ctx: WfGateContext) -> bool | None:
+        if not ctx.wf_result:
+            ctx.alpha_economics_result = {"passed": False, "reason": "no wf_result"}
+            return True
+        if ctx.trace_dir is None:
+            ctx.alpha_economics_result = {
+                "passed": False,
+                "reason": "trade gates require persisted round-trip ledgers",
+            }
+            return True
+        from . import runner  # noqa: PLC0415
+        ctx.alpha_economics_result = runner.run_alpha_economics_gate(ctx.wf_result)
         return True
 
 
@@ -307,7 +349,7 @@ class TradeGateJob(Job):
 
     @property
     def tasks(self) -> list[Task]:
-        return [RunTradeContractTask(), RunTradeMonotonicityTask()]
+        return [RunTradeContractTask(), RunTradeMonotonicityTask(), RunAlphaEconomicsTask()]
 
 
 # ─── Stage 5: SanityJob ──────────────────────────────────────────────────────
@@ -349,6 +391,10 @@ class AssembleMetadataTask(Task):
 
     def run(self, ctx: WfGateContext) -> bool | None:
         ctx.wf_meta = {
+            "passed": ctx.overall_pass,
+            "diagnostic_only": bool(_required_validation_skip_reasons(ctx)),
+            "skipped_required_gates": _required_validation_skip_reasons(ctx),
+            "verdict_blockers": list(ctx.verdict_blockers),
             # Stage 1
             "config_parity": ctx.config_parity_result,
             # Stage 2
@@ -358,6 +404,7 @@ class AssembleMetadataTask(Task):
             # Stage 4
             "trade_contract": ctx.trade_contract_result,
             "trade_monotonicity": ctx.trade_gate_result,
+            "alpha_economics": ctx.alpha_economics_result,
             # Stage 5
             "sanity": ctx.sanity_result,
             # Trace
@@ -392,36 +439,70 @@ class StampArtifactTask(Task):
 class EmitVerdictTask(Task):
     """Compute the overall PASS/FAIL and set ``ctx.overall_pass``.
 
-    A run passes when every stage that produced a result reports ``passed=True``.
-    Stages that were skipped do not block the verdict.
+    Mirrors ``runner._compute_overall_pass``: skipped required gates are
+    diagnostic-only and cannot stamp acceptance evidence as passing.
     """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        skipped_required_gates = _required_validation_skip_reasons(ctx)
+        missing_required_results = _missing_required_results(ctx)
         per_stage = (
             ctx.config_parity_result,
             ctx.recipe_usage,
             ctx.wf_result,
             ctx.trade_contract_result,
             ctx.trade_gate_result,
+            ctx.alpha_economics_result,
             ctx.sanity_result,
         )
         # Manifest recipe validation lives under "recipe_validated", others under "passed".
         def _ok(r: dict | None) -> bool:
             if not r:
-                return True  # skipped / not produced — not a fail
+                return False
             if "passed" in r:
                 return bool(r.get("passed"))
             if "recipe_validated" in r:
                 return bool(r.get("recipe_validated"))
             return True
-        ctx.overall_pass = all(_ok(r) for r in per_stage)
+        ctx.verdict_blockers = [*skipped_required_gates, *missing_required_results]
+        ctx.overall_pass = not ctx.verdict_blockers and all(_ok(r) for r in per_stage)
         return True
+
+
+def _required_validation_skip_reasons(ctx: WfGateContext) -> list[str]:
+    reasons: list[str] = []
+    if ctx.skip_wf:
+        reasons.append("walk_forward_skipped")
+    if ctx.skip_sanity:
+        reasons.append("sanity_skipped")
+    if ctx.skip_trade_gates:
+        reasons.append("trade_gates_skipped")
+    if ctx.allow_pass_open_trade_monotonicity:
+        reasons.append("trade_monotonicity_pass_open_allowed")
+    if ctx.skip_config_parity:
+        reasons.append("config_parity_skipped")
+    if ctx.no_trade_trace:
+        reasons.append("trade_trace_disabled")
+    return reasons
+
+
+def _missing_required_results(ctx: WfGateContext) -> list[str]:
+    required = (
+        ("config_parity_result", "config_parity_missing"),
+        ("recipe_usage", "recipe_match_missing"),
+        ("wf_result", "walk_forward_missing"),
+        ("trade_contract_result", "trade_contract_missing"),
+        ("trade_gate_result", "trade_monotonicity_missing"),
+        ("alpha_economics_result", "alpha_economics_missing"),
+        ("sanity_result", "sanity_missing"),
+    )
+    return [reason for attr, reason in required if getattr(ctx, attr) is None]
 
 
 class StampJob(Job):
     @property
     def tasks(self) -> list[Task]:
-        return [AssembleMetadataTask(), StampArtifactTask(), EmitVerdictTask()]
+        return [EmitVerdictTask(), AssembleMetadataTask(), StampArtifactTask()]
 
 
 # ─── Top-level Pipeline ──────────────────────────────────────────────────────

@@ -117,6 +117,7 @@ def test_emit_verdict_passes_when_all_stages_pass(synthetic_artifact, tmp_path):
         wf_result={"passed": True},
         trade_contract_result={"passed": True},
         trade_gate_result={"passed": True},
+        alpha_economics_result={"passed": True},
         sanity_result={"passed": True},
     )
     EmitVerdictTask().run(ctx)
@@ -133,27 +134,32 @@ def test_emit_verdict_fails_when_any_stage_fails(synthetic_artifact, tmp_path):
         wf_result={"passed": True},
         trade_contract_result={"passed": True},
         trade_gate_result={"passed": True},
+        alpha_economics_result={"passed": True},
         sanity_result={"passed": False},  # failing here
     )
     EmitVerdictTask().run(ctx)
     assert ctx.overall_pass is False
 
 
-def test_emit_verdict_skipped_stages_dont_block(synthetic_artifact, tmp_path):
-    """A None result (skipped stage) is not a fail."""
+def test_emit_verdict_skipped_required_stages_block_acceptance(synthetic_artifact, tmp_path):
+    """Skipped required gates are diagnostic-only, matching runner.py."""
     ctx = WfGateContext(
         artifact_path=synthetic_artifact,
         strategy_config="strategy_config.shadow.json",
         strategy_dir=tmp_path,
         config_parity_result={"passed": True},
         recipe_usage={"recipe_validated": True},
+        skip_wf=True,
+        skip_trade_gates=True,
         wf_result=None,                       # skipped
         trade_contract_result=None,           # skipped
         trade_gate_result=None,               # skipped
+        alpha_economics_result=None,           # skipped
         sanity_result={"passed": True},
     )
     EmitVerdictTask().run(ctx)
-    assert ctx.overall_pass is True
+    assert ctx.overall_pass is False
+    assert "walk_forward_skipped" in ctx.verdict_blockers
 
 
 def test_pipeline_runnable_with_stubs(synthetic_artifact, tmp_path, monkeypatch):
@@ -163,6 +169,8 @@ def test_pipeline_runnable_with_stubs(synthetic_artifact, tmp_path, monkeypatch)
     monkeypatch.setattr(wf_runner, "run_trade_contract_gate",
                         lambda *a, **kw: {"passed": True})
     monkeypatch.setattr(wf_runner, "run_trade_monotonicity_gate",
+                        lambda *a, **kw: {"passed": True})
+    monkeypatch.setattr(wf_runner, "run_alpha_economics_gate",
                         lambda *a, **kw: {"passed": True})
     monkeypatch.setattr(wf_runner, "run_sanity_battery",
                         lambda *a, **kw: {"passed": True, "real_ic": 0.05})
@@ -175,7 +183,8 @@ def test_pipeline_runnable_with_stubs(synthetic_artifact, tmp_path, monkeypatch)
         artifact_path=synthetic_artifact,
         strategy_config="strategy_config.shadow.json",
         strategy_dir=tmp_path,
-        skip_config_parity=True,
+        trace_dir=tmp_path / "trace",
+        recipe_usage={"recipe_validated": True},
     )
     # Run the Pipeline using its native interface; tolerate the runner functions
     # being stubbed (the Pipeline itself doesn't validate domain).
@@ -183,6 +192,7 @@ def test_pipeline_runnable_with_stubs(synthetic_artifact, tmp_path, monkeypatch)
     # Pipeline runs all 6 Jobs; per-stage results all stubbed PASS
     assert ctx.wf_result["passed"] is True
     assert ctx.trade_contract_result["passed"] is True
+    assert ctx.alpha_economics_result["passed"] is True
     assert ctx.sanity_result["passed"] is True
     # Stamp landed
     after = json.loads(synthetic_artifact.read_text())
