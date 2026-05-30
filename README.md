@@ -12,6 +12,7 @@ Local automation:
 ```bash
 make test
 make doctor
+make latest-report
 ```
 
 This repo validates decision quality using the same pipeline contracts as live
@@ -30,6 +31,13 @@ panel-scoring contract for a simulation bar, including feature-contract checks,
 Backtest and simulation workflows are `renquant-common` Task/Job/Pipeline
 chains.
 
+## Latest Run Dashboard
+
+`make latest-report` writes [docs/latest-run.md](docs/latest-run.md) plus SVG
+charts under `docs/latest-run-assets/`. The generator scans local report roots
+and the sibling umbrella strategy artifacts for the newest JSON with
+walk-forward, simulation, or equity metrics.
+
 ## Initial Split Source
 
 `hallovorld/RenQuant` commit
@@ -38,5 +46,5 @@ chains.
 ## Local Test
 
 ```bash
-PYTHONPATH=../renquant-common/src:src python -m pytest -q
+make test
 ```
