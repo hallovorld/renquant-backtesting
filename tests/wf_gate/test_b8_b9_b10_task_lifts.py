@@ -31,6 +31,7 @@ if _UMBRELLA_SCRIPTS.exists():
     sys.path.insert(0, str(_UMBRELLA_SCRIPTS))
 
 from renquant_backtesting.wf_gate.pipelines import (  # noqa: E402
+    RunAlphaEconomicsTask,
     RunSanityBatteryTask,
     RunTradeContractTask,
     RunTradeMonotonicityTask,
@@ -58,6 +59,7 @@ def ctx(tmp_path):
         strategy_dir=tmp_path,
         wf_result=None,
         recipe_usage={"recipe_validated": True},
+        trace_dir=tmp_path / "trace",
         jobs=1,
     )
 
@@ -82,7 +84,8 @@ def test_run_trade_contract_task_skips_without_wf_result(ctx):
     ctx.wf_result = None
     ok = RunTradeContractTask().run(ctx)
     assert ok is True
-    assert ctx.trade_contract_result["skipped"] == "no wf_result"
+    assert ctx.trade_contract_result["passed"] is False
+    assert ctx.trade_contract_result["reason"] == "no wf_result"
 
 
 def test_run_trade_contract_task_calls_runner_when_wf_done(ctx, monkeypatch, tmp_path):
@@ -107,16 +110,26 @@ def test_run_trade_monotonicity_task_skips_without_wf_result(ctx):
     ctx.wf_result = None
     ok = RunTradeMonotonicityTask().run(ctx)
     assert ok is True
-    assert ctx.trade_gate_result["skipped"] == "no wf_result"
+    assert ctx.trade_gate_result["passed"] is False
+    assert ctx.trade_gate_result["reason"] == "no wf_result"
 
 
 def test_run_trade_monotonicity_task_calls_runner(ctx, monkeypatch):
     ctx.wf_result = {"passed": True, "cuts": []}
     monkeypatch.setattr(wf_runner, "run_trade_monotonicity_gate",
-                        lambda wf_result: {"passed": True, "score_cols": []})
+                        lambda wf_result, **kw: {"passed": True, "score_cols": []})
     ok = RunTradeMonotonicityTask().run(ctx)
     assert ok is True
     assert ctx.trade_gate_result["passed"] is True
+
+
+def test_run_alpha_economics_task_calls_runner(ctx, monkeypatch):
+    ctx.wf_result = {"passed": True, "cuts": []}
+    monkeypatch.setattr(wf_runner, "run_alpha_economics_gate",
+                        lambda wf_result: {"passed": True, "evidence": []})
+    ok = RunAlphaEconomicsTask().run(ctx)
+    assert ok is True
+    assert ctx.alpha_economics_result["passed"] is True
 
 
 def test_run_sanity_battery_task_delegates_to_runner(ctx, monkeypatch):
