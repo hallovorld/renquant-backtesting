@@ -34,6 +34,7 @@ class WfGateContext:
 
     artifact_path: Path
     strategy_config: str
+    strategy_dir: Path | None = None  # umbrella's backtesting/<strategy>/ (for manifest URI resolution)
     artifact: dict | None = None
     # Stage 1
     base_config: dict | None = None
@@ -112,13 +113,18 @@ class ResolveManifestTask(Task):
 
 
 class ValidateRecipeMatchTask(Task):
-    """Run ``_manifest_recipe_usage`` and refuse non-matching manifests."""
+    """Run ``manifest_recipe_usage`` and refuse non-matching manifests.
+
+    Phase 3b.2: uses the lifted ``recipe_match.manifest_recipe_usage`` directly
+    (with ``ctx.strategy_dir`` for URI resolution) — no longer imports runner.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
-        if ctx.manifest_path is not None and ctx.artifact is not None:
-            from . import runner  # noqa: PLC0415
-            ctx.recipe_usage = runner._manifest_recipe_usage(
+        if ctx.manifest_path is not None and ctx.strategy_dir is not None:
+            from .recipe_match import manifest_recipe_usage  # noqa: PLC0415
+            ctx.recipe_usage = manifest_recipe_usage(
                 ctx.manifest_path, ctx.artifact_path,
+                strategy_dir=ctx.strategy_dir,
             )
         return True
 

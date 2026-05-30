@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 #: Params that do NOT participate in the recipe fingerprint — execution
 #: controls (thread counts, verbosity) whose change must not invalidate
@@ -92,3 +93,98 @@ def recipe_fingerprint(artifact: dict) -> str:
         separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def manifest_recipe_usage(
+    manifest_path: Path | None,
+    artifact_path: Path,
+    *,
+    strategy_dir: Path,
+) -> dict:
+    """Validate that a WF manifest's per-cutoff artifacts share the candidate's recipe.
+
+    Phase 3b.2 lift. ``strategy_dir`` is now an explicit parameter (was the
+    module-global ``STRATEGY_DIR`` in runner.py); pass the umbrella's
+    ``backtesting/renquant_104`` for production callers and ``tmp_path`` for tests.
+
+    Returns a dict with ``recipe_validated``, the candidate's recipe fingerprint,
+    a per-sample report, and a human-readable ``reason`` — same shape as the
+    original ``runner._manifest_recipe_usage``.
+    """
+    # Imported lazily to keep this module's import surface small.
+    from .artifact_loader import load_artifact_payload  # noqa: PLC0415
+
+    if manifest_path is None or not manifest_path.exists():
+        return {
+            "recipe_validated": False,
+            "reason": f"manifest not found: {manifest_path}",
+        }
+    try:
+        payload = json.loads(manifest_path.read_text())
+        rows = payload.get("retrains", []) if isinstance(payload, dict) else payload
+    except Exception as exc:  # noqa: BLE001
+        return {"recipe_validated": False, "reason": f"manifest parse failed: {exc}"}
+    if not isinstance(rows, list) or not rows:
+        return {"recipe_validated": False, "reason": "manifest has no retrain rows"}
+
+    candidate = load_artifact_payload(artifact_path)
+    candidate_fp = recipe_fingerprint(candidate)
+    candidate_recipe = recipe_projection(candidate)
+    seen: set[str] = set()
+    sample_reports: list[dict] = []
+    for row in rows:
+        uri = str((row or {}).get("artifact_uri") or "")
+        if not uri or uri in seen:
+            continue
+        seen.add(uri)
+        p = Path(uri)
+        if not p.is_absolute():
+            p = strategy_dir / p
+        if not p.exists():
+            sample_reports.append({
+                "artifact_uri": uri,
+                "exists": False,
+                "recipe_matches": False,
+            })
+            continue
+        try:
+            sample = load_artifact_payload(p)
+            sample_fp = recipe_fingerprint(sample)
+            sample_recipe = recipe_projection(sample)
+        except Exception as exc:  # noqa: BLE001
+            sample_reports.append({
+                "artifact_uri": str(p),
+                "exists": True,
+                "recipe_matches": False,
+                "error": str(exc),
+            })
+            continue
+        sample_reports.append({
+            "artifact_uri": str(p),
+            "exists": True,
+            "recipe_matches": sample_fp == candidate_fp,
+            "recipe_fingerprint": sample_fp,
+            "n_features": len(sample_recipe["feature_cols"]),
+            "missing_features_vs_candidate": sorted(
+                set(candidate_recipe["feature_cols"]) - set(sample_recipe["feature_cols"])
+            )[:10],
+            "extra_features_vs_candidate": sorted(
+                set(sample_recipe["feature_cols"]) - set(candidate_recipe["feature_cols"])
+            )[:10],
+        })
+
+    if not sample_reports:
+        return {"recipe_validated": False, "reason": "no sample artifacts found in manifest"}
+    all_match = all(r.get("recipe_matches") for r in sample_reports)
+    return {
+        "recipe_validated": bool(all_match),
+        "candidate_recipe_fingerprint": candidate_fp,
+        "candidate_n_features": len(candidate_recipe["feature_cols"]),
+        "manifest_rows_checked": int(len(rows)),
+        "manifest_sample_reports": sample_reports,
+        "reason": (
+            "manifest artifacts match candidate recipe"
+            if all_match else
+            "manifest artifacts do not match candidate recipe"
+        ),
+    }
