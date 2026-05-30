@@ -225,23 +225,81 @@ class SanityJob(Job):
 # ─── Stage 6: StampJob ───────────────────────────────────────────────────────
 
 class AssembleMetadataTask(Task):
-    """Compose ``wf_gate_metadata`` from each stage's result."""
+    """Compose ``wf_gate_metadata`` from each stage's result.
+
+    Phase 3h: collects ctx fields produced by the prior Jobs into a single dict
+    suitable for stamping into the artifact. Mirrors what runner.main()'s
+    inline ``wf_meta = {...}`` assembly does today.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        ctx.wf_meta = {
+            # Stage 1
+            "config_parity": ctx.config_parity_result,
+            # Stage 2
+            "recipe_usage": ctx.recipe_usage,
+            # Stage 3
+            "wf_result": ctx.wf_result,
+            # Stage 4
+            "trade_contract": ctx.trade_contract_result,
+            "trade_monotonicity": ctx.trade_gate_result,
+            # Stage 5
+            "sanity": ctx.sanity_result,
+            # Trace
+            "wf_trade_trace_dir": str(ctx.trace_dir) if ctx.trace_dir else None,
+        }
+        # Drop None fields so the stamped dict is honest about what ran.
+        ctx.wf_meta = {k: v for k, v in ctx.wf_meta.items() if v is not None}
         return True
 
 
 class StampArtifactTask(Task):
-    """Write metadata back into the artifact / sidecar."""
+    """Write ``wf_gate_metadata`` back into the artifact JSON or sidecar.
+
+    Phase 3h: uses the lifted ``artifact_loader.write_artifact_payload`` so the
+    Task no longer imports runner. Preserves the existing artifact payload by
+    re-reading + merging the metadata.wf_gate_metadata key (the historical
+    field name the preflight reads).
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        if ctx.artifact is None:
+            return True
+        from .artifact_loader import write_artifact_payload  # noqa: PLC0415
+        payload = dict(ctx.artifact)
+        metadata = dict(payload.get("metadata") or {})
+        metadata["wf_gate_metadata"] = ctx.wf_meta
+        payload["metadata"] = metadata
+        write_artifact_payload(ctx.artifact_path, payload)
         return True
 
 
 class EmitVerdictTask(Task):
-    """Log PASS/FAIL verdict (the only side-effect callers depend on for CI)."""
+    """Compute the overall PASS/FAIL and set ``ctx.overall_pass``.
+
+    A run passes when every stage that produced a result reports ``passed=True``.
+    Stages that were skipped do not block the verdict.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        per_stage = (
+            ctx.config_parity_result,
+            ctx.recipe_usage,
+            ctx.wf_result,
+            ctx.trade_contract_result,
+            ctx.trade_gate_result,
+            ctx.sanity_result,
+        )
+        # Manifest recipe validation lives under "recipe_validated", others under "passed".
+        def _ok(r: dict | None) -> bool:
+            if not r:
+                return True  # skipped / not produced — not a fail
+            if "passed" in r:
+                return bool(r.get("passed"))
+            if "recipe_validated" in r:
+                return bool(r.get("recipe_validated"))
+            return True
+        ctx.overall_pass = all(_ok(r) for r in per_stage)
         return True
 
 

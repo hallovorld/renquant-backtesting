@@ -87,3 +87,19 @@ def load_artifact_payload(path: Path) -> dict:
     payload.setdefault("kind", payload.get("arch") or "hf_patchtst")
     payload.setdefault("params", patchtst_params_from_contract(payload))
     return payload
+
+
+def write_artifact_payload(path: Path, payload: dict) -> Path:
+    """Persist gate metadata without corrupting binary sequence checkpoints.
+
+    For a ``.json`` artifact, writes back to the artifact itself.
+    For a ``.pt`` or other binary checkpoint, writes to the **sidecar**
+    (creating ``foo.pt.metadata.json`` if no sidecar already exists). Returns
+    the actual path written.
+    """
+    out_path = path
+    if path.suffix != ".json":
+        sidecar = artifact_sidecar_path(path)
+        out_path = sidecar or path.with_name(path.name + ".metadata.json")
+    out_path.write_text(json.dumps(payload))
+    return out_path

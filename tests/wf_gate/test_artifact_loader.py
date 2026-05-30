@@ -83,3 +83,39 @@ def test_patchtst_params_filter_keeps_expected_keys() -> None:
     assert "weight_decay" in p
     assert "cross_stock_attn" in p
     assert "nonsense_param" not in p
+
+
+# ─── write_artifact_payload (Phase 3h) ──────────────────────────────────────
+
+from renquant_backtesting.wf_gate.artifact_loader import write_artifact_payload
+
+
+def test_write_artifact_payload_json_overwrites_in_place(tmp_path: Path) -> None:
+    p = tmp_path / "art.json"
+    p.write_text(json.dumps({"kind": "x"}))
+    out = write_artifact_payload(p, {"kind": "x", "metadata": {"wf_gate_metadata": {"passed": True}}})
+    assert out == p
+    written = json.loads(p.read_text())
+    assert written["metadata"]["wf_gate_metadata"]["passed"] is True
+
+
+def test_write_artifact_payload_pt_creates_metadata_sidecar(tmp_path: Path) -> None:
+    pt = tmp_path / "model.pt"
+    pt.write_bytes(b"\x00")  # binary, do NOT corrupt
+    out = write_artifact_payload(pt, {"kind": "hf_patchtst", "test": 1})
+    assert out == tmp_path / "model.pt.metadata.json"
+    assert pt.read_bytes() == b"\x00"   # binary preserved
+    side = json.loads(out.read_text())
+    assert side["test"] == 1
+
+
+def test_write_artifact_payload_pt_uses_existing_sidecar(tmp_path: Path) -> None:
+    pt = tmp_path / "model.pt"
+    pt.write_bytes(b"\x00")
+    existing = tmp_path / "model_summary.json"   # the third probe in priority
+    existing.write_text(json.dumps({"kind": "hf_patchtst"}))
+    # metadata sidecar takes priority (first probe), so create one
+    metadata = tmp_path / "model.pt.metadata.json"
+    metadata.write_text("{}")
+    out = write_artifact_payload(pt, {"kind": "hf_patchtst", "v": 2})
+    assert out == metadata   # priority order respected

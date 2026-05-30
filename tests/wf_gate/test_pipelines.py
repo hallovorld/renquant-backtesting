@@ -95,6 +95,53 @@ def test_check_config_parity_skips_when_configs_missing(tmp_path: Path) -> None:
     assert "config not found" in ctx.config_parity_result["reason"]
 
 
+def test_assemble_metadata_drops_none_stages() -> None:
+    from renquant_backtesting.wf_gate.pipelines import AssembleMetadataTask
+    ctx = WfGateContext(artifact_path=Path("/x"), strategy_config="x.json")
+    ctx.config_parity_result = {"passed": True}
+    # other stages left None
+    AssembleMetadataTask().run(ctx)
+    assert "config_parity" in ctx.wf_meta
+    assert "wf_result" not in ctx.wf_meta
+    assert "sanity" not in ctx.wf_meta
+
+
+def test_stamp_artifact_writes_metadata_into_json(tmp_path: Path) -> None:
+    import json
+    from renquant_backtesting.wf_gate.pipelines import (
+        AssembleMetadataTask, StampArtifactTask,
+    )
+    art = tmp_path / "art.json"
+    art.write_text(json.dumps({"kind": "panel_ltr_xgboost", "params": {}}))
+    ctx = WfGateContext(artifact_path=art, strategy_config="x.json")
+    ctx.artifact = {"kind": "panel_ltr_xgboost", "params": {}}
+    ctx.config_parity_result = {"passed": True}
+    AssembleMetadataTask().run(ctx)
+    StampArtifactTask().run(ctx)
+    after = json.loads(art.read_text())
+    assert "metadata" in after
+    assert after["metadata"]["wf_gate_metadata"]["config_parity"]["passed"] is True
+
+
+def test_emit_verdict_pass_when_all_stages_ok() -> None:
+    from renquant_backtesting.wf_gate.pipelines import EmitVerdictTask
+    ctx = WfGateContext(artifact_path=Path("/x"), strategy_config="x.json")
+    ctx.config_parity_result = {"passed": True}
+    ctx.recipe_usage = {"recipe_validated": True}
+    ctx.wf_result = {"passed": True}
+    EmitVerdictTask().run(ctx)
+    assert ctx.overall_pass is True
+
+
+def test_emit_verdict_fail_when_any_stage_fails() -> None:
+    from renquant_backtesting.wf_gate.pipelines import EmitVerdictTask
+    ctx = WfGateContext(artifact_path=Path("/x"), strategy_config="x.json")
+    ctx.config_parity_result = {"passed": True}
+    ctx.recipe_usage = {"recipe_validated": False}   # ← fails
+    EmitVerdictTask().run(ctx)
+    assert ctx.overall_pass is False
+
+
 def test_pipeline_run_on_empty_context_does_not_raise() -> None:
     """Scaffold-only: a no-config run should pass through all Jobs cleanly
     (the Tasks delegate to runner.py functions only when state is present)."""
