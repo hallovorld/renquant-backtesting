@@ -63,6 +63,58 @@ def test_trade_gate_also_skips_when_wf_skipped() -> None:
     assert TradeGateJob().should_skip(ctx) is True
 
 
+def test_resolve_manifest_reads_walkforward_manifest_path(tmp_path: Path) -> None:
+    import json
+    from renquant_backtesting.wf_gate.pipelines import ResolveManifestTask
+    manifest = tmp_path / "wf.json"
+    manifest.write_text("{}")
+    cfg = tmp_path / "strategy_config.shadow.json"
+    cfg.write_text(json.dumps({"walkforward": {"manifest_path": str(manifest)}}))
+    ctx = WfGateContext(
+        artifact_path=tmp_path / "art.json",
+        strategy_config="strategy_config.shadow.json",
+        strategy_dir=tmp_path,
+    )
+    ResolveManifestTask().run(ctx)
+    assert ctx.manifest_path == manifest
+
+
+def test_resolve_manifest_is_noop_when_already_set(tmp_path: Path) -> None:
+    """Honour DeriveConfigTask's already-resolved manifest_path."""
+    from renquant_backtesting.wf_gate.pipelines import ResolveManifestTask
+    pre = tmp_path / "preferred.json"
+    pre.write_text("{}")
+    ctx = WfGateContext(
+        artifact_path=Path("/x"), strategy_config="x.json",
+        strategy_dir=tmp_path, manifest_path=pre,
+    )
+    ResolveManifestTask().run(ctx)
+    assert ctx.manifest_path == pre
+
+
+def test_resolve_manifest_handles_missing_strategy_dir() -> None:
+    from renquant_backtesting.wf_gate.pipelines import ResolveManifestTask
+    ctx = WfGateContext(artifact_path=Path("/x"), strategy_config="x.json")
+    ResolveManifestTask().run(ctx)
+    assert ctx.manifest_path is None
+
+
+def test_resolve_manifest_relative_path_resolved_via_strategy_dir(tmp_path: Path) -> None:
+    import json
+    from renquant_backtesting.wf_gate.pipelines import ResolveManifestTask
+    sub = tmp_path / "artifacts" / "sim"; sub.mkdir(parents=True)
+    manifest = sub / "wf.json"; manifest.write_text("{}")
+    cfg = tmp_path / "x.json"
+    cfg.write_text(json.dumps({"walkforward": {"manifest_path": "artifacts/sim/wf.json"}}))
+    ctx = WfGateContext(
+        artifact_path=tmp_path / "art.json",
+        strategy_config="x.json",
+        strategy_dir=tmp_path,
+    )
+    ResolveManifestTask().run(ctx)
+    assert ctx.manifest_path == manifest
+
+
 def test_check_config_parity_skips_when_no_strategy_dir() -> None:
     from renquant_backtesting.wf_gate.pipelines import CheckConfigParityTask
     ctx = WfGateContext(

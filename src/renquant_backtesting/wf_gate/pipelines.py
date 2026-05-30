@@ -182,9 +182,34 @@ class ConfigJob(Job):
 # ─── Stage 2: RecipeMatchJob ─────────────────────────────────────────────────
 
 class ResolveManifestTask(Task):
-    """Select the same-recipe WF manifest from the config + sim search dir."""
+    """Resolve the WF manifest from the strategy config's ``walkforward.manifest_path``.
+
+    Phase 3d.3: when ``DeriveConfigTask`` already set ``ctx.manifest_path``
+    (via ``matching_manifest_for_recipe``), this Task is a no-op. Otherwise it
+    reads the active strategy config (the one ``ctx.strategy_config`` now
+    points at — possibly a derived prod-semantic one) and picks up
+    ``walkforward.manifest_path``, resolving relative URIs against
+    ``ctx.strategy_dir``.
+    """
 
     def run(self, ctx: WfGateContext) -> bool | None:
+        import json  # noqa: PLC0415
+        if ctx.manifest_path is not None:
+            return True
+        if ctx.strategy_dir is None:
+            return True
+        cfg_path = ctx.strategy_dir / ctx.strategy_config
+        if not cfg_path.exists():
+            return True
+        try:
+            cfg = json.loads(cfg_path.read_text())
+        except Exception:  # noqa: BLE001
+            return True
+        manifest_path = (cfg.get("walkforward") or {}).get("manifest_path")
+        if not manifest_path:
+            return True
+        p = Path(manifest_path)
+        ctx.manifest_path = p if p.is_absolute() else ctx.strategy_dir / p
         return True
 
 
