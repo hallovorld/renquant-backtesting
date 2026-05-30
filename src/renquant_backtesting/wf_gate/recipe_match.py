@@ -35,6 +35,15 @@ EXECUTION_ONLY_PARAM_KEYS: frozenset[str] = frozenset({
     "verbosity",
     "verbose",
     "silent",
+    # Sequence-model execution controls (Track A3 unblock 2026-05-30):
+    # epochs / early_stopping_patience / device are HOW-LONG / WHERE-to-train,
+    # not WHAT-model-to-train. A model trained for 8 epochs has the same
+    # statistical recipe as one trained for 4 epochs (just stopped earlier).
+    # Without this, an 8-epoch candidate vs 4-epoch manifest entries mismatch
+    # recipe fingerprints despite identical hyperparams.
+    "epochs",
+    "early_stopping_patience",
+    "device",
 })
 
 
