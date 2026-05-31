@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,10 +24,12 @@ class LatestRun:
     source: Path
     mtime: float
     kind: str
+    quality_score: int = 0
     metrics: dict[str, Any] = field(default_factory=dict)
     cuts: list[dict[str, Any]] = field(default_factory=list)
     regimes: list[dict[str, Any]] = field(default_factory=list)
     trade_counts: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
 
 def generate_latest_run_docs(
@@ -63,7 +67,14 @@ def find_latest_run(search_roots: list[Path]) -> LatestRun | None:
                 candidates.append(run)
     if not candidates:
         return None
-    return max(candidates, key=lambda run: (run.mtime, str(run.source)))
+    selected = max(candidates, key=_selection_key)
+    newest = max(candidates, key=lambda run: (run.mtime, str(run.source)))
+    if newest.source != selected.source and newest.mtime > selected.mtime:
+        selected.warnings.append(
+            "Newer lower-information artifact ignored: "
+            f"`{_display_path(newest.source)}` ({_run_quality_reason(newest)})."
+        )
+    return selected
 
 
 def _latest_run_from_path(path: Path) -> LatestRun | None:
@@ -78,7 +89,7 @@ def _latest_run_from_path(path: Path) -> LatestRun | None:
     if wf is not None:
         metrics = _wf_metrics(wf)
         if metrics:
-            return LatestRun(
+            run = LatestRun(
                 source=path,
                 mtime=path.stat().st_mtime,
                 kind="wf_gate",
@@ -87,16 +98,25 @@ def _latest_run_from_path(path: Path) -> LatestRun | None:
                 regimes=_wf_regimes(wf),
                 trade_counts=_trade_counts(wf),
             )
+            return _finalize_run(run)
 
     equity = _equity_metrics(payload)
     if equity:
-        return LatestRun(
+        trace = _trade_summary_for_equity_path(path)
+        for key in ("n_buys", "n_sells", "n_trades"):
+            if key not in equity and _is_number(trace.get(key)):
+                equity[key] = trace[key]
+        enriched_payload = dict(payload)
+        enriched_payload.update(equity)
+        run = LatestRun(
             source=path,
             mtime=path.stat().st_mtime,
             kind="equity_curve",
             metrics=equity,
-            cuts=[_equity_cut(payload)],
+            cuts=[_equity_cut(enriched_payload)],
+            trade_counts=_trade_counts_from_trace(trace),
         )
+        return _finalize_run(run)
     return None
 
 
@@ -158,6 +178,8 @@ def _equity_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "final_value",
         "annual_net_final_value",
         "n_trades",
+        "n_buys",
+        "n_sells",
     )
     return {key: payload.get(key) for key in keys if _is_number(payload.get(key))}
 
@@ -226,6 +248,172 @@ def _trade_counts(wf: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _trade_summary_for_equity_path(path: Path) -> dict[str, Any]:
+    """Load trade counts from sibling trade trace sidecars, when present."""
+    base = _trace_base(path)
+    if base is None:
+        return {}
+    out: dict[str, Any] = {}
+    trades_path = base.with_name(base.name + ".trades.json")
+    if trades_path.exists():
+        try:
+            rows = json.loads(trades_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            rows = None
+        if isinstance(rows, list):
+            buys = [
+                row for row in rows
+                if isinstance(row, dict) and row.get("action") == "buy"
+            ]
+            sells = [
+                row for row in rows
+                if isinstance(row, dict) and row.get("action") == "sell"
+            ]
+            out["n_buys"] = len(buys)
+            out["n_sells"] = len(sells)
+            out["n_trades"] = len(buys) + len(sells)
+            out["trade_buy_source_counts_total"] = _count_rows(buys, "source_job")
+            out["trade_sell_exit_reason_counts_total"] = _count_rows(sells, "exit_reason")
+            out["trade_buy_regime_counts_total"] = _count_rows(buys, "regime")
+            out["trade_sell_regime_counts_total"] = _count_rows(sells, "regime")
+
+    report_path = base.with_name(base.name + ".report.md")
+    if report_path.exists():
+        try:
+            report = report_path.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            report = ""
+        for key in ("n_buys", "n_sells"):
+            if key not in out:
+                value = _report_number(report, key)
+                if value is not None:
+                    out[key] = value
+        if "n_trades" not in out and "n_buys" in out and "n_sells" in out:
+            out["n_trades"] = int(out["n_buys"]) + int(out["n_sells"])
+        if "No trade events recorded." in report:
+            out.setdefault("n_buys", 0)
+            out.setdefault("n_sells", 0)
+            out.setdefault("n_trades", 0)
+    return out
+
+
+def _trace_base(path: Path) -> Path | None:
+    suffix = ".equity.json"
+    name = path.name
+    if not name.endswith(suffix):
+        return None
+    return path.with_name(name[: -len(suffix)])
+
+
+def _count_rows(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts = Counter(str(row.get(key)) for row in rows if row.get(key) not in (None, ""))
+    return dict(sorted(counts.items(), key=lambda item: str(item[0])))
+
+
+def _report_number(report: str, key: str) -> int | None:
+    match = re.search(rf"^- {re.escape(key)}:\s*([+-]?\d+)", report, flags=re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def _trade_counts_from_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: trace[key]
+        for key in (
+            "trade_buy_source_counts_total",
+            "trade_sell_exit_reason_counts_total",
+            "trade_buy_regime_counts_total",
+            "trade_sell_regime_counts_total",
+        )
+        if isinstance(trace.get(key), dict) and trace[key]
+    }
+
+
+def _finalize_run(run: LatestRun) -> LatestRun:
+    run.quality_score = _quality_score(run)
+    if _is_no_trade_run(run):
+        run.warnings.append(
+            "Selected artifact has no trade events; Sharpe and trade diagnostics "
+            "are expected to be sparse."
+        )
+    return run
+
+
+def _selection_key(run: LatestRun) -> tuple[int, float, str]:
+    return (run.quality_score, run.mtime, str(run.source))
+
+
+def _quality_score(run: LatestRun) -> int:
+    score = 400 if run.kind == "wf_gate" else 100
+    if _number(
+        run.metrics.get("wf_3cut_sharpe_mean"),
+        run.metrics.get("annual_net_sharpe"),
+        run.metrics.get("sharpe"),
+    ) is not None:
+        score += 120
+    if _number(
+        run.metrics.get("spy_sharpe_mean"),
+        run.metrics.get("spy_apy_mean"),
+    ) is not None:
+        score += 30
+    if run.regimes:
+        score += 30
+    if run.trade_counts:
+        score += 30
+    total_trades = _total_trades(run)
+    if total_trades is not None:
+        score += min(int(total_trades), 100)
+        if int(total_trades) == 0:
+            score -= 175
+    if _is_no_trade_run(run):
+        score -= 75
+    return score
+
+
+def _total_trades(run: LatestRun) -> int | None:
+    buys = run.metrics.get("n_buys")
+    sells = run.metrics.get("n_sells")
+    if _is_number(buys) and _is_number(sells):
+        return int(buys) + int(sells)
+    trades = run.metrics.get("n_trades")
+    if _is_number(trades):
+        return int(trades)
+    return None
+
+
+def _is_no_trade_run(run: LatestRun) -> bool:
+    total_trades = _total_trades(run)
+    if total_trades == 0:
+        return True
+    if total_trades is not None:
+        return False
+    sharpe = _number(
+        run.metrics.get("wf_3cut_sharpe_mean"),
+        run.metrics.get("annual_net_sharpe"),
+        run.metrics.get("sharpe"),
+    )
+    total_return = _number(
+        run.metrics.get("annual_net_total_return"),
+        run.metrics.get("total_return"),
+    )
+    apy = _number(run.metrics.get("annual_net_apy"), run.metrics.get("apy"))
+    return sharpe is None and total_return == 0.0 and apy == 0.0
+
+
+def _run_quality_reason(run: LatestRun) -> str:
+    reasons: list[str] = []
+    if _is_no_trade_run(run):
+        reasons.append("no trades")
+    if _number(
+        run.metrics.get("wf_3cut_sharpe_mean"),
+        run.metrics.get("annual_net_sharpe"),
+        run.metrics.get("sharpe"),
+    ) is None:
+        reasons.append("no finite Sharpe")
+    if not run.trade_counts:
+        reasons.append("no trade sidecar counts")
+    return ", ".join(reasons) or f"quality_score={run.quality_score}"
+
+
 def _write_svg_assets(run: LatestRun, assets_dir: Path) -> None:
     (assets_dir / "summary.svg").write_text(_summary_svg(run), encoding="utf-8")
     (assets_dir / "cuts.svg").write_text(_grouped_bar_svg(run.cuts, "Cut Performance"), encoding="utf-8")
@@ -238,15 +426,26 @@ def _dashboard_markdown(run: LatestRun, now: datetime) -> str:
     cuts = _cut_table(run.cuts)
     regimes = _regime_table(run.regimes)
     trades = _trade_table(run.trade_counts)
+    warnings = _warning_block(run.warnings)
     source = _display_path(run.source)
     generated = now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    return "\n".join([
+    lines = [
         "# Latest Simulation Run",
         "",
         f"Generated: `{generated}`",
         f"Source: `{source}`",
         f"Detected format: `{run.kind}`",
+        f"Selection quality score: `{run.quality_score}`",
         "",
+    ]
+    if warnings:
+        lines.extend([
+            "## Selection Notes",
+            "",
+            warnings,
+            "",
+        ])
+    lines.extend([
         "## Scoreboard",
         "",
         "![Summary](latest-run-assets/summary.svg)",
@@ -274,6 +473,7 @@ def _dashboard_markdown(run: LatestRun, now: datetime) -> str:
         "_Refresh with `make latest-report`._",
         "",
     ])
+    return "\n".join(lines)
 
 
 def _empty_dashboard(now: datetime) -> str:
@@ -325,14 +525,17 @@ def _metric_table(metrics: dict[str, Any]) -> str:
         "max_dd",
         "turnover_ratio",
         "final_value",
+        "n_buys",
+        "n_sells",
+        "n_trades",
     )
     rendered: set[str] = set()
     for key in preferred:
         if key in metrics:
-            rows.append(f"| `{key}` | {_fmt(metrics[key], percent='apy' in key)} |")
+            rows.append(f"| `{key}` | {_fmt(metrics[key], percent=_is_percent_metric(key))} |")
             rendered.add(key)
     for key in sorted(k for k in metrics if k not in rendered and not str(k).endswith("_reason")):
-        rows.append(f"| `{key}` | {_fmt(metrics[key], percent='apy' in key)} |")
+        rows.append(f"| `{key}` | {_fmt(metrics[key], percent=_is_percent_metric(str(key)))} |")
     if metrics.get("wf_reason"):
         rows.append(f"| `wf_reason` | {str(metrics['wf_reason'])} |")
     return "\n".join(rows)
@@ -375,6 +578,12 @@ def _trade_table(counts: dict[str, Any]) -> str:
     return "\n".join(rows)
 
 
+def _warning_block(warnings: list[str]) -> str:
+    if not warnings:
+        return ""
+    return "\n".join(f"- {warning}" for warning in warnings)
+
+
 def _summary_svg(run: LatestRun) -> str:
     metrics = run.metrics
     sharpe = _number(metrics.get("wf_3cut_sharpe_mean"), metrics.get("annual_net_sharpe"), metrics.get("sharpe"))
@@ -382,7 +591,12 @@ def _summary_svg(run: LatestRun) -> str:
     apy = _number(metrics.get("wf_3cut_apy_mean"), metrics.get("annual_net_apy"), metrics.get("apy"))
     spy_apy = _number(metrics.get("spy_apy_mean"))
     passed = metrics.get("passed")
-    status = "PASS" if passed is True else "FAIL" if passed is False else "LATEST"
+    status = (
+        "NO TRADES" if _is_no_trade_run(run)
+        else "PASS" if passed is True
+        else "FAIL" if passed is False
+        else "LATEST"
+    )
     return _svg_wrap(760, 260, "\n".join([
         '<rect x="0" y="0" width="760" height="260" fill="#f8fafc"/>',
         '<rect x="24" y="24" width="712" height="212" rx="8" fill="#ffffff" stroke="#d7dde8"/>',
@@ -511,6 +725,8 @@ def _fmt(value: Any, *, percent: bool = False) -> str:
         return "true"
     if value is False:
         return "false"
+    if isinstance(value, str):
+        return value.replace("|", "\\|")
     if not _is_number(value):
         return "n/a"
     v = float(value)
@@ -519,6 +735,17 @@ def _fmt(value: Any, *, percent: bool = False) -> str:
     if abs(v) >= 100:
         return f"{v:,.0f}"
     return f"{v:.3f}"
+
+
+def _is_percent_metric(key: str) -> bool:
+    return key in {
+        "apy",
+        "annual_net_apy",
+        "event_level_apy",
+        "wf_3cut_apy_mean",
+        "spy_apy_mean",
+        "strategy_minus_spy_apy_mean",
+    }
 
 
 def _esc(value: str) -> str:

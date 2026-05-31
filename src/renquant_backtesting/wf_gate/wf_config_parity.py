@@ -50,6 +50,9 @@ IGNORED_KEYS = {
     "trained_date",
 }
 
+TORCH_ARTIFACT_SUFFIXES = {".pt", ".pth", ".ckpt"}
+PATCHTST_KINDS = {"hf_patchtst", "patchtst", "patchtst_panel"}
+
 
 def _get_path(obj: dict[str, Any], dotted: str) -> Any:
     cur: Any = obj
@@ -122,6 +125,41 @@ def _configured_artifact_path(config: dict[str, Any], strategy_dir: Path) -> Pat
     return _resolve_strategy_path(panel.get("artifact_path"), strategy_dir)
 
 
+def _scorer_kind_artifact_issues(
+    config: dict[str, Any],
+    *,
+    strategy_dir: Path,
+    label: str,
+) -> list[dict[str, Any]]:
+    panel = (config.get("ranking", {}) or {}).get("panel_scoring", {}) or {}
+    kind = _normalize_kind(panel.get("kind"))
+    path = _configured_artifact_path(config, strategy_dir)
+    if not kind or path is None:
+        return []
+
+    suffix = path.suffix.lower()
+    issue_path = f"{label}.ranking.panel_scoring.artifact_path"
+    if kind == "xgb" and suffix in TORCH_ARTIFACT_SUFFIXES:
+        return [{
+            "path": issue_path,
+            "kind": kind,
+            "artifact_path": str(path),
+            "reason": "xgb scorer kind cannot load a PyTorch checkpoint artifact",
+        }]
+    if (
+        kind in PATCHTST_KINDS
+        and suffix == ".json"
+        and "patchtst" not in path.name.lower()
+    ):
+        return [{
+            "path": issue_path,
+            "kind": kind,
+            "artifact_path": str(path),
+            "reason": "PatchTST scorer kind should not point at a non-PatchTST JSON artifact",
+        }]
+    return []
+
+
 def _feature_contract_issues(
     *,
     prod_config: dict[str, Any],
@@ -158,7 +196,15 @@ def _feature_contract_issues(
         if not path.exists():
             issues.append({"path": "walkforward.artifact", "reason": f"missing {path}"})
             continue
-        cols = _artifact_feature_cols(path)
+        try:
+            cols = _artifact_feature_cols(path)
+        except Exception as exc:  # noqa: BLE001
+            issues.append({
+                "path": "artifact.feature_cols",
+                "artifact": str(path),
+                "reason": f"failed to read feature contract: {exc}",
+            })
+            continue
         if cols != prod_cols:
             issues.append({
                 "path": "artifact.feature_cols",
@@ -194,6 +240,17 @@ def evaluate_wf_config_parity(
                 "prod": prod_value,
                 "wf": wf_value,
             })
+
+    issues.extend(_scorer_kind_artifact_issues(
+        prod,
+        strategy_dir=strategy_dir,
+        label="prod_config",
+    ))
+    issues.extend(_scorer_kind_artifact_issues(
+        wf,
+        strategy_dir=strategy_dir,
+        label="wf_config",
+    ))
 
     issues.extend(_feature_contract_issues(
         prod_config=prod,
