@@ -36,3 +36,14 @@ decision trace, gross/tax/net decomposition, and config/data/model fingerprints.
 make test
 make doctor
 ```
+
+## PR Review Protocol
+
+- Treat review findings as first-class PR artifacts. When a review finds a
+  blocking or material issue, leave a PR comment that states the issue, risk,
+  and intended fix before or alongside pushing code.
+- If you directly patch a reviewed PR branch, add a follow-up PR comment with
+  the fix commit, tests run, and merge decision. Do not leave the rationale
+  only in chat or local notes.
+- For paired cross-repo PRs, comment on each affected PR with the matching
+  upstream/downstream commit and verification evidence before merging.
