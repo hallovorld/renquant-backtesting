@@ -114,3 +114,48 @@ def test_latest_run_prefers_informative_trade_run_over_newer_empty_equity(
     assert "`n_buys` | 1.000" in text
     assert "`trade_buy_source_counts_total.JointPortfolioQPJob` | 1.000" in text
     assert "2026.equity.json" in text
+
+
+def test_latest_run_keeps_newer_informative_equity_over_older_wf_gate(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    old = root / "prod"
+    new = root / "20260530T220958Z"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+
+    old_wf = old / "panel-ltr.json"
+    old_wf.write_text(json.dumps({
+        "metadata": {
+            "wf_gate_metadata": {
+                "passed": True,
+                "wf_3cut_sharpe_mean": 0.8,
+                "spy_sharpe_mean": 0.5,
+                "wf_3cut_apy_mean": 0.12,
+            },
+        },
+    }), encoding="utf-8")
+
+    new_equity = new / "2026.equity.json"
+    new_equity.write_text(json.dumps({
+        "start": "2026-01-01",
+        "end": "2026-12-31",
+        "apy": 0.08,
+        "sharpe": 0.60,
+        "total_return": 0.08,
+        "final_value": 108000.0,
+        "equity": {"2026-01-01": 100000.0, "2026-12-31": 108000.0},
+    }), encoding="utf-8")
+    (new / "2026.trades.json").write_text(json.dumps([
+        {"action": "buy", "source_job": "JointPortfolioQPJob", "regime": "BULL"},
+        {"action": "sell", "exit_reason": "qp_sell", "regime": "BULL"},
+    ]), encoding="utf-8")
+
+    os.utime(old_wf, (100, 100))
+    os.utime(new_equity, (200, 200))
+
+    latest = find_latest_run([root])
+    assert latest is not None
+    assert latest.source == new_equity
+    assert latest.warnings == []
