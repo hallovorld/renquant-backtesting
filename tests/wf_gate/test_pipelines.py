@@ -38,10 +38,10 @@ def test_each_job_decomposes_into_named_tasks() -> None:
         "ResolveManifestTask", "ValidateRecipeMatchTask"]
     assert [type(t).__name__ for t in WfSimJob().tasks] == ["RunWfSimTask"]
     assert [type(t).__name__ for t in TradeGateJob().tasks] == [
-        "RunTradeContractTask", "RunTradeMonotonicityTask"]
+        "RunTradeContractTask", "RunTradeMonotonicityTask", "RunAlphaEconomicsTask"]
     assert [type(t).__name__ for t in SanityJob().tasks] == ["RunSanityBatteryTask"]
     assert [type(t).__name__ for t in StampJob().tasks] == [
-        "AssembleMetadataTask", "StampArtifactTask", "EmitVerdictTask"]
+        "EmitVerdictTask", "AssembleMetadataTask", "StampArtifactTask"]
 
 
 @pytest.mark.parametrize("flag,job", [
@@ -181,6 +181,10 @@ def test_emit_verdict_pass_when_all_stages_ok() -> None:
     ctx.config_parity_result = {"passed": True}
     ctx.recipe_usage = {"recipe_validated": True}
     ctx.wf_result = {"passed": True}
+    ctx.trade_contract_result = {"passed": True}
+    ctx.trade_gate_result = {"passed": True}
+    ctx.alpha_economics_result = {"passed": True}
+    ctx.sanity_result = {"passed": True}
     EmitVerdictTask().run(ctx)
     assert ctx.overall_pass is True
 
