@@ -67,12 +67,12 @@ def find_latest_run(search_roots: list[Path]) -> LatestRun | None:
                 candidates.append(run)
     if not candidates:
         return None
-    selected = max(candidates, key=_selection_key)
-    newest = max(candidates, key=lambda run: (run.mtime, str(run.source)))
-    if newest.source != selected.source and newest.mtime > selected.mtime:
+    selected, ignored_newest = _select_latest_run(candidates)
+    if ignored_newest is not None:
         selected.warnings.append(
             "Newer lower-information artifact ignored: "
-            f"`{_display_path(newest.source)}` ({_run_quality_reason(newest)})."
+            f"`{_display_path(ignored_newest.source)}` "
+            f"({_run_quality_reason(ignored_newest)})."
         )
     return selected
 
@@ -342,6 +342,20 @@ def _selection_key(run: LatestRun) -> tuple[int, float, str]:
     return (run.quality_score, run.mtime, str(run.source))
 
 
+def _select_latest_run(candidates: list[LatestRun]) -> tuple[LatestRun, LatestRun | None]:
+    newest = max(candidates, key=lambda run: (run.mtime, str(run.source)))
+    if not _is_lower_information_run(newest):
+        return newest, None
+
+    alternatives = [
+        run for run in candidates
+        if run.source != newest.source and run.quality_score > newest.quality_score
+    ]
+    if not alternatives:
+        return newest, None
+    return max(alternatives, key=_selection_key), newest
+
+
 def _quality_score(run: LatestRun) -> int:
     score = 400 if run.kind == "wf_gate" else 100
     if _number(
@@ -378,6 +392,22 @@ def _total_trades(run: LatestRun) -> int | None:
     if _is_number(trades):
         return int(trades)
     return None
+
+
+def _is_lower_information_run(run: LatestRun) -> bool:
+    if _is_no_trade_run(run):
+        return True
+    has_performance_metric = _number(
+        run.metrics.get("wf_3cut_sharpe_mean"),
+        run.metrics.get("annual_net_sharpe"),
+        run.metrics.get("sharpe"),
+        run.metrics.get("wf_3cut_apy_mean"),
+        run.metrics.get("annual_net_apy"),
+        run.metrics.get("apy"),
+        run.metrics.get("annual_net_total_return"),
+        run.metrics.get("total_return"),
+    ) is not None
+    return not has_performance_metric and not run.regimes and not run.trade_counts
 
 
 def _is_no_trade_run(run: LatestRun) -> bool:
