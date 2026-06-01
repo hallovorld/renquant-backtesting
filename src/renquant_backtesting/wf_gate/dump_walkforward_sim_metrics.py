@@ -67,7 +67,7 @@ def main() -> None:
     config["backtest_end"]   = args.end
     config["persistence"] = {"enabled": False}
 
-    from kernel.data import fetch_ohlcv          # noqa: PLC0415
+    from renquant_pipeline.kernel.data import fetch_ohlcv          # noqa: PLC0415
     from sim.runner import run_backtest          # noqa: PLC0415
     from kernel.risk_metrics import (            # noqa: PLC0415
         compute_risk_metrics,
