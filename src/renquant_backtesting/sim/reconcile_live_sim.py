@@ -22,7 +22,7 @@ STRATEGY_DIR = REPO_ROOT / "backtesting" / "renquant_104"
 if str(STRATEGY_DIR) not in sys.path:
     sys.path.insert(0, str(STRATEGY_DIR))
 
-from kernel.reconciliation import (  # noqa: E402
+from renquant_backtesting.reconciliation import (  # noqa: E402
     compute_decision_divergence,
     compute_rolling_ic,
     compute_slippage,
@@ -31,7 +31,7 @@ from kernel.reconciliation import (  # noqa: E402
     load_sim_decisions,
     replay_through_sim,
 )
-from kernel.reconciliation.live_sim_reconcile import (  # noqa: E402
+from renquant_backtesting.reconciliation.live_sim_reconcile import (  # noqa: E402
     build_per_day_breakdown,
 )
 
