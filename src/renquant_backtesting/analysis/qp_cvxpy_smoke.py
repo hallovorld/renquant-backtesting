@@ -23,7 +23,7 @@ import cvxpy as cp
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "backtesting" / "renquant_104"))
-from kernel.portfolio_qp.qp_solver import solve_portfolio_qp  # noqa: E402
+from renquant_pipeline.kernel.portfolio_qp.qp_solver import solve_portfolio_qp  # noqa: E402
 
 
 def cvxpy_solve(w_current, mu, Sigma, *,
