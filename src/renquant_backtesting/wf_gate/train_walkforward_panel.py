@@ -142,7 +142,7 @@ def build_retrain_entry(cutoff: pd.Timestamp, trained_dt: datetime,
     matches the production training label `fwd_60d_excess` in
     train_production_model.py.
     """
-    from kernel.walk_forward import RetrainEntry  # noqa: PLC0415
+    from renquant_backtesting.walk_forward.loader import RetrainEntry  # noqa: PLC0415
     return RetrainEntry(
         cutoff_date=cutoff,
         trained_date=pd.Timestamp(trained_dt),
@@ -424,7 +424,7 @@ def main() -> None:
         return
 
     # Lazy imports — only when actually training.
-    from kernel.walk_forward import WalkForwardManifest, write_manifest  # noqa: PLC0415
+    from renquant_backtesting.walk_forward.manifest import WalkForwardManifest, write_manifest  # noqa: PLC0415
 
     entries, failed = train_cutoffs(retrain_dates, args)
 

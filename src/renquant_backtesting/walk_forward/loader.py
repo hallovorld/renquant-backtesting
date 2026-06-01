@@ -34,10 +34,10 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from kernel.walk_forward.leakage_guard import assert_no_leakage
+from renquant_pipeline.kernel.walk_forward.leakage_guard import assert_no_leakage
 
 if TYPE_CHECKING:  # pragma: no cover
-    from kernel.panel_pipeline.panel_scorer import PanelScorer
+    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer
 
 
 @dataclass(frozen=True)
@@ -151,7 +151,7 @@ def _fingerprints_match(expected: str | None, actual: str | None) -> bool:
 
 def _scorer_fingerprints_from_payload(payload: dict) -> list[str]:
     """Return stable scorer identities stamped in a local artifact JSON."""
-    from kernel.panel_pipeline.panel_scorer import model_content_sha256  # noqa: PLC0415
+    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import model_content_sha256  # noqa: PLC0415
 
     out: list[str] = []
     try:
@@ -315,7 +315,7 @@ class WalkForwardModelLoader:
         chosen = self.entry_as_of(today)
         if chosen.artifact_uri in self._cache:
             return self._cache[chosen.artifact_uri]
-        from kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
+        from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
         scorer = PanelScorer.load(chosen.artifact_uri)
         self._cache[chosen.artifact_uri] = scorer
         return scorer
