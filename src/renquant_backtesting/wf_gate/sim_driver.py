@@ -14,11 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PACKAGE_ROOT))
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -34,6 +35,8 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--strategy-config-name", default="strategy_config.json",
                    help="Config filename (default: strategy_config.json)")
+    p.add_argument("--repo-root", default=os.environ.get("RENQUANT_REPO_ROOT"),
+                   help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
     p.add_argument("--start", default=SIM_START)
     p.add_argument("--end",   default=SIM_END)
     p.add_argument("--compare-to", default="strategy_config.golden.json",
@@ -68,7 +71,9 @@ def main() -> None:
                         "not have a strict expected-return μ contract.")
     args = p.parse_args()
 
-    strategy_dir = REPO_ROOT / "backtesting" / STRATEGY
+    repo_root = Path(args.repo_root).expanduser().resolve() if args.repo_root else Path.cwd().resolve()
+    sys.path.insert(0, str(repo_root))
+    strategy_dir = repo_root / "backtesting" / STRATEGY
     sys.path.insert(0, str(strategy_dir))
 
     cfg_path = strategy_dir / args.strategy_config_name
@@ -104,7 +109,7 @@ def main() -> None:
                and not args.strategy_config_name.startswith("strategy_config.sim_baseline"))
     if is_side and not args.skip_preflight:
         import subprocess
-        validator = REPO_ROOT / "scripts" / "validate_sim_config_active.py"
+        validator = repo_root / "scripts" / "validate_sim_config_active.py"
         if validator.exists():
             log.info("preflight: static-path validator vs %s", SIDE_CFG_BASELINE)
             r = subprocess.run(
