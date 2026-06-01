@@ -1655,7 +1655,7 @@ def _score_manifest_sanity(
     """Score validation rows with the same point-in-time manifest contract as WF."""
     import numpy as _np  # noqa: PLC0415
     from kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
-    from kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
+    from renquant_pipeline.kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
     from renquant_backtesting.walk_forward.loader import WalkForwardModelLoader  # noqa: PLC0415
 
     recipe_usage = _manifest_recipe_usage(manifest_path, candidate_artifact_path)
@@ -1879,7 +1879,7 @@ def run_sanity_battery(
             # Panel-LTR stores booster in artifact under booster_b64 or similar
             # For sanity we just need PREDICTIONS, so use the saved model
             from kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
-            from kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
+            from renquant_pipeline.kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
             scorer = PanelScorer.load(artifact_path)
             X = transform_feature_frame(
                 val,
