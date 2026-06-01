@@ -13,13 +13,30 @@ import argparse
 import copy
 import datetime as dt
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from wf_config_parity import evaluate_wf_config_parity
+try:
+    from .wf_config_parity import evaluate_wf_config_parity
+except ImportError:
+    from wf_config_parity import evaluate_wf_config_parity
 
 
-REPO = Path(__file__).resolve().parent.parent
+def _resolve_repo_root() -> Path:
+    env_root = os.environ.get("RENQUANT_REPO_ROOT")
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.extend([Path.cwd(), *Path(__file__).resolve().parents])
+    for candidate in candidates:
+        root = candidate.expanduser().resolve()
+        if (root / "backtesting" / "renquant_104").is_dir():
+            return root
+    return Path(env_root).expanduser().resolve() if env_root else Path.cwd().resolve()
+
+
+REPO = _resolve_repo_root()
 STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
 
 EXPERIMENT_OVERRIDE_PATHS = (

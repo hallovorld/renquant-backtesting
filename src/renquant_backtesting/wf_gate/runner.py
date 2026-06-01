@@ -41,28 +41,49 @@ import hashlib
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
 import re
 import pandas as pd
 
-from qp_contracts import validate_qp_contract_config
-from trade_contracts import evaluate_trade_contract
-from trade_monotonicity import evaluate_trade_monotonicity
-from wf_config_parity import evaluate_wf_config_parity
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("wf-gate")
 
-REPO = Path(__file__).resolve().parent.parent
+def _resolve_repo_root() -> Path:
+    env_root = os.environ.get("RENQUANT_REPO_ROOT")
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.extend([Path.cwd(), *Path(__file__).resolve().parents])
+    for candidate in candidates:
+        root = candidate.expanduser().resolve()
+        if (root / "backtesting" / "renquant_104").is_dir():
+            return root
+    return Path(env_root).expanduser().resolve() if env_root else Path.cwd().resolve()
+
+
+REPO = _resolve_repo_root()
 GATE_VERSION = 2
 STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
-for _p in (REPO, STRATEGY_DIR):
+SCRIPTS_DIR = REPO / "scripts"
+for _p in (REPO, SCRIPTS_DIR, STRATEGY_DIR):
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)
 PYTHON = sys.executable
+
+try:  # package import path: python -m renquant_backtesting.wf_gate
+    from .qp_contracts import validate_qp_contract_config
+    from .trade_contracts import evaluate_trade_contract
+    from .trade_monotonicity import evaluate_trade_monotonicity
+    from .wf_config_parity import evaluate_wf_config_parity
+except ImportError:  # transitional fallback to umbrella scripts/ helpers
+    from qp_contracts import validate_qp_contract_config
+    from trade_contracts import evaluate_trade_contract
+    from trade_monotonicity import evaluate_trade_monotonicity
+    from wf_config_parity import evaluate_wf_config_parity
 CUTS = [
     ("2024-01-02", "2024-12-31"),
     ("2024-07-01", "2025-06-30"),
@@ -2230,7 +2251,10 @@ def main():
     log.info("=" * 60)
 
     if args.derive_config_from_prod:
-        from wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
+        try:
+            from .wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
+        except ImportError:
+            from wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
 
         base_cfg_path = STRATEGY_DIR / args.strategy_config
         if not base_cfg_path.exists():

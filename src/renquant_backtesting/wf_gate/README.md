@@ -1,10 +1,10 @@
 # `renquant_backtesting` Phase 1 — copy from umbrella `scripts/`
 
-This package holds **byte-for-byte copies** from the umbrella's `scripts/`
+This package holds the backtesting-owned copies from the umbrella's `scripts/`
 directory, organized by subject per placement-by-owner (renquant-backtesting
 owns sim / WF / forensics / LEAN export / analysis). The umbrella files remain
-**authoritative and running**; nothing in production references the copies
-here yet.
+available as rollback shims while production wrappers move one path at a time
+to the package entry points.
 
 ## What's in each subdir
 
@@ -17,7 +17,7 @@ here yet.
 
 ## Phase plan
 
-1. ✅ **Phase 1 — copy** (2026-05-30): byte-for-byte; nothing live points here.
+1. ✅ **Phase 1 — copy** (2026-05-30): byte-for-byte starting point.
 2. ⏳ **Phase 2 — refactor**: split each module's procedural flow into
    Task/Job/Pipeline per §1c (especially `wf_gate/runner.py`'s 5 stages).
 3. ⏳ **Phase 3 — kernel deps**: lazy `kernel.*` imports currently still come
@@ -25,11 +25,13 @@ here yet.
    them as cross-repo deps.
 4. ⏳ **Phase 4 — smoke**: run each entry point through umbrella path AND the
    package path on a known fixture, assert byte-equivalent output.
-5. ⏳ **Phase 5 — flip callers**: cron / preflight / orchestrator point at
-   this package; umbrella scripts become thin shims that forward here.
+5. 🚧 **Phase 5 — flip callers**: cron / preflight / orchestrator point at
+   package entry points with umbrella fallback. `python -m
+   renquant_backtesting.wf_gate` is now wrapper-ready when
+   `RENQUANT_REPO_ROOT` points at the umbrella RenQuant checkout.
 
 ## How callers should think about this today
 
-| If you need to run it today | use the umbrella script | `python scripts/<name>.py …` |
-| If you are reviewing where it SHOULD live | look here | `renquant_backtesting.<subdir>.<name>` |
+| If you need the WF gate wrapper target | use the package entry | `RENQUANT_REPO_ROOT=/path/to/RenQuant python -m renquant_backtesting.wf_gate …` |
+| If you need immediate rollback | use the umbrella script | `python scripts/run_wf_gate.py …` |
 | If you want to refactor / test cleanly | edit here, smoke-test vs umbrella, then flip caller | see Phase 4-5 |
