@@ -1,9 +1,8 @@
-"""WF gate + sim ledger — parallel copy in renquant-backtesting.
+"""WF gate + sim ledger owned by renquant-backtesting.
 
 The three modules in this package were lifted byte-for-byte from the umbrella's
 ``scripts/`` directory on 2026-05-30 (see ``README.md`` for status). The umbrella
-copies remain authoritative and live; this package is a staging area for the
-Task/Job/Pipeline refactor (§1c) that will land in a follow-up session.
+copies remain rollback targets while wrappers move to package entry points.
 
 Modules
 -------
@@ -11,8 +10,7 @@ Modules
 ``sim_driver`` — ``scripts/run_sim_104.py`` (304 lines)
 ``sim_ledger`` — ``scripts/sim_trade_ledger.py`` (1205 lines)
 
-Do **not** point production cron / preflight / orchestrator at this package
-yet — the umbrella scripts are still the live path. Once the refactor lands
-and an integration smoke proves byte-equivalence, callers can be flipped one
-at a time.
+``python -m renquant_backtesting.wf_gate`` is the multirepo wrapper target for
+the WF gate when ``RENQUANT_REPO_ROOT`` points at the umbrella checkout. The
+larger Task/Job/Pipeline refactor still proceeds incrementally.
 """
