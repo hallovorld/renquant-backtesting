@@ -269,7 +269,7 @@ def _compute_spy_benchmark(start_iso: str, end_iso: str) -> tuple:
     if str(REPO / "backtesting" / "renquant_104") not in _sys.path:
         _sys.path.insert(0, str(REPO / "backtesting" / "renquant_104"))
     try:
-        from kernel.data import fetch_ohlcv  # noqa: PLC0415
+        from renquant_pipeline.kernel.data import fetch_ohlcv  # noqa: PLC0415
         from kernel.risk_metrics import sharpe_ratio, max_drawdown  # noqa: PLC0415
         df = fetch_ohlcv("SPY")
         df = df.loc[start_iso:end_iso]

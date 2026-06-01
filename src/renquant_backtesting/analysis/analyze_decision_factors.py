@@ -233,7 +233,7 @@ def main() -> None:
     # Route through get_connection so ensure_schema runs (creates
     # ticker_forward_returns if the DB was frozen before Plan AA).
     sys.path.insert(0, str(REPO_ROOT / "backtesting" / "renquant_104"))
-    from kernel.persistence import get_connection  # noqa: PLC0415
+    from renquant_pipeline.kernel.persistence import get_connection  # noqa: PLC0415
     conn = get_connection({"persistence": {"enabled": True, "db_path": str(db_path)}})
     if conn is None:
         print(f"ERROR: failed to open {db_path}", file=sys.stderr)

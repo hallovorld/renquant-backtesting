@@ -442,7 +442,7 @@ def build_price_frame(config: dict, result: dict) -> pd.DataFrame:
 	if str(strategy_dir) not in sys.path:
 		sys.path.insert(0, str(strategy_dir))
 
-	from kernel.data import fetch_ohlcv
+	from renquant_pipeline.kernel.data import fetch_ohlcv
 	price_df = fetch_ohlcv(symbol, start=period_start, end=period_end, provider=provider).copy()
 	price_df["buy_signal"] = False
 	price_df["sell_signal"] = False

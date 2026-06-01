@@ -132,7 +132,7 @@ def main() -> None:
             # defaulted to data/runs.db which has 0 live rows after broker
             # isolation switch — silently producing empty portfolio_daily_metrics.
             sys.path.insert(0, str(REPO_ROOT / "backtesting" / args.strategy_dir))
-            from kernel.state_paths import runs_db_path  # noqa: PLC0415
+            from renquant_pipeline.kernel.state_paths import runs_db_path  # noqa: PLC0415
             args.db = str(runs_db_path("data/runs.db", args.broker).relative_to(REPO_ROOT)
                           if runs_db_path("data/runs.db", args.broker).is_absolute()
                           else runs_db_path("data/runs.db", args.broker))
@@ -141,7 +141,7 @@ def main() -> None:
     if str(strategy_dir) not in sys.path:
         sys.path.insert(0, str(strategy_dir))
 
-    from kernel.persistence import get_connection, record_portfolio_metrics  # noqa: PLC0415
+    from renquant_pipeline.kernel.persistence import get_connection, record_portfolio_metrics  # noqa: PLC0415
     import pandas as pd  # noqa: PLC0415
 
     db_path = REPO_ROOT / args.db
