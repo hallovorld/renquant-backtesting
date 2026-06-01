@@ -27,19 +27,31 @@ _UMBRELLA = Path(__file__).resolve().parents[3] / "RenQuant" / "backtesting" / \
             "renquant_104" / "kernel" / "walk_forward"
 
 
+#: Files intentionally diverged from the umbrella post-Phase-5 retirement.
+#: ``loader.py`` + ``manifest.py`` now use canonical imports
+#: (``renquant_pipeline.kernel.*`` / ``.loader``) so the package can be
+#: consumed standalone without ``kernel.*`` on sys.path. The umbrella copies
+#: still use the umbrella-relative ``from kernel.walk_forward...`` form
+#: because the umbrella's own kernel package resolves that form natively.
+_PHASE5_DIVERGED = {"__init__.py", "loader.py", "manifest.py"}
+
+
 def test_byte_equivalent_to_umbrella() -> None:
-    """Phase-1 invariant: every .py is byte-for-byte identical to the umbrella."""
+    """Phase-1 invariant: every NON-Phase-5-diverged .py is byte-for-byte
+    identical to the umbrella."""
     if not _UMBRELLA.exists():
         pytest.skip(f"umbrella not at {_UMBRELLA}")
     seen = 0
     for f in sorted(_BT_PKG.glob("*.py")):
+        if f.name in _PHASE5_DIVERGED:
+            continue
         u = _UMBRELLA / f.name
         if not u.exists():
             continue
         assert hashlib.md5(f.read_bytes()).hexdigest() == hashlib.md5(u.read_bytes()).hexdigest(), \
             f"byte-mismatch with umbrella: {f.name}"
         seen += 1
-    assert seen >= 6, "expected at least 6 lifted files"
+    assert seen >= 4, "expected at least 4 lifted (non-Phase-5) files"
 
 
 def test_all_expected_files_present() -> None:
@@ -74,11 +86,17 @@ def _try_import(modname: str) -> bool:
     "renquant_backtesting.walk_forward.gmm_guard",
 ])
 def test_submodule_import_when_umbrella_kernel_unavailable(name: str) -> None:
-    """Documents the Phase 1 limitation: each submodule either imports cleanly
-    (no kernel.* deps) OR raises a known ModuleNotFoundError('kernel') we'll
-    fix when Phase 5 rewrites callers. Either way is recorded; an unexpected
-    exception fails the test loudly."""
+    """Documents the Phase 1 limitation for guards that haven't been
+    Phase-5-divergedyet: each submodule either imports cleanly (no
+    kernel.* deps) OR raises a known ModuleNotFoundError('kernel') we'll
+    fix as the remaining guards get cleaned up. Either way is recorded;
+    an unexpected exception fails the test loudly.
+
+    ``loader.py`` + ``manifest.py`` (this PR) MUST import cleanly — they
+    use canonical ``renquant_pipeline.kernel.*`` paths. The 4 guard
+    modules still tolerate the umbrella-relative form pending follow-up."""
     ok = _try_import(name)
-    # No assertion — the call is itself the test. If it raises something other
-    # than ModuleNotFoundError('kernel'), _try_import re-raises and pytest fails.
-    assert ok in (True, False)
+    if name.endswith(("loader", "manifest")):
+        assert ok is True, f"{name} failed to import standalone post-Phase-5"
+    else:
+        assert ok in (True, False)

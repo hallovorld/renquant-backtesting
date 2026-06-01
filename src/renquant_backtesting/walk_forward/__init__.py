@@ -23,11 +23,11 @@ from renquant_pipeline.kernel.walk_forward.gmm_guard import (
 )
 from renquant_pipeline.kernel.walk_forward.leakage_guard import assert_no_leakage
 from renquant_pipeline.kernel.walk_forward.lean_guard import assert_lean_panel_no_leakage
-from kernel.walk_forward.loader import (
+from renquant_backtesting.walk_forward.loader import (
     RetrainEntry,
     WalkForwardModelLoader,
 )
-from kernel.walk_forward.manifest import (
+from renquant_backtesting.walk_forward.manifest import (
     WalkForwardManifest,
     read_manifest,
     write_manifest,

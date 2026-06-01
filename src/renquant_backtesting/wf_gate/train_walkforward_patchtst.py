@@ -129,7 +129,7 @@ def read_contract(model_path: Path) -> dict:
 
 def build_entry(cutoff: pd.Timestamp, model_path: Path,
                 cal_path: Path | None, label: str | None):
-    from kernel.walk_forward import RetrainEntry  # noqa: PLC0415
+    from renquant_backtesting.walk_forward.loader import RetrainEntry  # noqa: PLC0415
     contract = read_contract(model_path)
     return RetrainEntry(
         cutoff_date=cutoff,
@@ -278,7 +278,7 @@ def main() -> None:
         print(f"Manifest output: {args.manifest_output}")
         return
 
-    from kernel.walk_forward import WalkForwardManifest, write_manifest  # noqa: PLC0415
+    from renquant_backtesting.walk_forward.manifest import WalkForwardManifest, write_manifest  # noqa: PLC0415
     entries, failed = train_cutoffs(args, dates)
     manifest = WalkForwardManifest(
         cadence_days=int(args.cadence_days),

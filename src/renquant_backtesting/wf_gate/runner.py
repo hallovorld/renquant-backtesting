@@ -1656,7 +1656,7 @@ def _score_manifest_sanity(
     import numpy as _np  # noqa: PLC0415
     from kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
     from kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
-    from kernel.walk_forward.loader import WalkForwardModelLoader  # noqa: PLC0415
+    from renquant_backtesting.walk_forward.loader import WalkForwardModelLoader  # noqa: PLC0415
 
     recipe_usage = _manifest_recipe_usage(manifest_path, candidate_artifact_path)
     if not recipe_usage.get("recipe_validated"):

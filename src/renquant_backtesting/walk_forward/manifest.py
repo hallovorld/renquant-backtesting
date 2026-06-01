@@ -25,7 +25,7 @@ from typing import Any
 
 import pandas as pd
 
-from kernel.walk_forward.loader import RetrainEntry
+from .loader import RetrainEntry
 
 
 @dataclass
