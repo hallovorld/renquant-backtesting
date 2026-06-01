@@ -136,7 +136,7 @@ def main() -> None:
     elif args.sim_db_path:
         config.setdefault("persistence", {})["sim_db_path"] = args.sim_db_path
 
-    from kernel.data import fetch_ohlcv  # noqa: PLC0415
+    from renquant_pipeline.kernel.data import fetch_ohlcv  # noqa: PLC0415
     from sim.runner import run_backtest   # noqa: PLC0415
 
     # Load benchmark + sector ETFs
