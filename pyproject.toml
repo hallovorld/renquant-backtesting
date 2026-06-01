@@ -9,7 +9,7 @@ description = "Backtesting and LEAN assembly workflows for RenQuant."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "renquant-common>=0.6,<0.7",
+  "renquant-common>=0.7,<0.8",
   "renquant-pipeline>=0.3,<0.4",
 ]
 
