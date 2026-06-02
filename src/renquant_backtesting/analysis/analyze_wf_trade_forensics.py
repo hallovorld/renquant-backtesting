@@ -30,7 +30,7 @@ STRATEGY_DIR = REPO_ROOT / "backtesting" / "renquant_104"
 if str(STRATEGY_DIR) not in sys.path:
     sys.path.insert(0, str(STRATEGY_DIR))
 
-from kernel.meta_label.triple_barrier import apply_triple_barrier  # noqa: E402
+from renquant_backtesting.meta_label.triple_barrier import apply_triple_barrier  # noqa: E402
 
 
 def _as_float(value: Any, default: float = float("nan")) -> float:

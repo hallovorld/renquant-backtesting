@@ -20,6 +20,10 @@ _UMBRELLA = Path(__file__).resolve().parents[3] / "RenQuant" / "backtesting" / \
 
 
 _PHASE5_IMPORT_REWRITES = {
+    "from kernel.exit_types import META_LABEL_VETO_ELIGIBLE as _PATH_RULE_EXITS":
+        "from renquant_pipeline.kernel.exit_types import META_LABEL_VETO_ELIGIBLE as _PATH_RULE_EXITS",
+    "from kernel.exit_types import META_LABEL_VETO_ELIGIBLE":
+        "from renquant_pipeline.kernel.exit_types import META_LABEL_VETO_ELIGIBLE",
     "from kernel.pipeline.context import InferenceContext":
         "from renquant_pipeline.kernel.pipeline.context import InferenceContext",
     "from kernel.pipeline.pipeline import Job, Task":

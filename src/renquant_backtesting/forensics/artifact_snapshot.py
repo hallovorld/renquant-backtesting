@@ -13,7 +13,7 @@ call time. Subsequent retraining doesn't affect the snapshot.
 
 Usage (A/B script pattern)::
 
-    from kernel.artifact_snapshot import snapshot_artifacts
+    from renquant_backtesting.forensics.artifact_snapshot import snapshot_artifacts
 
     STRATEGY_DIR = Path("backtesting/renquant_104")
     snapshot_dir = snapshot_artifacts(STRATEGY_DIR)

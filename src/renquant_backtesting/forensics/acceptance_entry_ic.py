@@ -29,7 +29,7 @@ Usage
 -----
 ::
 
-    from kernel.acceptance_entry_ic import acceptance
+    from renquant_backtesting.forensics.acceptance_entry_ic import acceptance
     verdict = acceptance(trades_df, min_ic=0.02)
     if not verdict.passed:
         raise RuntimeError(f"ship blocked: entry IC {verdict.ic:+.3f} < {verdict.threshold}")

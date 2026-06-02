@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from kernel.model_acceptance import (
+from .model_acceptance import (
     AcceptanceGate, GateResult, _safe_get_metadata,
 )
 

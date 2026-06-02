@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-STRATEGY_DIR = REPO_ROOT / "backtesting" / "renquant_104"
-sys.path.insert(0, str(STRATEGY_DIR))
-
-from kernel.trade_score_diagnostics import (  # noqa: E402
+from renquant_backtesting.forensics.trade_score_diagnostics import (  # noqa: E402
     compute_score_diagnostics,
     render_markdown,
 )
@@ -54,4 +49,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

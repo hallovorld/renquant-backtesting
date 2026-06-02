@@ -41,7 +41,7 @@ if str(STRATEGY_DIR) not in sys.path:
     sys.path.insert(0, str(STRATEGY_DIR))
 
 from scripts.analyze_trade_decision_attribution import analyze as load_attribution  # noqa: E402
-from kernel.meta_label.triple_barrier import meta_label_for_exit_event  # noqa: E402
+from renquant_backtesting.meta_label.triple_barrier import meta_label_for_exit_event  # noqa: E402
 
 
 @dataclass(frozen=True)
