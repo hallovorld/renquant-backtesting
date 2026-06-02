@@ -18,8 +18,8 @@ import datetime
 import math
 from typing import Any
 
-from kernel.pipeline.context import InferenceContext
-from kernel.pipeline.pipeline import Task
+from renquant_pipeline.kernel.pipeline.context import InferenceContext
+from renquant_common.pipeline import Task
 from renquant_pipeline.kernel.exit_types import META_LABEL_VETO_ELIGIBLE
 
 # Regime → integer code (snapshot column `regime_code`). Pinned here

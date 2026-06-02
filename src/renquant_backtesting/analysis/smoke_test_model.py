@@ -82,7 +82,7 @@ def main() -> int:
 
     # ── Step 3: Scorer loads via PanelScorer ─────────────────────────────
     try:
-        from kernel.panel_pipeline import PanelScorer  # noqa: PLC0415
+        from renquant_pipeline.kernel.panel_pipeline import PanelScorer  # noqa: PLC0415
         scorer = PanelScorer.load(artifact_path)
     except Exception as exc:
         log.error("FAIL: PanelScorer.load — %s: %s", type(exc).__name__, exc)

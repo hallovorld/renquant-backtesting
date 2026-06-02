@@ -26,7 +26,7 @@ if str(STRATEGY_DIR) not in sys.path:
 
 from scripts import train_production_model as train_prod  # noqa: E402
 from scripts.run_wf_gate import _manifest_recipe_usage  # noqa: E402
-from kernel.panel_pipeline.panel_scorer import model_content_sha256  # noqa: E402
+from renquant_pipeline.kernel.panel_pipeline.panel_scorer import model_content_sha256  # noqa: E402
 
 
 def _resolve_strategy_path(path: str | Path) -> Path:

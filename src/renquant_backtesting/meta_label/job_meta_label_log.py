@@ -21,8 +21,8 @@ build_result pattern.
 """
 from __future__ import annotations
 
-from kernel.pipeline.context import InferenceContext
-from kernel.pipeline.pipeline import Job, Task
+from renquant_pipeline.kernel.pipeline.context import InferenceContext
+from renquant_common.pipeline import Job, Task
 
 from .task_snapshot import SnapshotHoldingsTask
 
