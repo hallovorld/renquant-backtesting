@@ -80,16 +80,21 @@ from renquant_backtesting.repo_root import resolve_strategy_config_path
 def _prod_strategy_config_path() -> Path:
     return resolve_strategy_config_path(REPO, "renquant_104")
 
-try:  # package import path: python -m renquant_backtesting.wf_gate
-    from .qp_contracts import validate_qp_contract_config
-    from .trade_contracts import evaluate_trade_contract
-    from .trade_monotonicity import evaluate_trade_monotonicity
-    from .wf_config_parity import evaluate_wf_config_parity
-except ImportError:  # transitional fallback to umbrella scripts/ helpers
-    from qp_contracts import validate_qp_contract_config
-    from trade_contracts import evaluate_trade_contract
-    from trade_monotonicity import evaluate_trade_monotonicity
-    from wf_config_parity import evaluate_wf_config_parity
+def _load_qp_helper(name: str):
+    """Lazy-load a wf_gate helper from package OR umbrella scripts/.
+
+    The package version (``renquant_backtesting.wf_gate.<name>``) doesn't
+    exist yet — these helpers still live in the umbrella ``scripts/`` dir
+    during Phase 5 lift. Doing the import at call time instead of module
+    load time keeps ``runner.py`` importable for unit tests + CLI ``--help``
+    even when umbrella ``scripts/`` is not on ``sys.path`` (e.g. backtesting
+    CI without a checked-out umbrella).
+    """
+    try:
+        module = __import__(f"renquant_backtesting.wf_gate.{name}", fromlist=["_"])
+    except ImportError:
+        module = __import__(name, fromlist=["_"])
+    return module
 CUTS = [
     ("2024-01-02", "2024-12-31"),
     ("2024-07-01", "2025-06-30"),
@@ -181,6 +186,27 @@ def _sanity_model_label_col(artifact: dict) -> str:
     if horizon <= 0:
         horizon = 60
     return f"fwd_{horizon}d_excess"
+
+
+_FWD_HORIZON_RE = __import__("re").compile(r"fwd_(\d+)d(?:_|$)")
+
+
+def _placebo_gate_horizon(label_col: str) -> int | None:
+    """Parse the label's forecast horizon in days, e.g. fwd_60d_excess → 60.
+
+    Returns ``None`` for labels that don't follow the ``fwd_<N>d`` convention;
+    callers should fall back to the legacy 60-day gate metric in that case.
+    """
+    if not label_col:
+        return None
+    match = _FWD_HORIZON_RE.search(str(label_col))
+    if not match:
+        return None
+    try:
+        horizon = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return horizon if horizon > 0 else None
 
 
 def _resolve_strategy_path(raw: str | None) -> Path | None:
@@ -1167,6 +1193,7 @@ def run_trade_monotonicity_gate(
     reports: dict[str, dict] = {}
     failed: list[str] = []
     primary_report = None
+    evaluate_trade_monotonicity = _load_qp_helper("trade_monotonicity").evaluate_trade_monotonicity
     for col in cols:
         report = evaluate_trade_monotonicity(
             df,
@@ -1264,6 +1291,7 @@ def run_trade_contract_gate(wf_result: dict, config: dict) -> dict:
     require_mu = bool(qp_enabled and strict_qp)
     require_er = bool(qp_enabled and strict_qp)
     require_sigma = bool(kelly.get("enabled") or panel.get("ngboost", {}).get("enabled"))
+    evaluate_trade_contract = _load_qp_helper("trade_contracts").evaluate_trade_contract
     report = evaluate_trade_contract(
         pd.concat(frames, ignore_index=True),
         require_entry_mu=require_mu,
@@ -1988,17 +2016,31 @@ def run_sanity_battery(
     shuf_ic = cs_ic(mu, yva_shuf, val_dates)
     log.info("  shuffled_ic = %+.4f (expect ≈ 0)", shuf_ic)
 
-    # Time-shift placebo: shift each ticker's labels forward. Keep the
-    # original +60d gate threshold for compatibility, but record a broader
-    # shift profile because long-horizon equity labels can remain correlated
-    # under slow regime/momentum persistence.
+    # Time-shift placebo: shift each ticker's labels forward.
+    #
+    # Gate metric is shift = 2 × label_horizon (see
+    # doc/research/2026-06-02-placebo-gate-overstrict-for-long-horizon.md in
+    # the umbrella for the decay-profile evidence): at shift = horizon there
+    # is NO temporal overlap but legitimate slow factor persistence
+    # (Kelly-Gu-Xiu 2020 RFS Table 7) still gives high IC, so the old
+    # shift=60d gate mis-fires on long-horizon momentum strategies. At
+    # 2× horizon factor persistence has decayed below any reasonable
+    # leakage threshold. The full 5/10/20/40/60/80/120/180/252 grid is
+    # retained in `placebo_shift_diagnostics` for decay-shape forensics.
     panel_s = panel.sort_values(["ticker", "date"]).copy()
     val_idx = val.set_index(["ticker", "date"])
     mu_by_idx = _pd.Series(mu, index=val_idx.index)
     placebo_shift_diagnostics = []
     placebo_ic = float("nan")
     placebo_aligned_real_ic = float("nan")
-    for shift_days in (5, 10, 20, 40, 60, 80, 120, 180, 252):
+    _label_horizon = _placebo_gate_horizon(LABEL)
+    _gate_shift_days = 2 * _label_horizon if _label_horizon is not None else 60
+    placebo_gate_shift_days = _gate_shift_days
+    placebo_label_horizon_days = _label_horizon
+    _shift_grid = (5, 10, 20, 40, 60, 80, 120, 180, 252)
+    if _gate_shift_days not in _shift_grid:
+        _shift_grid = tuple(sorted({*_shift_grid, _gate_shift_days}))
+    for shift_days in _shift_grid:
         col = f"__shift_{shift_days}__"
         panel_s[col] = panel_s.groupby("ticker")[LABEL].shift(-shift_days)
         val_s = panel_s[panel_s.date > val_cut].dropna(subset=[col])
@@ -2043,12 +2085,15 @@ def run_sanity_battery(
                 abs(ic) / abs(real_ic) if real_ic else None
             ),
         })
-        if shift_days == 60:
+        if shift_days == _gate_shift_days:
             placebo_ic = ic
             placebo_aligned_real_ic = aligned_real_ic
             log.info(
-                "  placebo_ic = %+.4f (expect < %s; full_real_ic=%+.4f)",
+                "  placebo_ic = %+.4f at gate_shift=%dd (= 2×label_horizon=%sd; "
+                "expect < %s; full_real_ic=%+.4f)",
                 placebo_ic,
+                _gate_shift_days,
+                _label_horizon if _label_horizon is not None else "n/a",
                 _placebo_ic_requirement_text(placebo_aligned_real_ic),
                 real_ic,
             )
@@ -2193,6 +2238,8 @@ def run_sanity_battery(
             else None
         ),
         "sanity_label_col": LABEL,
+        "sanity_label_horizon_days": placebo_label_horizon_days,
+        "sanity_placebo_gate_shift_days": placebo_gate_shift_days,
         "sanity_method": sanity_method,
         "placebo_shift_diagnostics": placebo_shift_diagnostics,
         "sanity_regime_ic": sanity_regime_ic,
@@ -2317,6 +2364,7 @@ def main():
     log.info("Artifact usage: %s", artifact_usage)
     cfg_path = STRATEGY_DIR / args.strategy_config
     gate_config = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    evaluate_wf_config_parity = _load_qp_helper("wf_config_parity").evaluate_wf_config_parity
     parity_result = (
         {"passed": True, "reason": "skipped"}
         if args.skip_config_parity or not cfg_path.exists()
@@ -2336,6 +2384,7 @@ def main():
             log.error("  parity issue: %s", issue)
     else:
         log.info("WF config parity: PASS")
+    validate_qp_contract_config = _load_qp_helper("qp_contracts").validate_qp_contract_config
     qp_contract = (
         validate_qp_contract_config(gate_config)
         if cfg_path.exists() else
