@@ -27,6 +27,14 @@ from typing import Any
 
 from renquant_common import Job, Pipeline, Task
 
+from renquant_backtesting.repo_root import resolve_strategy_config_path
+
+
+def prod_strategy_config_path(strategy_dir: Path) -> Path:
+    """Resolve the production config for WF derive/parity checks."""
+    repo_root = strategy_dir.parent.parent
+    return resolve_strategy_config_path(repo_root, strategy_dir.name)
+
 
 @dataclass
 class WfGateContext:
@@ -104,7 +112,7 @@ class DeriveConfigTask(Task):
         if not ctx.derive_config_from_prod or ctx.strategy_dir is None:
             return True
         base_cfg_path = ctx.strategy_dir / ctx.strategy_config
-        prod_cfg_path = ctx.strategy_dir / "strategy_config.json"
+        prod_cfg_path = prod_strategy_config_path(ctx.strategy_dir)
         if not base_cfg_path.exists() or not prod_cfg_path.exists():
             return True
         prod_cfg = json.loads(prod_cfg_path.read_text())
@@ -160,7 +168,7 @@ class CheckConfigParityTask(Task):
                 "passed": True, "reason": "skipped (no strategy_dir or artifact)",
             }
             return True
-        prod_cfg = ctx.strategy_dir / "strategy_config.json"
+        prod_cfg = prod_strategy_config_path(ctx.strategy_dir)
         wf_cfg = ctx.strategy_dir / ctx.strategy_config
         if not prod_cfg.exists() or not wf_cfg.exists():
             ctx.config_parity_result = {

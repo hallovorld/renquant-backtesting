@@ -74,6 +74,12 @@ for _p in (REPO, SCRIPTS_DIR, STRATEGY_DIR):
         sys.path.insert(0, _s)
 PYTHON = sys.executable
 
+from renquant_backtesting.repo_root import resolve_strategy_config_path
+
+
+def _prod_strategy_config_path() -> Path:
+    return resolve_strategy_config_path(REPO, "renquant_104")
+
 try:  # package import path: python -m renquant_backtesting.wf_gate
     from .qp_contracts import validate_qp_contract_config
     from .trade_contracts import evaluate_trade_contract
@@ -2260,7 +2266,7 @@ def main():
         if not base_cfg_path.exists():
             log.error("base strategy config not found: %s", base_cfg_path)
             sys.exit(2)
-        prod_cfg_path = STRATEGY_DIR / "strategy_config.json"
+        prod_cfg_path = _prod_strategy_config_path()
         prod_cfg = json.loads(prod_cfg_path.read_text())
         base_cfg = json.loads(base_cfg_path.read_text())
         manifest_path = ((base_cfg.get("walkforward") or {}).get("manifest_path"))
@@ -2315,7 +2321,7 @@ def main():
         {"passed": True, "reason": "skipped"}
         if args.skip_config_parity or not cfg_path.exists()
         else evaluate_wf_config_parity(
-            STRATEGY_DIR / "strategy_config.json",
+            _prod_strategy_config_path(),
             cfg_path,
             candidate_artifact=artifact_path,
             strategy_dir=STRATEGY_DIR,

@@ -26,7 +26,11 @@ import json
 import logging
 import sys
 
-from renquant_backtesting.repo_root import resolve_repo_root
+from renquant_backtesting.repo_root import (
+    load_strategy_config,
+    resolve_repo_root,
+    resolve_strategy_artifact_path,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -39,6 +43,8 @@ def main() -> int:
     p.add_argument("--strategy", default="renquant_104")
     p.add_argument("--repo-root", default=None,
                    help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
+    p.add_argument("--strategy-config", default=None,
+                   help="Strategy config path. Defaults to RENQUANT_STRATEGY_CONFIG or the umbrella strategy config.")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
     if args.verbose:
@@ -52,18 +58,18 @@ def main() -> int:
 
     # ── Step 1: Config + artifact path resolution ────────────────────────
     try:
-        cfg_path = strategy_dir / "strategy_config.json"
-        cfg = json.loads(cfg_path.read_text())
+        cfg, cfg_path = load_strategy_config(repo_root, args.strategy, args.strategy_config)
     except Exception as exc:
         log.error("FAIL: config read — %s: %s", type(exc).__name__, exc)
         return 1
+    log.info("Strategy config: %s", cfg_path)
 
     panel_cfg = cfg.get("ranking", {}).get("panel_scoring", {})
     if not panel_cfg.get("enabled", False):
         log.warning("PASS (skipped): panel_scoring.enabled=False")
         return 0
     artifact_rel = panel_cfg.get("artifact_path", "artifacts/panel-ltr.json")
-    artifact_path = strategy_dir / artifact_rel
+    artifact_path = resolve_strategy_artifact_path(repo_root, args.strategy, artifact_rel)
     if not artifact_path.exists():
         log.error("FAIL: artifact not found at %s", artifact_path)
         return 1
@@ -147,7 +153,7 @@ def main() -> int:
     cal_cfg = panel_cfg.get("global_calibration", {})
     if cal_cfg.get("enabled", False):
         cal_rel = cal_cfg.get("artifact_path", "artifacts/panel-rank-calibration.json")
-        cal_path = strategy_dir / cal_rel
+        cal_path = resolve_strategy_artifact_path(repo_root, args.strategy, cal_rel)
         if not cal_path.exists():
             log.error("FAIL: calibrator artifact missing at %s", cal_path)
             return 1
