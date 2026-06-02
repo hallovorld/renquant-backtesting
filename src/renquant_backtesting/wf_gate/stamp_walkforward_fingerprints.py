@@ -11,22 +11,27 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-REPO = Path(__file__).resolve().parent.parent
-STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-if str(REPO / "scripts") not in sys.path:
-    sys.path.insert(0, str(REPO / "scripts"))
-if str(STRATEGY_DIR) not in sys.path:
-    sys.path.insert(0, str(STRATEGY_DIR))
+def _resolve_repo_root(value: str | Path | None = None) -> Path:
+    candidate = value or os.environ.get("RENQUANT_REPO_ROOT") or Path.cwd()
+    return Path(candidate).expanduser().resolve()
 
-from scripts import train_production_model as train_prod  # noqa: E402
-from scripts.run_wf_gate import _manifest_recipe_usage  # noqa: E402
-from renquant_pipeline.kernel.panel_pipeline.panel_scorer import model_content_sha256  # noqa: E402
+
+def _configure_repo_root(repo_root: str | Path | None = None) -> None:
+    global REPO, STRATEGY_DIR
+
+    REPO = _resolve_repo_root(repo_root)
+    STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
+    for path in (REPO, REPO / "scripts", STRATEGY_DIR):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+
+_configure_repo_root()
 
 
 def _resolve_strategy_path(path: str | Path) -> Path:
@@ -94,6 +99,8 @@ def validate_recipe(manifest_path: Path, reference_artifact: Path | None) -> dic
             "recipe_validated": False,
             "reason": "reference_artifact is required for safe stamping",
         }
+    from scripts.run_wf_gate import _manifest_recipe_usage  # noqa: PLC0415
+
     usage = _manifest_recipe_usage(manifest_path, reference_artifact)
     if not bool(usage.get("recipe_validated")):
         raise ValueError(
@@ -104,6 +111,10 @@ def validate_recipe(manifest_path: Path, reference_artifact: Path | None) -> dic
 
 
 def _scorer_identity(path: Path) -> tuple[str, str]:
+    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import (  # noqa: PLC0415
+        model_content_sha256,
+    )
+
     payload = json.loads(path.read_text())
     content_fp = model_content_sha256(payload)
     file_fp = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -140,6 +151,8 @@ def stamp_manifest(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Stamp all scorer artifacts referenced by ``manifest_path``."""
+    from scripts import train_production_model as train_prod  # noqa: PLC0415
+
     recipe_usage = validate_recipe(manifest_path, reference_artifact)
     paths = _artifact_paths(manifest_path)
     stamped: list[str] = []
@@ -185,6 +198,8 @@ def stamp_manifest(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--repo-root", default=None,
+                   help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
     p.add_argument("--manifest", required=True)
     p.add_argument("--fingerprint-config", required=True)
     p.add_argument("--reference-artifact", required=True)
@@ -194,6 +209,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    _configure_repo_root(args.repo_root)
     summary = stamp_manifest(
         manifest_path=_resolve_strategy_path(args.manifest),
         fingerprint_config=_resolve_strategy_path(args.fingerprint_config),
