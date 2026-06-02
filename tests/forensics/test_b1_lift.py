@@ -27,6 +27,12 @@ _LIFTED = (
 
 
 _PHASE5_IMPORT_REWRITES = {
+    "from kernel.acceptance_entry_ic import acceptance":
+        "from renquant_backtesting.forensics.acceptance_entry_ic import acceptance",
+    "from kernel.artifact_snapshot import snapshot_artifacts":
+        "from renquant_backtesting.forensics.artifact_snapshot import snapshot_artifacts",
+    "from kernel.model_acceptance import (":
+        "from .model_acceptance import (",
     "from kernel.panel_pipeline.panel_scorer import PanelScorer":
         "from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer",
 }

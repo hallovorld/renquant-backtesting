@@ -216,7 +216,7 @@ def build_regime_series(
     logging.getLogger("kernel.pipeline.regime").setLevel(logging.WARNING)
     logging.getLogger("kernel.regime").setLevel(logging.WARNING)
     from renquant_pipeline.kernel.regime import RegimeState  # noqa: PLC0415
-    from kernel.pipeline.task_regime import (  # noqa: PLC0415
+    from renquant_pipeline.kernel.pipeline.task_regime import (  # noqa: PLC0415
         BEAROverrideTask,
         CUSUMTask,
         GMMTask,
