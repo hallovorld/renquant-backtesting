@@ -25,9 +25,8 @@ import argparse
 import json
 import logging
 import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from renquant_backtesting.repo_root import resolve_repo_root
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -38,12 +37,17 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--strategy", default="renquant_104")
+    p.add_argument("--repo-root", default=None,
+                   help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
     if args.verbose:
         log.setLevel(logging.DEBUG)
 
-    strategy_dir = REPO_ROOT / "backtesting" / args.strategy
+    repo_root = resolve_repo_root(args.repo_root)
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    strategy_dir = repo_root / "backtesting" / args.strategy
     sys.path.insert(0, str(strategy_dir))
 
     # ── Step 1: Config + artifact path resolution ────────────────────────

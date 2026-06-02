@@ -24,7 +24,7 @@ import math
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from renquant_backtesting.repo_root import resolve_repo_root
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,12 +116,15 @@ def main() -> None:
                    choices=["alpaca", "alpaca_paper", "paper", "ibkr"],
                    help="Broker tag for live runs.db lookup. 2026-05-09 fix: "
                         "live data lives in data/runs.{broker}.db, not data/runs.db.")
+    p.add_argument("--repo-root", default=None,
+                   help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
     p.add_argument("--since", type=lambda s: datetime.date.fromisoformat(s),
                    default=None)
     p.add_argument("--rf-annual", type=float, default=DEFAULT_RF_ANNUAL,
                    help="Annual risk-free rate for excess-return Sharpe.")
     p.add_argument("--cache-root", default="data/ohlcv")
     args = p.parse_args()
+    repo_root = resolve_repo_root(args.repo_root)
 
     if args.db is None:
         if args.source == "sim":
@@ -131,20 +134,20 @@ def main() -> None:
             # (kernel/state_paths.py runs_db_path convention). Pre-fix this
             # defaulted to data/runs.db which has 0 live rows after broker
             # isolation switch — silently producing empty portfolio_daily_metrics.
-            sys.path.insert(0, str(REPO_ROOT / "backtesting" / args.strategy_dir))
+            sys.path.insert(0, str(repo_root / "backtesting" / args.strategy_dir))
             from renquant_pipeline.kernel.state_paths import runs_db_path  # noqa: PLC0415
-            args.db = str(runs_db_path("data/runs.db", args.broker).relative_to(REPO_ROOT)
+            args.db = str(runs_db_path("data/runs.db", args.broker).relative_to(repo_root)
                           if runs_db_path("data/runs.db", args.broker).is_absolute()
                           else runs_db_path("data/runs.db", args.broker))
 
-    strategy_dir = REPO_ROOT / "backtesting" / args.strategy_dir
+    strategy_dir = repo_root / "backtesting" / args.strategy_dir
     if str(strategy_dir) not in sys.path:
         sys.path.insert(0, str(strategy_dir))
 
     from renquant_pipeline.kernel.persistence import get_connection, record_portfolio_metrics  # noqa: PLC0415
     import pandas as pd  # noqa: PLC0415
 
-    db_path = REPO_ROOT / args.db
+    db_path = repo_root / args.db
     conn = get_connection({"persistence": {"enabled": True,
                                              "db_path": str(db_path),
                                              "sim_db_path": str(db_path)}})
@@ -188,7 +191,7 @@ def main() -> None:
     df["var_99_21d"]  = _rolling_var(df["daily_return"], 21, 0.01)
 
     # Beta vs SPY (requires SPY returns)
-    spy_ret = _load_spy_returns(REPO_ROOT / args.cache_root)
+    spy_ret = _load_spy_returns(repo_root / args.cache_root)
     if spy_ret is not None:
         spy_aligned = spy_ret.reindex(df["run_date"]).reset_index(drop=True)
         df["beta_spy_252d"] = _rolling_beta_spy(
