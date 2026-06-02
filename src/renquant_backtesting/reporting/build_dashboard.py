@@ -169,9 +169,22 @@ def section_pnl_sparkline(db: sqlite3.Connection | None) -> str:
 
 
 def _resolve_prod_panel_path() -> Path:
-    """Resolve panel-LTR prod artifact via the active strategy config."""
+    """Resolve panel-LTR prod artifact without hardcoding the artifact name.
+
+    Default to the golden config, preserving the historical dashboard contract.
+    In multirepo runtime, the umbrella delegate sets RENQUANT_STRATEGY_CONFIG
+    explicitly; in that case show the pinned runtime config's artifact.
+    """
     try:
-        cfg, _cfg_path = load_strategy_config(REPO_ROOT, "renquant_104")
+        config_override = (
+            None if os.environ.get("RENQUANT_STRATEGY_CONFIG")
+            else "backtesting/renquant_104/strategy_config.golden.json"
+        )
+        cfg, _cfg_path = load_strategy_config(
+            REPO_ROOT,
+            "renquant_104",
+            config_override,
+        )
         rel = cfg["ranking"]["panel_scoring"]["artifact_path"]
         return resolve_strategy_artifact_path(REPO_ROOT, "renquant_104", rel)
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
@@ -184,7 +197,7 @@ def section_model_health() -> str:
     """Panel fingerprint, retrain age, latest WF mean IC."""
     out = ["## Model health\n"]
 
-    # Panel artifact — resolved via golden config, not hardcoded
+    # Panel artifact — resolved through config, not hardcoded.
     panel_path = _resolve_prod_panel_path()
     if panel_path.exists():
         try:

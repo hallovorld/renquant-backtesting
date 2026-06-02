@@ -48,3 +48,27 @@ def test_dashboard_model_path_uses_strategy_config_env(
     assert build_dashboard._resolve_prod_panel_path() == (
         strategy_dir / "artifacts" / "prod" / "panel-ltr.env.json"
     )
+
+
+def test_dashboard_model_path_defaults_to_golden_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "umbrella"
+    strategy_dir = repo_root / "backtesting" / "renquant_104"
+    strategy_dir.mkdir(parents=True)
+    (strategy_dir / "strategy_config.json").write_text(
+        '{"ranking": {"panel_scoring": {"artifact_path": "artifacts/prod/panel-ltr.active.json"}}}',
+        encoding="utf-8",
+    )
+    (strategy_dir / "strategy_config.golden.json").write_text(
+        '{"ranking": {"panel_scoring": {"artifact_path": "artifacts/prod/panel-ltr.golden.json"}}}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(build_dashboard, "REPO_ROOT", repo_root)
+    monkeypatch.delenv("RENQUANT_STRATEGY_CONFIG", raising=False)
+
+    assert build_dashboard._resolve_prod_panel_path() == (
+        strategy_dir / "artifacts" / "prod" / "panel-ltr.golden.json"
+    )
