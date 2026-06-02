@@ -45,6 +45,7 @@ def test_lifted_daily_ops_clis_expose_repo_root() -> None:
         "renquant_backtesting.analysis.backfill_forward_returns",
         "renquant_backtesting.lean_export.export_lean_data",
         "renquant_backtesting.lean_export.export_lean_watchlist",
+        "renquant_backtesting.reporting.build_dashboard",
     ]
 
     for module in modules:
