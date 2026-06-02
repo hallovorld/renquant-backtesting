@@ -183,6 +183,27 @@ def _sanity_model_label_col(artifact: dict) -> str:
     return f"fwd_{horizon}d_excess"
 
 
+_FWD_HORIZON_RE = __import__("re").compile(r"fwd_(\d+)d(?:_|$)")
+
+
+def _placebo_gate_horizon(label_col: str) -> int | None:
+    """Parse the label's forecast horizon in days, e.g. fwd_60d_excess → 60.
+
+    Returns ``None`` for labels that don't follow the ``fwd_<N>d`` convention;
+    callers should fall back to the legacy 60-day gate metric in that case.
+    """
+    if not label_col:
+        return None
+    match = _FWD_HORIZON_RE.search(str(label_col))
+    if not match:
+        return None
+    try:
+        horizon = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return horizon if horizon > 0 else None
+
+
 def _resolve_strategy_path(raw: str | None) -> Path | None:
     if not raw:
         return None
@@ -1988,17 +2009,31 @@ def run_sanity_battery(
     shuf_ic = cs_ic(mu, yva_shuf, val_dates)
     log.info("  shuffled_ic = %+.4f (expect ≈ 0)", shuf_ic)
 
-    # Time-shift placebo: shift each ticker's labels forward. Keep the
-    # original +60d gate threshold for compatibility, but record a broader
-    # shift profile because long-horizon equity labels can remain correlated
-    # under slow regime/momentum persistence.
+    # Time-shift placebo: shift each ticker's labels forward.
+    #
+    # Gate metric is shift = 2 × label_horizon (see
+    # doc/research/2026-06-02-placebo-gate-overstrict-for-long-horizon.md in
+    # the umbrella for the decay-profile evidence): at shift = horizon there
+    # is NO temporal overlap but legitimate slow factor persistence
+    # (Kelly-Gu-Xiu 2020 RFS Table 7) still gives high IC, so the old
+    # shift=60d gate mis-fires on long-horizon momentum strategies. At
+    # 2× horizon factor persistence has decayed below any reasonable
+    # leakage threshold. The full 5/10/20/40/60/80/120/180/252 grid is
+    # retained in `placebo_shift_diagnostics` for decay-shape forensics.
     panel_s = panel.sort_values(["ticker", "date"]).copy()
     val_idx = val.set_index(["ticker", "date"])
     mu_by_idx = _pd.Series(mu, index=val_idx.index)
     placebo_shift_diagnostics = []
     placebo_ic = float("nan")
     placebo_aligned_real_ic = float("nan")
-    for shift_days in (5, 10, 20, 40, 60, 80, 120, 180, 252):
+    _label_horizon = _placebo_gate_horizon(LABEL)
+    _gate_shift_days = 2 * _label_horizon if _label_horizon is not None else 60
+    placebo_gate_shift_days = _gate_shift_days
+    placebo_label_horizon_days = _label_horizon
+    _shift_grid = (5, 10, 20, 40, 60, 80, 120, 180, 252)
+    if _gate_shift_days not in _shift_grid:
+        _shift_grid = tuple(sorted({*_shift_grid, _gate_shift_days}))
+    for shift_days in _shift_grid:
         col = f"__shift_{shift_days}__"
         panel_s[col] = panel_s.groupby("ticker")[LABEL].shift(-shift_days)
         val_s = panel_s[panel_s.date > val_cut].dropna(subset=[col])
@@ -2043,12 +2078,15 @@ def run_sanity_battery(
                 abs(ic) / abs(real_ic) if real_ic else None
             ),
         })
-        if shift_days == 60:
+        if shift_days == _gate_shift_days:
             placebo_ic = ic
             placebo_aligned_real_ic = aligned_real_ic
             log.info(
-                "  placebo_ic = %+.4f (expect < %s; full_real_ic=%+.4f)",
+                "  placebo_ic = %+.4f at gate_shift=%dd (= 2×label_horizon=%sd; "
+                "expect < %s; full_real_ic=%+.4f)",
                 placebo_ic,
+                _gate_shift_days,
+                _label_horizon if _label_horizon is not None else "n/a",
                 _placebo_ic_requirement_text(placebo_aligned_real_ic),
                 real_ic,
             )
@@ -2193,6 +2231,8 @@ def run_sanity_battery(
             else None
         ),
         "sanity_label_col": LABEL,
+        "sanity_label_horizon_days": placebo_label_horizon_days,
+        "sanity_placebo_gate_shift_days": placebo_gate_shift_days,
         "sanity_method": sanity_method,
         "placebo_shift_diagnostics": placebo_shift_diagnostics,
         "sanity_regime_ic": sanity_regime_ic,
