@@ -81,15 +81,7 @@ def _prod_strategy_config_path() -> Path:
     return resolve_strategy_config_path(REPO, "renquant_104")
 
 def _load_qp_helper(name: str):
-    """Lazy-load a wf_gate helper from package OR umbrella scripts/.
-
-    The package version (``renquant_backtesting.wf_gate.<name>``) doesn't
-    exist yet — these helpers still live in the umbrella ``scripts/`` dir
-    during Phase 5 lift. Doing the import at call time instead of module
-    load time keeps ``runner.py`` importable for unit tests + CLI ``--help``
-    even when umbrella ``scripts/`` is not on ``sys.path`` (e.g. backtesting
-    CI without a checked-out umbrella).
-    """
+    """Lazy-load a wf_gate helper from package OR umbrella scripts/."""
     try:
         module = __import__(f"renquant_backtesting.wf_gate.{name}", fromlist=["_"])
     except ImportError:
@@ -188,7 +180,7 @@ def _sanity_model_label_col(artifact: dict) -> str:
     return f"fwd_{horizon}d_excess"
 
 
-_FWD_HORIZON_RE = __import__("re").compile(r"fwd_(\d+)d(?:_|$)")
+_FWD_HORIZON_RE = re.compile(r"fwd_(\d+)d(?:_|$)")
 
 
 def _placebo_gate_horizon(label_col: str) -> int | None:
@@ -2573,6 +2565,10 @@ def main():
             sanity_result.get("sanity_placebo_aligned_real_ic")
         ),
         "sanity_label_col":    sanity_result.get("sanity_label_col"),
+        "sanity_label_horizon_days": sanity_result.get("sanity_label_horizon_days"),
+        "sanity_placebo_gate_shift_days": (
+            sanity_result.get("sanity_placebo_gate_shift_days")
+        ),
         "sanity_method":       sanity_result.get("sanity_method"),
         "sanity_eval_scope":   sanity_result.get("sanity_eval_scope"),
         "sanity_manifest_path": sanity_result.get("sanity_manifest_path"),
