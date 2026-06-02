@@ -27,8 +27,8 @@ import math
 import datetime
 from typing import Any
 
-from kernel.pipeline.context import InferenceContext
-from kernel.pipeline.pipeline import Task
+from renquant_pipeline.kernel.pipeline.context import InferenceContext
+from renquant_common.pipeline import Task
 
 # Canonical exit-type taxonomy (CLAUDE.md §5.13.5 — single source).
 # Refactored 2026-05-11 — kernel/exit_types.META_LABEL_VETO_ELIGIBLE

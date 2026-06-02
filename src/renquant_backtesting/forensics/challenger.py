@@ -109,7 +109,7 @@ class ChallengerEvaluator:
         if not cc.artifact_path:
             log.warning("challenger.enabled=true but no artifact_path; skipping")
             return None
-        from kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
+        from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
         path = strategy_dir / cc.artifact_path
         if not path.exists():
             log.warning("challenger artifact missing: %s; skipping", path)
