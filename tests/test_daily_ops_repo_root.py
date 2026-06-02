@@ -42,6 +42,7 @@ def test_lifted_daily_ops_clis_expose_repo_root() -> None:
     modules = [
         "renquant_backtesting.analysis.smoke_test_model",
         "renquant_backtesting.analysis.compute_portfolio_metrics",
+        "renquant_backtesting.analysis.backfill_forward_returns",
         "renquant_backtesting.lean_export.export_lean_data",
         "renquant_backtesting.lean_export.export_lean_watchlist",
     ]
@@ -78,4 +79,3 @@ def test_export_symbol_missing_parquet_error_uses_explicit_repo_root(tmp_path: P
         export_lean_data.export_symbol("XYZ", repo_root=tmp_path)
 
     assert str(tmp_path / "data" / "ohlcv" / "XYZ" / "1d.parquet") in str(exc.value)
-
