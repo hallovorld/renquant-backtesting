@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from renquant_backtesting.repo_root import resolve_repo_root
 
 
 def build_daily_lines(df: pd.DataFrame) -> list[str]:
@@ -33,12 +32,13 @@ def build_daily_lines(df: pd.DataFrame) -> list[str]:
 	return lines
 
 
-def export_symbol(symbol: str) -> tuple[Path, Path, Path]:
+def export_symbol(symbol: str, repo_root: str | Path | None = None) -> tuple[Path, Path, Path]:
+	root = resolve_repo_root(repo_root)
 	symbol_lower = symbol.lower()
-	parquet_path = REPO_ROOT / "data" / "ohlcv" / symbol.upper() / "1d.parquet"
+	parquet_path = root / "data" / "ohlcv" / symbol.upper() / "1d.parquet"
 	if not parquet_path.exists():
 		# Fallback: notebook working directory caches to Notebooks/data/ohlcv/
-		notebook_path = REPO_ROOT / "Notebooks" / "data" / "ohlcv" / symbol.upper() / "1d.parquet"
+		notebook_path = root / "Notebooks" / "data" / "ohlcv" / symbol.upper() / "1d.parquet"
 		if notebook_path.exists():
 			parquet_path = notebook_path
 		else:
@@ -52,7 +52,7 @@ def export_symbol(symbol: str) -> tuple[Path, Path, Path]:
 	if df.empty:
 		raise RuntimeError(f"No rows found in {parquet_path}")
 
-	data_dir = REPO_ROOT / "backtesting" / "data" / "equity" / "usa"
+	data_dir = root / "backtesting" / "data" / "equity" / "usa"
 	daily_zip_path = data_dir / "daily" / f"{symbol_lower}.zip"
 	map_file_path = data_dir / "map_files" / f"{symbol_lower}.csv"
 	factor_file_path = data_dir / "factor_files" / f"{symbol_lower}.csv"
@@ -75,9 +75,12 @@ def export_symbol(symbol: str) -> tuple[Path, Path, Path]:
 def main() -> int:
 	parser = argparse.ArgumentParser(description="Export cached parquet OHLCV into LEAN equity daily files")
 	parser.add_argument("--symbol", required=True, help="Ticker symbol, for example NVDA")
+	parser.add_argument("--repo-root", default=None,
+	                    help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
 	args = parser.parse_args()
 
-	daily_zip_path, map_file_path, factor_file_path = export_symbol(args.symbol)
+	daily_zip_path, map_file_path, factor_file_path = export_symbol(
+		args.symbol, repo_root=args.repo_root)
 	print(f"Daily zip   : {daily_zip_path}")
 	print(f"Map file    : {map_file_path}")
 	print(f"Factor file : {factor_file_path}")

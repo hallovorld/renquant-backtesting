@@ -27,19 +27,28 @@ import os
 import sys
 from pathlib import Path
 
-from export_lean_data import export_symbol
+from renquant_backtesting.repo_root import resolve_repo_root
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-LEAN_DAILY = REPO_ROOT / "backtesting" / "data" / "equity" / "usa" / "daily"
-OHLCV_ROOTS = [
-    REPO_ROOT / "data" / "ohlcv",
-    REPO_ROOT / "Notebooks" / "data" / "ohlcv",
-]
+try:
+    from .export_lean_data import export_symbol
+except ImportError:  # pragma: no cover - legacy direct-script execution
+    from export_lean_data import export_symbol  # type: ignore[no-redef]
 
 
-def get_watchlist(strategy_name: str) -> list[str]:
+def _lean_daily(repo_root: Path) -> Path:
+    return repo_root / "backtesting" / "data" / "equity" / "usa" / "daily"
+
+
+def _ohlcv_roots(repo_root: Path) -> list[Path]:
+    return [
+        repo_root / "data" / "ohlcv",
+        repo_root / "Notebooks" / "data" / "ohlcv",
+    ]
+
+
+def get_watchlist(strategy_name: str, repo_root: Path) -> list[str]:
     """Read watchlist + benchmark from a strategy config."""
-    config_path = REPO_ROOT / "backtesting" / strategy_name / "strategy_config.json"
+    config_path = repo_root / "backtesting" / strategy_name / "strategy_config.json"
     if not config_path.exists():
         print(f"ERROR: strategy config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -54,20 +63,20 @@ def get_watchlist(strategy_name: str) -> list[str]:
     return symbols
 
 
-def _parquet_path(symbol: str) -> Path | None:
+def _parquet_path(symbol: str, repo_root: Path) -> Path | None:
     """Return the parquet path for *symbol*, checking both cache locations."""
-    for root in OHLCV_ROOTS:
+    for root in _ohlcv_roots(repo_root):
         p = root / symbol.upper() / "1d.parquet"
         if p.exists():
             return p
     return None
 
 
-def _zip_path(symbol: str) -> Path:
-    return LEAN_DAILY / f"{symbol.lower()}.zip"
+def _zip_path(symbol: str, repo_root: Path) -> Path:
+    return _lean_daily(repo_root) / f"{symbol.lower()}.zip"
 
 
-def _export_status(symbol: str) -> tuple[str, str | None]:
+def _export_status(symbol: str, repo_root: Path) -> tuple[str, str | None]:
     """Return (status, reason) for the symbol.
 
     status is one of: 'missing', 'stale', 'ok'
@@ -75,8 +84,8 @@ def _export_status(symbol: str) -> tuple[str, str | None]:
     """
     import datetime
 
-    zip_p = _zip_path(symbol)
-    pq_p  = _parquet_path(symbol)
+    zip_p = _zip_path(symbol, repo_root)
+    pq_p  = _parquet_path(symbol, repo_root)
 
     if not zip_p.exists():
         return "missing", "no LEAN zip yet"
@@ -105,9 +114,12 @@ def main() -> int:
     parser.add_argument("--strategy", required=True)
     parser.add_argument("--symbols", nargs="*")
     parser.add_argument("--force", action="store_true", help="Re-export all, ignoring freshness check")
+    parser.add_argument("--repo-root", default=None,
+                        help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
     args = parser.parse_args()
 
-    all_symbols = get_watchlist(args.strategy)
+    repo_root = resolve_repo_root(args.repo_root)
+    all_symbols = get_watchlist(args.strategy, repo_root)
     symbols = args.symbols if args.symbols else all_symbols
     unknown = set(symbols) - set(all_symbols)
     if unknown:
@@ -118,14 +130,14 @@ def main() -> int:
     failed   = 0
 
     for symbol in sorted(symbols):
-        status, reason = _export_status(symbol)
+        status, reason = _export_status(symbol, repo_root)
 
         if not args.force and status == "ok":
             print(f"  {symbol:6s} — up-to-date, skipping  [{reason}]")
             skipped += 1
             continue
 
-        pq_p = _parquet_path(symbol)
+        pq_p = _parquet_path(symbol, repo_root)
         if pq_p is None:
             print(f"  {symbol:6s} — NO parquet cache found")
             print(f"           Run: python -c \"import common; common.fetch_ohlcv('{symbol}')\"")
@@ -134,7 +146,7 @@ def main() -> int:
 
         action = "force-export" if args.force else status  # 'missing' or 'stale'
         try:
-            daily_zip, map_file, factor_file = export_symbol(symbol)
+            daily_zip, map_file, factor_file = export_symbol(symbol, repo_root=repo_root)
             print(f"  {symbol:6s} — {action} → {daily_zip.name}  [{reason}]")
             exported += 1
         except Exception as e:
@@ -142,7 +154,7 @@ def main() -> int:
             failed += 1
 
     print(f"\nDone: {exported} exported, {skipped} up-to-date, {failed} failed")
-    total_zips = len(list(LEAN_DAILY.glob("*.zip")))
+    total_zips = len(list(_lean_daily(repo_root).glob("*.zip")))
     print(f"Total LEAN data files: {total_zips}")
 
     if failed > 0:
