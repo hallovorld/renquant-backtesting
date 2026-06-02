@@ -8,7 +8,6 @@ Phase 1 invariant: byte-equivalent; soft-skip on kernel.* dep.
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import pytest
@@ -27,6 +26,19 @@ _LIFTED = (
 )
 
 
+_PHASE5_IMPORT_REWRITES = {
+    "from kernel.panel_pipeline.panel_scorer import PanelScorer":
+        "from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer",
+}
+
+
+def _canonical_import_normalized(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    for old, new in _PHASE5_IMPORT_REWRITES.items():
+        text = text.replace(old, new)
+    return text
+
+
 def test_byte_equivalent_to_umbrella() -> None:
     if not _UMBRELLA.exists():
         pytest.skip(f"umbrella not at {_UMBRELLA}")
@@ -36,8 +48,8 @@ def test_byte_equivalent_to_umbrella() -> None:
         um = _UMBRELLA / name
         if not bt.exists() or not um.exists():
             continue
-        assert hashlib.md5(bt.read_bytes()).hexdigest() == hashlib.md5(um.read_bytes()).hexdigest(), \
-            f"byte-mismatch: {name}"
+        assert _canonical_import_normalized(bt) == _canonical_import_normalized(um), \
+            f"unexpected post-lift drift after canonical import rewrites: {name}"
         seen += 1
     assert seen == len(_LIFTED), f"expected all {len(_LIFTED)} lifted, saw {seen}"
 

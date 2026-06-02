@@ -9,7 +9,6 @@ Track C2.4: meta-labeling / triple-barrier (López de Prado AFML ch.20).
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,23 @@ _UMBRELLA = Path(__file__).resolve().parents[3] / "RenQuant" / "backtesting" / \
             "renquant_104" / "kernel" / "meta_label"
 
 
+_PHASE5_IMPORT_REWRITES = {
+    "from kernel.pipeline.context import InferenceContext":
+        "from renquant_pipeline.kernel.pipeline.context import InferenceContext",
+    "from kernel.pipeline.pipeline import Job, Task":
+        "from renquant_common.pipeline import Job, Task",
+    "from kernel.pipeline.pipeline import Task":
+        "from renquant_common.pipeline import Task",
+}
+
+
+def _canonical_import_normalized(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    for old, new in _PHASE5_IMPORT_REWRITES.items():
+        text = text.replace(old, new)
+    return text
+
+
 def test_byte_equivalent_to_umbrella() -> None:
     if not _UMBRELLA.exists():
         pytest.skip(f"umbrella not at {_UMBRELLA}")
@@ -28,8 +44,8 @@ def test_byte_equivalent_to_umbrella() -> None:
         u = _UMBRELLA / f.name
         if not u.exists():
             continue
-        assert hashlib.md5(f.read_bytes()).hexdigest() == hashlib.md5(u.read_bytes()).hexdigest(), \
-            f"byte-mismatch: {f.name}"
+        assert _canonical_import_normalized(f) == _canonical_import_normalized(u), \
+            f"unexpected post-lift drift after canonical import rewrites: {f.name}"
         seen += 1
     assert seen >= 8, f"expected at least 8 lifted files, saw {seen}"
 
