@@ -9,8 +9,11 @@ the umbrella for the GBDT decay-profile evidence that motivated this fix.
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
+from renquant_backtesting.wf_gate import runner
 from renquant_backtesting.wf_gate.runner import _placebo_gate_horizon
 
 
@@ -93,3 +96,16 @@ class TestGateShiftSelection:
         # asserts that None signal so callers know to use the legacy
         # 60-day metric.
         assert _placebo_gate_horizon("custom_label") is None
+
+
+def test_wf_gate_metadata_keeps_placebo_gate_fields():
+    """Final artifact metadata must expose the selected gate shift."""
+    source = inspect.getsource(runner)
+    assert '"sanity_label_horizon_days": sanity_result.get(' in source
+    assert '"sanity_placebo_gate_shift_days": (' in source
+
+
+def test_lazy_helper_prefers_packaged_qp_contracts():
+    helper = runner._load_qp_helper("qp_contracts")
+    assert helper.__name__ == "renquant_backtesting.wf_gate.qp_contracts"
+    assert helper.validate_qp_contract_config({}).summary() == "QP disabled"
