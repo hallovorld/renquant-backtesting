@@ -80,16 +80,21 @@ from renquant_backtesting.repo_root import resolve_strategy_config_path
 def _prod_strategy_config_path() -> Path:
     return resolve_strategy_config_path(REPO, "renquant_104")
 
-try:  # package import path: python -m renquant_backtesting.wf_gate
-    from .qp_contracts import validate_qp_contract_config
-    from .trade_contracts import evaluate_trade_contract
-    from .trade_monotonicity import evaluate_trade_monotonicity
-    from .wf_config_parity import evaluate_wf_config_parity
-except ImportError:  # transitional fallback to umbrella scripts/ helpers
-    from qp_contracts import validate_qp_contract_config
-    from trade_contracts import evaluate_trade_contract
-    from trade_monotonicity import evaluate_trade_monotonicity
-    from wf_config_parity import evaluate_wf_config_parity
+def _load_qp_helper(name: str):
+    """Lazy-load a wf_gate helper from package OR umbrella scripts/.
+
+    The package version (``renquant_backtesting.wf_gate.<name>``) doesn't
+    exist yet — these helpers still live in the umbrella ``scripts/`` dir
+    during Phase 5 lift. Doing the import at call time instead of module
+    load time keeps ``runner.py`` importable for unit tests + CLI ``--help``
+    even when umbrella ``scripts/`` is not on ``sys.path`` (e.g. backtesting
+    CI without a checked-out umbrella).
+    """
+    try:
+        module = __import__(f"renquant_backtesting.wf_gate.{name}", fromlist=["_"])
+    except ImportError:
+        module = __import__(name, fromlist=["_"])
+    return module
 CUTS = [
     ("2024-01-02", "2024-12-31"),
     ("2024-07-01", "2025-06-30"),
@@ -1188,6 +1193,7 @@ def run_trade_monotonicity_gate(
     reports: dict[str, dict] = {}
     failed: list[str] = []
     primary_report = None
+    evaluate_trade_monotonicity = _load_qp_helper("trade_monotonicity").evaluate_trade_monotonicity
     for col in cols:
         report = evaluate_trade_monotonicity(
             df,
@@ -1285,6 +1291,7 @@ def run_trade_contract_gate(wf_result: dict, config: dict) -> dict:
     require_mu = bool(qp_enabled and strict_qp)
     require_er = bool(qp_enabled and strict_qp)
     require_sigma = bool(kelly.get("enabled") or panel.get("ngboost", {}).get("enabled"))
+    evaluate_trade_contract = _load_qp_helper("trade_contracts").evaluate_trade_contract
     report = evaluate_trade_contract(
         pd.concat(frames, ignore_index=True),
         require_entry_mu=require_mu,
@@ -2357,6 +2364,7 @@ def main():
     log.info("Artifact usage: %s", artifact_usage)
     cfg_path = STRATEGY_DIR / args.strategy_config
     gate_config = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    evaluate_wf_config_parity = _load_qp_helper("wf_config_parity").evaluate_wf_config_parity
     parity_result = (
         {"passed": True, "reason": "skipped"}
         if args.skip_config_parity or not cfg_path.exists()
@@ -2376,6 +2384,7 @@ def main():
             log.error("  parity issue: %s", issue)
     else:
         log.info("WF config parity: PASS")
+    validate_qp_contract_config = _load_qp_helper("qp_contracts").validate_qp_contract_config
     qp_contract = (
         validate_qp_contract_config(gate_config)
         if cfg_path.exists() else
