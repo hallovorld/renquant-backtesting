@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from renquant_backtesting.repo_root import resolve_repo_root
+from renquant_backtesting.repo_root import (
+    resolve_repo_root,
+    resolve_strategy_artifact_path,
+    resolve_strategy_config_path,
+)
 from renquant_backtesting.lean_export import export_lean_data, export_lean_watchlist
 
 
@@ -34,6 +38,31 @@ def test_resolve_repo_root_prefers_explicit_then_env(monkeypatch, tmp_path: Path
 
     assert resolve_repo_root(explicit_root) == explicit_root.resolve()
     assert resolve_repo_root() == env_root.resolve()
+
+
+def test_strategy_config_prefers_explicit_then_env(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "RenQuant"
+    repo_root.mkdir()
+    env_config = tmp_path / "runtime" / "renquant-strategy-104" / "configs" / "strategy_config.json"
+    explicit_config = tmp_path / "explicit.json"
+    env_config.parent.mkdir(parents=True)
+    env_config.write_text("{}", encoding="utf-8")
+    explicit_config.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("RENQUANT_STRATEGY_CONFIG", str(env_config))
+
+    assert resolve_strategy_config_path(repo_root, "renquant_104", explicit_config) == explicit_config
+    assert resolve_strategy_config_path(repo_root, "renquant_104") == env_config
+
+
+def test_strategy_artifact_paths_remain_umbrella_relative(tmp_path: Path) -> None:
+    repo_root = tmp_path / "RenQuant"
+    expected = repo_root / "backtesting" / "renquant_104" / "artifacts" / "panel-ltr.json"
+
+    assert resolve_strategy_artifact_path(
+        repo_root,
+        "renquant_104",
+        "artifacts/panel-ltr.json",
+    ) == expected
 
 
 def test_lifted_daily_ops_clis_expose_repo_root() -> None:
@@ -72,6 +101,24 @@ def test_lean_watchlist_reads_strategy_from_explicit_repo_root(tmp_path: Path) -
         "AAPL",
         "SPY",
         "NVDA",
+    ]
+
+
+def test_lean_watchlist_prefers_strategy_config_env(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "RenQuant"
+    repo_root.mkdir()
+    pinned = tmp_path / "runtime" / "renquant-strategy-104" / "configs" / "strategy_config.json"
+    pinned.parent.mkdir(parents=True)
+    pinned.write_text(
+        json.dumps({"watchlist": ["MSFT"], "benchmark": "QQQ", "stock_symbol": "TSLA"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RENQUANT_STRATEGY_CONFIG", str(pinned))
+
+    assert export_lean_watchlist.get_watchlist("renquant_104", repo_root) == [
+        "MSFT",
+        "QQQ",
+        "TSLA",
     ]
 
 

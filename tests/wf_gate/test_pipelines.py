@@ -19,6 +19,7 @@ from renquant_backtesting.wf_gate.pipelines import (
     WfGateContext,
     WfSimJob,
     build_wf_gate_pipeline,
+    prod_strategy_config_path,
 )
 
 
@@ -145,6 +146,17 @@ def test_check_config_parity_skips_when_configs_missing(tmp_path: Path) -> None:
     CheckConfigParityTask().run(ctx)
     assert ctx.config_parity_result["passed"] is True
     assert "config not found" in ctx.config_parity_result["reason"]
+
+
+def test_prod_strategy_config_path_prefers_env(monkeypatch, tmp_path: Path) -> None:
+    strategy_dir = tmp_path / "RenQuant" / "backtesting" / "renquant_104"
+    pinned = tmp_path / "runtime" / "renquant-strategy-104" / "configs" / "strategy_config.json"
+    strategy_dir.mkdir(parents=True)
+    pinned.parent.mkdir(parents=True)
+    pinned.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("RENQUANT_STRATEGY_CONFIG", str(pinned))
+
+    assert prod_strategy_config_path(strategy_dir) == pinned
 
 
 def test_assemble_metadata_drops_none_stages() -> None:

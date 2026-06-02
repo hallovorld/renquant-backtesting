@@ -29,10 +29,15 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
-from renquant_backtesting.repo_root import resolve_repo_root
+from renquant_backtesting.repo_root import (
+    load_strategy_config,
+    resolve_repo_root,
+    resolve_strategy_artifact_path,
+)
 
 REPO_ROOT = resolve_repo_root()
 
@@ -164,15 +169,11 @@ def section_pnl_sparkline(db: sqlite3.Connection | None) -> str:
 
 
 def _resolve_prod_panel_path() -> Path:
-    """Resolve panel-LTR prod artifact via strategy_config.golden.json (canonical
-    source per §5.13.14 — never hardcode `panel-ltr.json`). Falls back to the
-    legacy data/ path if config read fails (e.g. partial install)."""
+    """Resolve panel-LTR prod artifact via the active strategy config."""
     try:
-        cfg_path = REPO_ROOT / "backtesting/renquant_104/strategy_config.golden.json"
-        cfg = json.loads(cfg_path.read_text())
+        cfg, _cfg_path = load_strategy_config(REPO_ROOT, "renquant_104")
         rel = cfg["ranking"]["panel_scoring"]["artifact_path"]
-        # Path is relative to renquant_104/ per convention
-        return REPO_ROOT / "backtesting/renquant_104" / rel
+        return resolve_strategy_artifact_path(REPO_ROOT, "renquant_104", rel)
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
         # Legacy fallback (pre 2026-05-11 sim/prod isolation) — flagged 🔴 in
         # doc/audits/2026-05-20-deep-code-audit.md P0-5; should never hit.
@@ -239,13 +240,9 @@ def section_regime_gates(live_state: dict) -> str:
                + (f" (conf={confidence:.2f})" if confidence is not None else "")
                + "\n")
 
-    # Read golden config to check gate status
-    cfg_path = REPO_ROOT / "backtesting" / "renquant_104" / "strategy_config.json"
-    if not cfg_path.exists():
-        return "\n".join(out) + "\n_strategy_config.json missing._\n\n"
     try:
-        cfg = json.loads(cfg_path.read_text())
-    except Exception as e:
+        cfg, _cfg_path = load_strategy_config(REPO_ROOT, "renquant_104")
+    except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
         return "\n".join(out) + f"\n_config unreadable: {e}_\n\n"
 
     rank = cfg.get("ranking", {})
@@ -370,8 +367,15 @@ def main() -> None:
         default=None,
         help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.",
     )
+    p.add_argument(
+        "--strategy-config",
+        default=None,
+        help="Strategy config path. Defaults to RENQUANT_STRATEGY_CONFIG or the umbrella strategy config.",
+    )
     args = p.parse_args()
     REPO_ROOT = resolve_repo_root(args.repo_root)
+    if args.strategy_config:
+        os.environ["RENQUANT_STRATEGY_CONFIG"] = args.strategy_config
     build(args.broker, REPO_ROOT / args.out)
 
 

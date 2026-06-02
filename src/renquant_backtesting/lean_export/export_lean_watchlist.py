@@ -22,12 +22,11 @@ Requires: pandas, pyarrow (available in the renquant conda environment).
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
 
-from renquant_backtesting.repo_root import resolve_repo_root
+from renquant_backtesting.repo_root import load_strategy_config, resolve_repo_root
 
 try:
     from .export_lean_data import export_symbol
@@ -46,13 +45,17 @@ def _ohlcv_roots(repo_root: Path) -> list[Path]:
     ]
 
 
-def get_watchlist(strategy_name: str, repo_root: Path) -> list[str]:
+def get_watchlist(
+    strategy_name: str,
+    repo_root: Path,
+    strategy_config: str | Path | None = None,
+) -> list[str]:
     """Read watchlist + benchmark from a strategy config."""
-    config_path = repo_root / "backtesting" / strategy_name / "strategy_config.json"
-    if not config_path.exists():
-        print(f"ERROR: strategy config not found: {config_path}", file=sys.stderr)
+    try:
+        config, _config_path = load_strategy_config(repo_root, strategy_name, strategy_config)
+    except Exception as exc:
+        print(f"ERROR: strategy config read failed: {exc}", file=sys.stderr)
         sys.exit(1)
-    config = json.loads(config_path.read_text())
     symbols = list(config.get("watchlist", []))
     benchmark = config.get("benchmark", "SPY")
     if benchmark and benchmark not in symbols:
@@ -116,10 +119,12 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Re-export all, ignoring freshness check")
     parser.add_argument("--repo-root", default=None,
                         help="Umbrella RenQuant repo root. Defaults to RENQUANT_REPO_ROOT or cwd.")
+    parser.add_argument("--strategy-config", default=None,
+                        help="Strategy config path. Defaults to RENQUANT_STRATEGY_CONFIG or the umbrella strategy config.")
     args = parser.parse_args()
 
     repo_root = resolve_repo_root(args.repo_root)
-    all_symbols = get_watchlist(args.strategy, repo_root)
+    all_symbols = get_watchlist(args.strategy, repo_root, args.strategy_config)
     symbols = args.symbols if args.symbols else all_symbols
     unknown = set(symbols) - set(all_symbols)
     if unknown:
