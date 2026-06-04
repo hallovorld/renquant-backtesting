@@ -129,3 +129,71 @@ def test_repo_root_backfill_computes_forward_returns(
     assert fwd_10d == pytest.approx(0.10)
     assert fwd_20d == pytest.approx(0.20)
     assert fwd_60d == pytest.approx(0.60)
+
+
+def test_rows_needing_backfill_covers_score_distribution_mu(tmp_path: Path) -> None:
+    """#204 B2: mu/sigma live in score_distribution, NOT candidate_scores.
+
+    The QP Step-4 A/B replay loader joins score_distribution.(date,ticker)
+    to ticker_forward_returns. Before this fix, _rows_needing_backfill only
+    emitted candidate_scores (run_date,ticker), so the score_distribution
+    mu/sigma rows on sim-run dates the backfill never visited had no
+    forward return -> the loader returned 0 bars. This pins that the
+    score_distribution (date,ticker) with mu populated is now in the
+    backfill worklist.
+    """
+    import sqlite3
+
+    from renquant_backtesting.analysis import backfill_forward_returns as backfill
+
+    db = tmp_path / "sim.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE ticker_forward_returns (as_of_date DATE, ticker TEXT, "
+        "fwd_1d REAL, fwd_5d REAL, fwd_10d REAL, fwd_20d REAL, fwd_60d REAL, "
+        "PRIMARY KEY(as_of_date, ticker))"
+    )
+    conn.execute("CREATE TABLE candidate_scores (run_id TEXT, ticker TEXT)")
+    conn.execute("CREATE TABLE pipeline_runs (run_id TEXT, run_date DATE)")
+    conn.execute(
+        "CREATE TABLE score_distribution (run_id TEXT, date TEXT, ticker TEXT, "
+        "mu REAL, sigma REAL)"
+    )
+    # A score_distribution row with mu populated, on a date the backfill
+    # would otherwise never visit (no candidate_scores entry for it).
+    conn.execute(
+        "INSERT INTO score_distribution VALUES ('r1', '2024-04-05', 'NVDA', 0.013, 0.069)"
+    )
+    # A score_distribution row with NULL mu must NOT be pulled in.
+    conn.execute(
+        "INSERT INTO score_distribution VALUES ('r2', '2024-04-06', 'AAPL', NULL, NULL)"
+    )
+    conn.commit()
+
+    assert backfill._has_score_distribution_mu(conn) is True
+    rows = backfill._rows_needing_backfill(conn, None)
+    assert ("2024-04-05", "NVDA") in rows
+    assert ("2024-04-06", "AAPL") not in rows  # NULL mu excluded
+    conn.close()
+
+
+def test_rows_needing_backfill_guards_missing_score_distribution(tmp_path: Path) -> None:
+    """No score_distribution table -> UNION is skipped, no crash."""
+    import sqlite3
+
+    from renquant_backtesting.analysis import backfill_forward_returns as backfill
+
+    db = tmp_path / "sim.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE ticker_forward_returns (as_of_date DATE, ticker TEXT, "
+        "fwd_1d REAL, fwd_20d REAL, PRIMARY KEY(as_of_date, ticker))"
+    )
+    conn.execute("CREATE TABLE candidate_scores (run_id TEXT, ticker TEXT)")
+    conn.execute("CREATE TABLE pipeline_runs (run_id TEXT, run_date DATE)")
+    conn.commit()
+    assert backfill._has_score_distribution_mu(conn) is False
+    # must not raise
+    rows = backfill._rows_needing_backfill(conn, None)
+    assert rows == []
+    conn.close()
