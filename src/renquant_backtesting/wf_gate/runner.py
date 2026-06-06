@@ -838,6 +838,24 @@ def _trace_paths(trace_dir: Path | None, start: str, end: str) -> dict[str, str]
     }
 
 
+def _sim_driver_cmd(strategy_config: str, start: str, end: str) -> list[str]:
+    return [
+        PYTHON,
+        "-m",
+        "renquant_backtesting.wf_gate.sim_driver",
+        "--repo-root",
+        str(REPO),
+        "--strategy-config-name",
+        strategy_config,
+        "--start",
+        start,
+        "--end",
+        end,
+        "--no-compare",
+        "--no-persist",
+    ]
+
+
 def run_sim_cut(
     strategy_config: str,
     start: str,
@@ -848,14 +866,7 @@ def run_sim_cut(
     log.info("Sim cut: %s → %s", start, end)
     market_context = cut_market_context(start, end)
     traces = _trace_paths(trace_dir, start, end)
-    cmd = [
-        PYTHON,
-        str(REPO / "scripts/run_sim_104.py"),
-        "--strategy-config-name", strategy_config,
-        "--start", start, "--end", end,
-        "--no-compare",
-        "--no-persist",
-    ]
+    cmd = _sim_driver_cmd(strategy_config, start, end)
     if traces:
         trace_dir.mkdir(parents=True, exist_ok=True)
         cmd.extend([
