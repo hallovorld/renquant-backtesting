@@ -35,12 +35,11 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import math
 import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 log = logging.getLogger("kernel.model_acceptance")
 
@@ -768,7 +767,12 @@ def assert_artifact_gated(artifact_path: Path | str) -> dict:
         load_path = p
     else:  # .pt and other sequence checkpoints carry metadata in a sidecar
         sidecar = p.with_name(p.name + ".metadata.json")
-        load_path = sidecar if sidecar.exists() else p
+        if not sidecar.exists():
+            raise ValueError(
+                f"assert_artifact_gated: sidecar metadata not found: {sidecar} "
+                f"(for {p})"
+            )
+        load_path = sidecar
     if not load_path.exists():
         raise ValueError(
             f"assert_artifact_gated: artifact/metadata not found: {load_path} "
