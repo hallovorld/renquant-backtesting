@@ -1753,7 +1753,20 @@ def _load_sanity_panel(feat_cols: list[str], label: str) -> tuple[pd.DataFrame, 
 
 def _manifest_uri_to_path(manifest_path: Path, uri: str) -> Path:
     p = Path(str(uri))
-    return p if p.is_absolute() else manifest_path.parent / p
+    if p.is_absolute():
+        return p
+    # Relative URIs: prefer manifest-parent-relative (legacy), but fall back to
+    # STRATEGY_DIR-relative (how every other artifact resolver in this module
+    # treats paths) so a manifest whose URIs are strategy-dir-relative does not
+    # double-resolve, e.g. manifest in artifacts/sim/ + uri artifacts/walkforward_v2/...
+    # -> artifacts/sim/artifacts/walkforward_v2/... (FileNotFoundError, fail-closed).
+    candidate = manifest_path.parent / p
+    if candidate.exists():
+        return candidate
+    strat = STRATEGY_DIR / p
+    if strat.exists():
+        return strat
+    return candidate
 
 
 def _manifest_entry_safe_last_label_date(entry) -> pd.Timestamp:
