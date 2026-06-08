@@ -745,6 +745,47 @@ def _check_wf_gate(staging_data: dict, staging_path: Path) -> None:
             log.warning("wf_gate_metadata.run_at unparseable: %r — skipping age check", run_at)
 
 
+def assert_artifact_gated(artifact_path: Path | str) -> dict:
+    """P0 promotion-integrity guard (RFC #259) — raise unless the artifact (or
+    its sequence sidecar) carries a passing ``wf_gate_metadata``.
+
+    ``promote()`` already enforces this via ``_check_wf_gate`` at swap time, but
+    the 2026-06-05 PatchTST promotion bypassed ``promote()`` with a direct
+    ``strategy_config.json`` edit, putting an *ungated* scorer into production
+    (which the live preflight P-WF-GATE then correctly blocks from buying). This
+    public, reusable guard lets the same invariant be enforced at the
+    config-write / CI / pre-promote boundary so that bypass is caught *before*
+    production, not only at runtime.
+
+    Loads JSON artifacts directly and ``.pt`` sequence checkpoints via their
+    ``<artifact>.metadata.json`` sidecar, then applies the identical
+    ``_check_wf_gate`` contract (missing metadata / passed!=True /
+    trade_monotonicity / staleness all refuse). Returns the wf_gate_metadata
+    dict on success; raises ``ValueError`` otherwise.
+    """
+    p = Path(artifact_path)
+    if p.suffix == ".json":
+        load_path = p
+    else:  # .pt and other sequence checkpoints carry metadata in a sidecar
+        sidecar = p.with_name(p.name + ".metadata.json")
+        load_path = sidecar if sidecar.exists() else p
+    if not load_path.exists():
+        raise ValueError(
+            f"assert_artifact_gated: artifact/metadata not found: {load_path} "
+            f"(for {p})"
+        )
+    try:
+        data = json.loads(load_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(
+            f"assert_artifact_gated: cannot read gate metadata for {p}: {exc}"
+        ) from exc
+    _check_wf_gate(data, p)  # raises ValueError unless gated + passed
+    wf = (data.get("metadata", {}) or {}).get("wf_gate_metadata") \
+        or data.get("wf_gate_metadata")
+    return wf
+
+
 def promote(staging_path: Path, active_path: Path) -> None:
     """Atomically swap staging into active, archiving prior to .previous.
 
