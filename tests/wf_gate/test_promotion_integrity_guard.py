@@ -72,6 +72,13 @@ def test_ungated_pt_sidecar_raises(tmp_path):
         assert_artifact_gated(pt)
 
 
+def test_pt_without_sidecar_raises_clear_value_error(tmp_path):
+    pt = tmp_path / "model.pt"
+    pt.write_bytes(b"\x80\x02fake-torch")
+    with pytest.raises(ValueError, match="sidecar metadata not found"):
+        assert_artifact_gated(pt)
+
+
 def test_missing_artifact_raises(tmp_path):
     with pytest.raises(ValueError, match="not found"):
         assert_artifact_gated(tmp_path / "nope.json")
