@@ -1918,6 +1918,113 @@ def _score_manifest_sanity(
     }
 
 
+def _assemble_diagnostic_profiles(
+    pooled_rows: list[dict],
+    per_regime_rows: dict[str, list[dict]],
+    *,
+    label: str,
+    label_horizon: int | None,
+    shuf_ic: float,
+) -> tuple[dict, dict]:
+    """RFC #259 Layer 1a (P1) — assemble the additive autocorr + placebo/genuine-IC
+    profiles from shift-diagnostic rows (the shape returned by
+    ``renquant_backtesting.analysis.analyze_manifest_sanity_placebo.shift_diagnostics``), pooled and
+    per-regime, at {1×, 2×, 3×}×horizon shifts.
+
+    Diagnostic-only: this NEVER feeds a pass/fail decision. It is split from the
+    I/O wrapper purely so the genuine_ic = aligned_real_ic − placebo_ic arithmetic
+    and the nesting can be unit-tested without the (umbrella) panel/import.
+    """
+    h = int(label_horizon) if label_horizon else 60
+    multiples = {"1x": h, "2x": 2 * h, "3x": 3 * h}
+
+    def _by_shift(rows: list[dict] | None) -> dict[int, dict]:
+        return {
+            int(r["shift_days"]): r
+            for r in (rows or [])
+            if r.get("shift_days") is not None
+        }
+
+    def _autocorr_block(rows: list[dict] | None) -> dict:
+        by = _by_shift(rows)
+        return {k: (by.get(v) or {}).get("label_autocorr_ic") for k, v in multiples.items()}
+
+    def _placebo_block(rows: list[dict] | None) -> dict:
+        by = _by_shift(rows)
+        block: dict[str, dict] = {}
+        for k, v in multiples.items():
+            row = by.get(v) or {}
+            ar = row.get("aligned_real_ic")
+            pl = row.get("model_placebo_ic")
+            genuine = (float(ar) - float(pl)) if (ar is not None and pl is not None) else None
+            block[k] = {
+                "aligned_real_ic": ar,
+                "placebo_ic": pl,
+                "genuine_ic": genuine,
+                "label_autocorr_ic": row.get("label_autocorr_ic"),
+                "n_dates": row.get("n_dates"),
+            }
+        return block
+
+    label_autocorr_profile = {
+        "label_col": label,
+        "horizon_days": h,
+        "shift_multiples": multiples,
+        "pooled": _autocorr_block(pooled_rows),
+        "per_regime": {r: _autocorr_block(rows) for r, rows in (per_regime_rows or {}).items()},
+        "method": (
+            "cross-sectional corr(label_t, label_{t-shift}) at {1x,2x,3x}×horizon; "
+            "diagnostic-only, no gate effect (RFC #259 Layer 1a)"
+        ),
+    }
+    model_placebo_profile = {
+        "label_col": label,
+        "shuf_ic": shuf_ic,
+        "gate_shift_multiple": "2x",
+        "pooled": _placebo_block(pooled_rows),
+        "per_regime": {r: _placebo_block(rows) for r, rows in (per_regime_rows or {}).items()},
+        "method": (
+            "genuine_ic = aligned_real_ic - placebo_ic at {1x,2x,3x}×horizon; "
+            "diagnostic-only, gate verdict unchanged (RFC #259 Layer 1a)"
+        ),
+    }
+    return label_autocorr_profile, model_placebo_profile
+
+
+def _build_diagnostic_profiles(
+    panel,
+    val,
+    mu_series,
+    label: str,
+    label_horizon: int | None,
+    regimes_df,
+    shuf_ic: float,
+) -> tuple[dict, dict]:
+    """RFC #259 Layer 1a (P1) — compute the Layer-1a profiles via the canonical
+    ``shift_diagnostics`` helper (§7.5 single-source: same placebo methodology the
+    gate already uses), pooled + per-regime at {1×,2×,3×}×horizon. NO gate effect.
+    """
+    from renquant_backtesting.analysis.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
+        regime_shift_diagnostics,
+        shift_diagnostics,
+    )
+
+    h = int(label_horizon) if label_horizon else 60
+    shifts = (h, 2 * h, 3 * h)
+    pooled_rows = shift_diagnostics(panel, val, mu_series, label, shifts=shifts)
+    per_regime_rows: dict = {}
+    if regimes_df is not None:
+        try:
+            per_regime_rows = regime_shift_diagnostics(
+                panel, val, mu_series, label, regimes_df, shifts=shifts,
+            )
+        except Exception as exc:  # noqa: BLE001 — diagnostic-only, never fail the gate
+            log.warning("  Layer-1a per-regime profile unavailable: %s", exc)
+    return _assemble_diagnostic_profiles(
+        pooled_rows, per_regime_rows, label=label, label_horizon=h, shuf_ic=shuf_ic,
+    )
+
+
 def run_sanity_battery(
     artifact_path: Path,
     artifact_usage: dict | None = None,
@@ -2189,7 +2296,7 @@ def run_sanity_battery(
 
     sanity_regime_ic = {"passed": False, "reason": "not_computed"}
     try:
-        from scripts.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
+        from renquant_backtesting.analysis.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
             build_regime_series,
             regime_diagnostics,
             regime_shift_diagnostics,
@@ -2282,6 +2389,30 @@ def run_sanity_battery(
             "reason": f"regime sanity IC unavailable: {exc}",
         }
 
+    # RFC #259 Layer 1a (P1) — additive diagnostic profiles; fail-SOFT and with
+    # ZERO effect on the gate verdict (they inform the future Layer-1b calibration
+    # and let every reject be read as "weak model" vs "confounded by an
+    # autocorrelated target"). Computed on the SAME val/mu the gate already scores.
+    label_autocorr_profile = None
+    model_placebo_profile = None
+    try:
+        from renquant_backtesting.analysis.analyze_manifest_sanity_placebo import build_regime_series  # noqa: PLC0415
+        _mu_series = _pd.Series(mu, index=val.index)
+        try:
+            _regimes_df = build_regime_series(val["date"].unique(), strategy_dir=STRATEGY_DIR)
+        except Exception:  # noqa: BLE001
+            _regimes_df = None
+        label_autocorr_profile, model_placebo_profile = _build_diagnostic_profiles(
+            panel, val, _mu_series, LABEL, _label_horizon, _regimes_df, shuf_ic,
+        )
+        _g2 = ((model_placebo_profile or {}).get("pooled", {}).get("2x", {}) or {}).get("genuine_ic")
+        log.info(
+            "  Layer-1a genuine_ic@2x (pooled) = %s (diagnostic-only, gate unaffected)",
+            f"{_g2:+.4f}" if isinstance(_g2, (int, float)) else "n/a",
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostic-only; must NEVER fail the gate
+        log.warning("  Layer-1a diagnostic profiles unavailable (gate unaffected): %s", exc)
+
     # Pass criteria
     pass_shuf = abs(shuf_ic) < 0.005
     pass_placebo = (
@@ -2330,6 +2461,8 @@ def run_sanity_battery(
         "sanity_method": sanity_method,
         "placebo_shift_diagnostics": placebo_shift_diagnostics,
         "sanity_regime_ic": sanity_regime_ic,
+        "label_autocorr_profile": label_autocorr_profile,
+        "model_placebo_profile": model_placebo_profile,
         "reason": sanity_reason,
         **sanity_meta,
     }
@@ -2673,6 +2806,8 @@ def main():
         "sanity_cutoff_contract": sanity_result.get("cutoff_contract"),
         "sanity_regime_ic":    sanity_result.get("sanity_regime_ic"),
         "placebo_shift_diagnostics": sanity_result.get("placebo_shift_diagnostics"),
+        "label_autocorr_profile": sanity_result.get("label_autocorr_profile"),
+        "model_placebo_profile": sanity_result.get("model_placebo_profile"),
         "wf_reason":           wf_result.get("reason"),
         "sanity_reason":       sanity_result.get("reason"),
         "run_at":              datetime.datetime.utcnow().isoformat(),

@@ -12,7 +12,6 @@ import argparse
 import json
 import logging
 import math
-import sys
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
@@ -23,14 +22,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-REPO = Path(__file__).resolve().parents[1]
-STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
-for _p in (REPO, REPO / "scripts", STRATEGY_DIR):
-    _s = str(_p)
-    if _s not in sys.path:
-        sys.path.insert(0, _s)
-
-from scripts.run_wf_gate import (  # noqa: E402
+from renquant_backtesting.wf_gate.runner import (
+    REPO,
+    STRATEGY_DIR,
     _load_artifact_payload,
     _load_sanity_panel,
     _score_manifest_sanity,
@@ -381,7 +375,6 @@ def analyze_manifest(
         min_names=min_names,
     )
     placebo_60 = next((r for r in shifts_out if r["shift_days"] == 60), {})
-    real_ic = real.get("mean_ic")
     p60 = placebo_60.get("model_placebo_ic")
     aligned_real_60 = placebo_60.get("aligned_real_ic")
     label_auto60 = placebo_60.get("label_autocorr_ic")
