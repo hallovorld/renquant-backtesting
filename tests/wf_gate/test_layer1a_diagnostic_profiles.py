@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import math
 
+import pandas as pd
+
 from renquant_backtesting.wf_gate.runner import _assemble_diagnostic_profiles
+from renquant_backtesting.wf_gate.runner import _build_diagnostic_profiles
 
 
 def _rows(h):
@@ -84,3 +87,31 @@ def test_horizon_fallback_to_60():
         _rows(60), {}, label="x", label_horizon=None, shuf_ic=0.0,
     )
     assert autocorr["shift_multiples"] == {"1x": 60, "2x": 120, "3x": 180}
+
+
+def test_build_diagnostic_profiles_imports_package_analysis_helpers():
+    dates = pd.date_range("2026-01-01", periods=6, freq="D")
+    tickers = [f"T{i}" for i in range(6)]
+    rows = []
+    for day_idx, d in enumerate(dates):
+        for ticker_idx, ticker in enumerate(tickers):
+            rows.append({
+                "date": d,
+                "ticker": ticker,
+                "fwd_1d_excess": float(day_idx + ticker_idx / 10.0),
+            })
+    panel = pd.DataFrame(rows)
+    val = panel.copy()
+    mu = pd.Series(
+        [float(i % len(tickers)) for i in range(len(val))],
+        index=val.index,
+    )
+    regimes = pd.DataFrame({"date": dates, "regime": ["TEST"] * len(dates)})
+
+    autocorr, placebo = _build_diagnostic_profiles(
+        panel, val, mu, "fwd_1d_excess", 1, regimes, shuf_ic=0.0,
+    )
+
+    assert autocorr["shift_multiples"] == {"1x": 1, "2x": 2, "3x": 3}
+    assert set(autocorr["per_regime"]) == {"TEST"}
+    assert "genuine_ic" in placebo["pooled"]["2x"]

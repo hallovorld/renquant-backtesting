@@ -1928,7 +1928,7 @@ def _assemble_diagnostic_profiles(
 ) -> tuple[dict, dict]:
     """RFC #259 Layer 1a (P1) — assemble the additive autocorr + placebo/genuine-IC
     profiles from shift-diagnostic rows (the shape returned by
-    ``scripts.analyze_manifest_sanity_placebo.shift_diagnostics``), pooled and
+    ``renquant_backtesting.analysis.analyze_manifest_sanity_placebo.shift_diagnostics``), pooled and
     per-regime, at {1×, 2×, 3×}×horizon shifts.
 
     Diagnostic-only: this NEVER feeds a pass/fail decision. It is split from the
@@ -2004,7 +2004,7 @@ def _build_diagnostic_profiles(
     ``shift_diagnostics`` helper (§7.5 single-source: same placebo methodology the
     gate already uses), pooled + per-regime at {1×,2×,3×}×horizon. NO gate effect.
     """
-    from scripts.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
+    from renquant_backtesting.analysis.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
         regime_shift_diagnostics,
         shift_diagnostics,
     )
@@ -2296,7 +2296,7 @@ def run_sanity_battery(
 
     sanity_regime_ic = {"passed": False, "reason": "not_computed"}
     try:
-        from scripts.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
+        from renquant_backtesting.analysis.analyze_manifest_sanity_placebo import (  # noqa: PLC0415
             build_regime_series,
             regime_diagnostics,
             regime_shift_diagnostics,
@@ -2396,7 +2396,7 @@ def run_sanity_battery(
     label_autocorr_profile = None
     model_placebo_profile = None
     try:
-        from scripts.analyze_manifest_sanity_placebo import build_regime_series  # noqa: PLC0415
+        from renquant_backtesting.analysis.analyze_manifest_sanity_placebo import build_regime_series  # noqa: PLC0415
         _mu_series = _pd.Series(mu, index=val.index)
         try:
             _regimes_df = build_regime_series(val["date"].unique(), strategy_dir=STRATEGY_DIR)
