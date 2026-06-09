@@ -236,16 +236,49 @@ _EXECUTION_ONLY_PARAM_KEYS = {
 }
 
 
-def _semantic_params(params: dict) -> dict:
+# The PatchTST recipe is canonically defined by exactly these hyperparameters
+# (single source — also consumed by _patchtst_params_from_contract). The
+# full-metadata load path additionally carries runtime/env fields (device,
+# detector_version, epochs, early_stopping_patience, shuffle_labels,
+# label_shift_days) that the contract sidecar does NOT — those are not part of
+# the statistical recipe, so the fingerprint must project PatchTST params through
+# this allowlist, or one identical model loaded via two paths gets two
+# fingerprints (the 2026-06-09 orphan-primary mismatch).
+_PATCHTST_RECIPE_PARAM_KEYS = (
+    "seq_len", "patch_length", "d_model", "n_heads", "n_layers",
+    "lr", "weight_decay", "lr_scheduler", "warmup_ratio",
+    "nll_loss_weight", "ranking_margin", "distributional_head",
+    "film_regime_cond", "cross_stock_attn", "embargo_days",
+)
+
+
+def _canonical_recipe_kind(kind):
+    """Collapse loader-marker kinds to the canonical recipe kind.
+
+    The contract-sidecar loader tags PatchTST artifacts as
+    ``hf_patchtst_contract_sidecar``; that is a load-path marker, not a distinct
+    statistical recipe, so it must not change the recipe fingerprint.
+    """
+    if kind == "hf_patchtst_contract_sidecar":
+        return "hf_patchtst"
+    return kind
+
+
+def _semantic_params(params: dict, kind=None) -> dict:
     """Return learner params that define the statistical recipe.
 
     Thread counts and logging verbosity are execution controls. Treating them
     as recipe fields makes a hardware upgrade invalidate otherwise comparable
     walk-forward manifests, while leaving learning parameters such as eta,
-    max_depth, objective, seed, and tree_method in the fingerprint.
+    max_depth, objective, seed, and tree_method in the fingerprint. For PatchTST
+    the recipe is the fixed allowlist above, so runtime/env fields carried only
+    by the full-metadata load path (device, detector_version, epochs, ...) are
+    excluded and an identical model fingerprints the same on either load path.
     """
     if not isinstance(params, dict):
         return {}
+    if _canonical_recipe_kind(kind) == "hf_patchtst":
+        return {k: params[k] for k in _PATCHTST_RECIPE_PARAM_KEYS if k in params}
     return {
         k: v for k, v in params.items()
         if str(k) not in _EXECUTION_ONLY_PARAM_KEYS
@@ -267,13 +300,7 @@ def _artifact_sidecar_path(path: Path) -> Path | None:
 def _patchtst_params_from_contract(payload: dict) -> dict:
     contract = payload.get("training_contract") or {}
     hparams = contract.get("hyperparameters") or {}
-    keep = (
-        "seq_len", "patch_length", "d_model", "n_heads", "n_layers",
-        "lr", "weight_decay", "lr_scheduler", "warmup_ratio",
-        "nll_loss_weight", "ranking_margin", "distributional_head",
-        "film_regime_cond", "cross_stock_attn", "embargo_days",
-    )
-    return {k: hparams.get(k) for k in keep if k in hparams}
+    return {k: hparams.get(k) for k in _PATCHTST_RECIPE_PARAM_KEYS if k in hparams}
 
 
 def _load_artifact_payload(path: Path) -> dict:
@@ -338,14 +365,14 @@ def _recipe_projection(artifact: dict) -> dict:
     contract, label horizon, and learner params.
     """
     return {
-        "kind": artifact.get("kind"),
+        "kind": _canonical_recipe_kind(artifact.get("kind")),
         "feature_cols": list(artifact.get("feature_cols") or []),
         "feature_norm_kind": list(artifact.get("feature_norm_kind") or []),
         # Structural keys only — NOT the prose values (see helper docstring).
         "feature_source_contract_keys": _feature_source_contract_keys(artifact),
         "label_col": artifact.get("label_col"),
         "lookahead_days": int(artifact.get("lookahead_days") or 0),
-        "params": _semantic_params(artifact.get("params") or {}),
+        "params": _semantic_params(artifact.get("params") or {}, artifact.get("kind")),
     }
 
 
