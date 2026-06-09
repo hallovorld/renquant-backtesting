@@ -1664,8 +1664,39 @@ def _validate_static_wf_oos_contract(
     }
 
 
-def _load_sanity_panel(feat_cols: list[str], label: str) -> tuple[pd.DataFrame, dict]:
-    """Load label-safe sanity panel, using training feature panel when needed."""
+def _load_sanity_panel(
+    feat_cols: list[str],
+    label: str,
+    dataset_path: Path | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Load label-safe sanity panel, using training feature panel when needed.
+
+    A model can ONLY be evaluated on the dataset it was trained on — its features
+    are normalized (e.g. CSRankNorm) to that dataset's distribution/universe, so
+    scoring it on a different panel yields garbage IC. ``dataset_path`` (resolved
+    from the candidate's ``training_contract.dataset``) takes precedence: if it is
+    self-contained (carries every ``feat_cols`` + ``label``), it is used directly.
+    Only when no dataset is recorded (e.g. legacy GBDT artifacts) do we fall back
+    to the historical alpha158_291 panel + addendum supplementation below.
+    """
+    if dataset_path is not None and Path(dataset_path).exists():
+        ds = pd.read_parquet(dataset_path)
+        ds["date"] = pd.to_datetime(ds["date"])
+        have = [c for c in (label, *feat_cols) if c in ds.columns]
+        if label in ds.columns and len(have) == len(feat_cols) + 1:
+            return ds, {
+                "sanity_feature_panel": str(dataset_path),
+                "sanity_label_panel": str(dataset_path),
+                "feature_panel_merge": False,
+                "sanity_dataset_source": "training_contract.dataset",
+            }
+        # Recorded dataset can't supply the contract — fail closed rather than
+        # silently scoring on the wrong (alpha158) panel.
+        miss = [c for c in (label, *feat_cols) if c not in ds.columns]
+        raise KeyError(
+            f"training dataset {dataset_path} missing {len(miss)} sanity column(s) "
+            f"(e.g. {miss[:5]}); refusing to fall back to a mismatched panel"
+        )
     raw_path = REPO / "data/alpha158_291_fundamental_dataset_rawlabel.parquet"
     if not raw_path.exists():
         raise FileNotFoundError("panel missing — sanity unavailable")
@@ -2087,8 +2118,18 @@ def run_sanity_battery(
     # rank-LTR placebo gate validates a different objective than the one the
     # scorer optimized.
     LABEL = _sanity_model_label_col(artifact)
+    # Evaluate on the model's OWN training dataset (training_contract.dataset) when
+    # recorded — scoring a model on a different dataset gives garbage IC (the
+    # 2026-06-09 false-negative: PatchTST trained on transformer_v4_wl200 scored
+    # -0.017 on the hardcoded alpha158_291 panel vs its true +0.11). See
+    # renquant-model doc #36.
+    _ds_raw = ((artifact.get("training_contract") or {}).get("dataset")) or artifact.get("dataset")
+    _dataset_path = None
+    if _ds_raw:
+        _dp = Path(_ds_raw)
+        _dataset_path = _dp if _dp.is_absolute() else (REPO / _dp)
     try:
-        panel, panel_meta = _load_sanity_panel(feat_cols, LABEL)
+        panel, panel_meta = _load_sanity_panel(feat_cols, LABEL, dataset_path=_dataset_path)
     except (FileNotFoundError, KeyError) as exc:
         log.error("sanity panel unavailable — fail closed: %s", exc)
         return {
