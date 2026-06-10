@@ -15,6 +15,7 @@ import pandas as pd
 
 from renquant_backtesting.analysis.repro_m6_placebo_confound import (
     cross_sectional_autocorr,
+    main,
     run_regime,
 )
 
@@ -43,7 +44,7 @@ def _stamped_artifact(per_regime: dict[str, dict]) -> dict:
 
 
 def test_confound_signature_correlates_near_plus_one(tmp_path):
-    """The real failing artifact's shape: placebo tracks label autocorr (r≈+1)."""
+    """The real failing artifact's shape supports a persistence-confound hypothesis."""
     per_regime = {
         "BEAR": {"2x": {"placebo_ic": -0.0206, "label_autocorr_ic": 0.0223,
                         "aligned_real_ic": 0.2719, "genuine_ic": 0.2925, "n_dates": 49}},
@@ -55,13 +56,13 @@ def test_confound_signature_correlates_near_plus_one(tmp_path):
     art = tmp_path / "staging.json"
     art.write_text(json.dumps(_stamped_artifact(per_regime)))
     result = run_regime(art)
-    # Confound: placebo is regime-for-regime explained by the label's autocorr.
     assert result["corr_placebo_autocorr"] > 0.95
+    assert result["diagnosis"].endswith("not a standalone leakage-exoneration test")
     assert {r["regime"] for r in result["regimes"]} == {"BEAR", "BULL_CALM", "CHOPPY"}
 
 
-def test_leakage_signature_would_anticorrelate(tmp_path):
-    """A genuine leak shows placebo HIGH where label autocorr is LOW (r<0)."""
+def test_counterexample_can_anticorrelate(tmp_path):
+    """The discriminator can flag a pattern unlike target-persistence tracking."""
     per_regime = {
         "A": {"2x": {"placebo_ic": 0.08, "label_autocorr_ic": 0.01,
                      "aligned_real_ic": 0.05, "genuine_ic": -0.03, "n_dates": 50}},
@@ -91,7 +92,7 @@ def test_low_date_regimes_are_excluded(tmp_path):
 
 
 def test_cross_sectional_autocorr_recovers_known_persistence():
-    """Synthetic AR(1)-ish panel: positive serial corr at lag-1, ~0 at lag-10."""
+    """Synthetic AR(1)-ish panel: positive corr decays across trading-date rows."""
     rng = np.random.default_rng(0)
     dates = pd.date_range("2026-01-01", periods=80, freq="D")
     tickers = [f"T{i}" for i in range(40)]
@@ -111,3 +112,30 @@ def test_cross_sectional_autocorr_recovers_known_persistence():
     assert ac1 > 0.5  # strong lag-1 persistence
     assert ac1 > ac10  # decays with lag
     assert math.isfinite(ac10)
+
+
+def test_main_writes_regime_json_output(tmp_path):
+    per_regime = {
+        "BEAR": {"2x": {"placebo_ic": -0.0206, "label_autocorr_ic": 0.0223,
+                        "aligned_real_ic": 0.2719, "genuine_ic": 0.2925, "n_dates": 49}},
+        "BULL_CALM": {"2x": {"placebo_ic": 0.0413, "label_autocorr_ic": 0.0422,
+                             "aligned_real_ic": 0.0302, "genuine_ic": -0.0112, "n_dates": 302}},
+        "CHOPPY": {"2x": {"placebo_ic": 0.0433, "label_autocorr_ic": 0.0403,
+                          "aligned_real_ic": -0.0097, "genuine_ic": -0.0530, "n_dates": 26}},
+    }
+    art = tmp_path / "staging.json"
+    out = tmp_path / "evidence.json"
+    art.write_text(json.dumps(_stamped_artifact(per_regime)))
+
+    main([
+        "--mode", "regime",
+        "--artifact", str(art),
+        "--out", str(out),
+    ])
+
+    payload = json.loads(out.read_text())
+    assert payload["mode"] == "regime"
+    assert payload["artifact_path"] == str(art)
+    assert payload["min_dates"] == 25
+    assert payload["corr_placebo_autocorr"] > 0.95
+    assert "not a standalone leakage-exoneration test" in payload["diagnosis"]
