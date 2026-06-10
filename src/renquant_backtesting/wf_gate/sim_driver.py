@@ -81,7 +81,9 @@ def main() -> None:
         log.error("Config not found: %s", cfg_path)
         sys.exit(1)
     config = json.loads(cfg_path.read_text())
-    from qp_contracts import validate_qp_contract_config  # noqa: PLC0415
+    from renquant_backtesting.wf_gate.qp_contracts import (  # noqa: PLC0415
+        validate_qp_contract_config,
+    )
     qp_contract = validate_qp_contract_config(config)
     if not qp_contract.passed and not args.allow_raw_qp_mu:
         log.error(qp_contract.summary())
