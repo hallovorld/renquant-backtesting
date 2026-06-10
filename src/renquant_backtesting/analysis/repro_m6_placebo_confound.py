@@ -1,5 +1,5 @@
-"""M6 reproduction — the §5.2 time-shift placebo FAIL is an overlapping-label
-confound, not GBDT panel leakage.
+"""M6 reproduction — the §5.2 time-shift placebo FAIL is consistent with an
+overlapping-label confound.
 
 Two modes, both cheap (no model retrain — reuses the gate's already-stamped
 Layer-1a diagnostics and the raw label panel):
@@ -7,14 +7,15 @@ Layer-1a diagnostics and the raw label panel):
 * ``--mode autocorr`` — reproduce the cross-sectional label-autocorrelation decay
   across {1x,2x,3x}×horizon for fwd_5d / fwd_20d / fwd_60d. The decisive root data:
   only the daily-sampled fwd_60d label is autocorrelated at the gate's 2×-horizon
-  (=120d) shift point, so its time-shift placebo is confounded.
+  (=120 trading-date rows) shift point, so its time-shift placebo is a
+  confounded diagnostic unless calibrated against label persistence.
 
 * ``--mode regime`` — from a stamped WF-gate artifact
   (``metadata.wf_gate_metadata.model_placebo_profile``), decompose the model
   placebo IC by regime at the gate shift and compute
-  ``corr(placebo_ic, label_autocorr_ic)`` across regimes. r≈+1 ⇒ the model's
-  placebo is explained by the *target's* persistence (confound), not leakage
-  (which would show placebo high where autocorr is low).
+  ``corr(placebo_ic, label_autocorr_ic)`` across regimes. A large positive
+  correlation supports an overlapping-label-confound diagnosis, but it is not a
+  proof that every leakage path is absent.
 
 See ``RenQuant/doc/research/2026-06-10-m6-placebo-gate-verdict.md`` for the full
 verdict and the Layer-1b fix path.
@@ -41,7 +42,7 @@ _LABELS: tuple[tuple[str, int], ...] = (
 def cross_sectional_autocorr(
     df: pd.DataFrame, label: str, lag: int, *, min_names: int = 20
 ) -> tuple[float, int]:
-    """Mean over dates of the cross-sectional corr(label_t, label_{t-lag}).
+    """Mean over trading-date rows of cross-sectional corr(label_t, label_{t-lag}).
 
     Returns (mean_autocorr, n_dates_used). This mirrors the §2 measurement in the
     2026-06-08 overlapping-label RFC and the gate's ``label_autocorr_ic``.
@@ -73,16 +74,32 @@ def run_autocorr(rawlabel_path: Path) -> dict[str, Any]:
         a1, _ = cross_sectional_autocorr(df, label, h)
         a2, n2 = cross_sectional_autocorr(df, label, 2 * h)
         a3, _ = cross_sectional_autocorr(df, label, 3 * h)
-        out[label] = {"horizon": h, "ac_1h": a1, "ac_2h": a2, "ac_3h": a3, "n_dates_2h": n2}
+        out[label] = {
+            "horizon_trading_date_rows": h,
+            "ac_1h": a1,
+            "ac_2h": a2,
+            "ac_3h": a3,
+            "n_dates_2h": n2,
+        }
         print(f"{label:18s} {h:4d} {a1:+9.4f} {a2:+9.4f} {a3:+9.4f}  {n2}")
     prod = out["fwd_60d_excess"]
     short = out["fwd_5d_excess"]
     print(
-        f"\nVERDICT: prod label fwd_60d is autocorrelated at the gate shift "
+        f"\nDIAGNOSIS: prod label fwd_60d is autocorrelated at the gate shift "
         f"(AC@2h={prod['ac_2h']:+.4f}); short-horizon fwd_5d is decorrelated "
-        f"(AC@2h={short['ac_2h']:+.4f}). The fwd_60d time-shift placebo is confounded."
+        f"(AC@2h={short['ac_2h']:+.4f}). This supports treating the fwd_60d "
+        "time-shift placebo as persistence-confounded."
     )
-    return out
+    return {
+        "mode": "autocorr",
+        "rawlabel_path": str(rawlabel_path),
+        "lag_semantics": "trading_date_row_offsets",
+        "labels": out,
+        "diagnosis": (
+            "fwd_60d time-shift placebo is consistent with an "
+            "overlapping-label persistence confound"
+        ),
+    }
 
 
 def _nested_get(obj: Any, key: str) -> Any:
@@ -151,11 +168,39 @@ def run_regime(artifact_path: Path, *, mult: str = "2x", min_dates: int = 25) ->
         )
     print(
         f"\ncorr(placebo_ic, label_autocorr_ic) across regimes = {corr:+.3f}"
-        f"\nVERDICT: r≈+1 ⇒ the model placebo tracks the TARGET's autocorrelation "
-        f"(confound, not leakage). Genuine leakage would show placebo HIGH where "
-        f"label autocorr is LOW — the opposite."
+        "\nDIAGNOSIS: a large positive correlation supports the hypothesis that "
+        "the model placebo is tracking target persistence. It is not, by itself, "
+        "proof that every leakage path is absent."
     )
-    return {"pooled": pooled, "regimes": rows, "corr_placebo_autocorr": corr}
+    return {
+        "mode": "regime",
+        "artifact_path": str(artifact_path),
+        "shift_multiple": mult,
+        "min_dates": min_dates,
+        "pooled": pooled,
+        "regimes": rows,
+        "corr_placebo_autocorr": corr,
+        "diagnosis": (
+            "large positive regime correlation is consistent with an "
+            "overlapping-label persistence confound; it is not a standalone "
+            "leakage-exoneration test"
+        ),
+    }
+
+
+def _json_safe(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float) and not np.isfinite(obj):
+        return None
+    return obj
+
+
+def write_output(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_json_safe(payload), indent=2, sort_keys=True))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -172,6 +217,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="path to a stamped WF-gate staging artifact JSON (regime mode)",
     )
     p.add_argument("--mult", default="2x", choices=("1x", "2x", "3x"))
+    p.add_argument("--min-dates", type=int, default=25)
+    p.add_argument("--out", type=Path, help="optional JSON output path")
     return p.parse_args(argv)
 
 
@@ -180,11 +227,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.mode == "autocorr":
         if not args.rawlabel:
             raise SystemExit("--rawlabel is required for --mode autocorr")
-        run_autocorr(args.rawlabel)
+        payload = run_autocorr(args.rawlabel)
     else:
         if not args.artifact:
             raise SystemExit("--artifact is required for --mode regime")
-        run_regime(args.artifact, mult=args.mult)
+        payload = run_regime(args.artifact, mult=args.mult, min_dates=args.min_dates)
+    if args.out:
+        write_output(args.out, payload)
 
 
 if __name__ == "__main__":
