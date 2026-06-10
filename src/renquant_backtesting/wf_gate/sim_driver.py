@@ -245,7 +245,9 @@ def main() -> None:
 
     if any([args.trade_log_json, args.trade_log_csv,
             args.round_trips_csv, args.trade_report_md]):
-        from sim_trade_ledger import write_trade_outputs  # noqa: PLC0415
+        from renquant_backtesting.wf_gate.sim_ledger import (  # noqa: PLC0415
+            write_trade_outputs,
+        )
         end_prices = {}
         for sym, df in ohlcv.items():
             try:

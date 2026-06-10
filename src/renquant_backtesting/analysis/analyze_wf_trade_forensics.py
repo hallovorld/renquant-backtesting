@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from sim_trade_ledger import round_trips_from_trade_log
+from renquant_backtesting.wf_gate.sim_ledger import round_trips_from_trade_log
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
