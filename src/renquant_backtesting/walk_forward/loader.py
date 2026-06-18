@@ -311,13 +311,20 @@ class WalkForwardModelLoader:
         return chosen
 
     def model_as_of(self, today: "pd.Timestamp | str") -> "PanelScorer":
-        """Return the latest retrain scorer for ``today``."""
+        """Return the latest retrain scorer for ``today``.
+
+        Manifest ``artifact_uri`` may be relative to the manifest directory.
+        Resolve it through the same helper used by calibrators so sim/live
+        callers do not depend on their current working directory.
+        """
         chosen = self.entry_as_of(today)
-        if chosen.artifact_uri in self._cache:
-            return self._cache[chosen.artifact_uri]
+        resolved = self._resolve_uri(chosen.artifact_uri)
+        cache_key = str(resolved)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
-        scorer = PanelScorer.load(chosen.artifact_uri)
-        self._cache[chosen.artifact_uri] = scorer
+        scorer = PanelScorer.load(resolved)
+        self._cache[cache_key] = scorer
         return scorer
 
     def calibrator_as_of(self, today: "pd.Timestamp | str"):
@@ -349,11 +356,36 @@ class WalkForwardModelLoader:
         return cal
 
     def _resolve_uri(self, uri: str):
-        """Resolve local relative manifest URIs against the manifest folder."""
+        """Resolve local relative manifest URIs.
+
+        Legacy manifests may store paths relative to the manifest folder.
+        Production WF manifests store strategy-dir-relative paths such as
+        ``artifacts/walkforward_v2/...`` while the manifest itself lives under
+        ``artifacts/sim``. Prefer existing manifest-relative files, then avoid
+        the ``artifacts/sim/artifacts/...`` double-resolution failure mode by
+        resolving strategy artifact paths against the inferred strategy root.
+        """
         if "://" in uri:
             return uri
         p = Path(uri)
-        return p if p.is_absolute() else self._manifest_path.parent / p
+        if p.is_absolute():
+            return p
+        candidate = self._manifest_path.parent / p
+        if candidate.exists():
+            return candidate
+        strategy_dir = self._strategy_dir_from_manifest_path()
+        if strategy_dir is not None:
+            strategy_candidate = strategy_dir / p
+            if p.parts[:1] == ("artifacts",) or strategy_candidate.exists():
+                return strategy_candidate
+        return candidate
+
+    def _strategy_dir_from_manifest_path(self) -> Path | None:
+        """Infer ``<strategy_dir>`` from ``<strategy_dir>/artifacts/sim/*.json``."""
+        parent = self._manifest_path.parent
+        if parent.name == "sim" and parent.parent.name == "artifacts":
+            return parent.parent.parent
+        return None
 
     def _scorer_fingerprints_for_entry(self, entry: RetrainEntry) -> list[str]:
         """Read the selected fold's local scorer identities without loading it."""
