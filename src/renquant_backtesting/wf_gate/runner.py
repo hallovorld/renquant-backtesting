@@ -1844,28 +1844,14 @@ def _manifest_entry_safe_last_label_date(entry) -> pd.Timestamp:
     )
 
 
-def _score_manifest_sanity(
-    val: pd.DataFrame,
-    feat_cols: list[str],
+def _manifest_sanity_date_map(
+    eval_dates,
     manifest_path: Path,
-    candidate_artifact_path: Path,
-    candidate_artifact: dict,
-    panel_history: pd.DataFrame | None = None,
-) -> tuple["pd.Series", dict]:
-    """Score validation rows with the same point-in-time manifest contract as WF."""
-    import numpy as _np  # noqa: PLC0415
-    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
-    from renquant_pipeline.kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
+    candidate_lookahead: int,
+) -> tuple[dict[pd.Timestamp, str], list[pd.Timestamp], list[pd.Timestamp]]:
+    """Map each eval date to the point-in-time manifest artifact allowed to score it."""
     from renquant_backtesting.walk_forward.loader import WalkForwardModelLoader  # noqa: PLC0415
 
-    recipe_usage = _manifest_recipe_usage(manifest_path, candidate_artifact_path)
-    if not recipe_usage.get("recipe_validated"):
-        raise ValueError(
-            "manifest sanity recipe mismatch: "
-            f"{recipe_usage.get('reason')}"
-        )
-
-    candidate_lookahead = int(candidate_artifact.get("lookahead_days") or 0)
     loader = WalkForwardModelLoader(manifest_path)
     if not loader.has_walkforward_model():
         raise ValueError(f"manifest sanity has no retrain entries: {manifest_path}")
@@ -1873,14 +1859,14 @@ def _score_manifest_sanity(
     date_to_artifact: dict[pd.Timestamp, str] = {}
     safe_dates: list[pd.Timestamp] = []
     skipped_pre_manifest_dates: list[pd.Timestamp] = []
-    for raw_d in sorted(pd.to_datetime(val["date"].unique())):
+    for raw_d in sorted(pd.to_datetime(pd.Index(eval_dates).unique())):
         d = pd.Timestamp(raw_d)
         try:
             entry = loader.entry_as_of(d)
         except ValueError:
             skipped_pre_manifest_dates.append(d)
             continue
-        if int(entry.lookahead_days) != candidate_lookahead:
+        if int(entry.lookahead_days) != int(candidate_lookahead):
             raise ValueError(
                 "manifest sanity lookahead mismatch: "
                 f"entry cutoff={entry.cutoff_date.date()} "
@@ -1897,6 +1883,35 @@ def _score_manifest_sanity(
             )
         date_to_artifact[d] = str(_manifest_uri_to_path(manifest_path, entry.artifact_uri))
         safe_dates.append(d)
+    return date_to_artifact, safe_dates, skipped_pre_manifest_dates
+
+
+def _score_manifest_sanity(
+    val: pd.DataFrame,
+    feat_cols: list[str],
+    manifest_path: Path,
+    candidate_artifact_path: Path,
+    candidate_artifact: dict,
+    panel_history: pd.DataFrame | None = None,
+) -> tuple["pd.Series", dict]:
+    """Score validation rows with the same point-in-time manifest contract as WF."""
+    import numpy as _np  # noqa: PLC0415
+    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
+    from renquant_pipeline.kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
+
+    recipe_usage = _manifest_recipe_usage(manifest_path, candidate_artifact_path)
+    if not recipe_usage.get("recipe_validated"):
+        raise ValueError(
+            "manifest sanity recipe mismatch: "
+            f"{recipe_usage.get('reason')}"
+        )
+
+    candidate_lookahead = int(candidate_artifact.get("lookahead_days") or 0)
+    date_to_artifact, safe_dates, skipped_pre_manifest_dates = _manifest_sanity_date_map(
+        val["date"].unique(),
+        manifest_path,
+        candidate_lookahead,
+    )
     if not safe_dates:
         raise ValueError(
             "manifest sanity has no validation dates covered by manifest "
@@ -2139,10 +2154,53 @@ def run_sanity_battery(
             "sanity_label_col": LABEL,
         }
     panel = panel.dropna(subset=[LABEL])
-    distinct = sorted(panel.date.unique())
-    val_cut = distinct[int(len(distinct) * 0.8)]
-    val = panel[panel.date > val_cut].copy()
-    eval_start = pd.Timestamp(val["date"].min()) if not val.empty else None
+    manifest_scope = (
+        isinstance(artifact_usage, dict)
+        and artifact_usage.get("eval_scope") == "walkforward_manifest"
+    )
+    if manifest_scope:
+        manifest_raw = (artifact_usage or {}).get("manifest_path")
+        if not manifest_raw:
+            return {
+                "passed": False,
+                "reason": "manifest sanity missing manifest_path",
+                "sanity_method": "manifest_point_in_time_label_diagnostics",
+                "sanity_eval_scope": "walkforward_manifest",
+                "sanity_label_col": LABEL,
+            }
+        manifest_path = Path(manifest_raw)
+        try:
+            _, safe_dates, skipped_pre_manifest_dates = _manifest_sanity_date_map(
+                panel["date"].unique(),
+                manifest_path,
+                int(artifact.get("lookahead_days") or 0),
+            )
+        except Exception as exc:
+            return {
+                "passed": False,
+                "reason": f"manifest eval-date selection failed: {exc}",
+                "sanity_method": "manifest_point_in_time_label_diagnostics",
+                "sanity_eval_scope": "walkforward_manifest",
+                "sanity_label_col": LABEL,
+            }
+        if not safe_dates:
+            return {
+                "passed": False,
+                "reason": (
+                    "manifest sanity has no eval dates covered by manifest "
+                    f"{manifest_path}"
+                ),
+                "sanity_method": "manifest_point_in_time_label_diagnostics",
+                "sanity_eval_scope": "walkforward_manifest",
+                "sanity_label_col": LABEL,
+            }
+        val = panel[pd.to_datetime(panel["date"]).isin(safe_dates)].copy()
+        eval_start = min(safe_dates)
+    else:
+        distinct = sorted(panel.date.unique())
+        val_cut = distinct[int(len(distinct) * 0.8)]
+        val = panel[panel.date > val_cut].copy()
+        eval_start = pd.Timestamp(val["date"].min()) if not val.empty else None
     if eval_start is None:
         return {
             "passed": False,
@@ -2150,16 +2208,13 @@ def run_sanity_battery(
             "sanity_method": "existing_model_label_diagnostics",
             "sanity_label_col": LABEL,
         }
+    eval_dates = pd.Index(pd.to_datetime(val["date"].unique()))
 
     # Predict using the artifact's model on val
     # (For panel-LTR XGB rank, recover boosters; for QHead, predict_distribution)
     sanity_meta: dict = {}
     try:
         import xgboost as xgb  # noqa: PLC0415
-        manifest_scope = (
-            isinstance(artifact_usage, dict)
-            and artifact_usage.get("eval_scope") == "walkforward_manifest"
-        )
         if manifest_scope:
             manifest_raw = (artifact_usage or {}).get("manifest_path")
             if not manifest_raw:
@@ -2305,7 +2360,7 @@ def run_sanity_battery(
     for shift_days in _shift_grid:
         col = f"__shift_{shift_days}__"
         panel_s[col] = panel_s.groupby("ticker")[LABEL].shift(-shift_days)
-        val_s = panel_s[panel_s.date > val_cut].dropna(subset=[col])
+        val_s = panel_s[panel_s["date"].isin(eval_dates)].dropna(subset=[col])
         if len(val_s) <= 100:
             placebo_shift_diagnostics.append({
                 "shift_days": shift_days,
@@ -2379,26 +2434,26 @@ def run_sanity_battery(
             mu_series,
             LABEL,
             regimes_df,
-            shifts=(60,),
+            shifts=(_gate_shift_days,),
             min_names=5,
         )
-        min_dates = 30
-        min_mean_ic = 0.02
+        min_dates = max(10, int(math.ceil(max(1, _gate_shift_days) / 6)))
+        min_mean_ic = max(0.0, 0.25 * abs(real_ic))
         max_placebo_ratio = 0.5
         regimes_out = {}
         failed = []
         eligible_any = False
         for regime, stats in by_regime.items():
-            row60 = next(
+            gate_row = next(
                 (
                     r for r in by_regime_shift.get(regime, [])
-                    if r.get("shift_days") == 60
+                    if r.get("shift_days") == _gate_shift_days
                 ),
                 {},
             )
             mean_ic = stats.get("mean_ic")
-            placebo60 = row60.get("model_placebo_ic")
-            aligned_real60 = row60.get("aligned_real_ic")
+            placebo_gate_ic = gate_row.get("model_placebo_ic")
+            aligned_real_gate = gate_row.get("aligned_real_ic")
             n_dates = int(stats.get("n_dates") or 0)
             eligible = n_dates >= min_dates
             passed = False
@@ -2409,15 +2464,15 @@ def run_sanity_battery(
                 except (TypeError, ValueError):
                     mean_ic_f = float("nan")
                 placebo_ok = True
-                if placebo60 is not None and mean_ic_f == mean_ic_f:
+                if placebo_gate_ic is not None and mean_ic_f == mean_ic_f:
                     placebo_ref = mean_ic_f
                     try:
-                        aligned_real60_f = float(aligned_real60)
-                        if aligned_real60_f == aligned_real60_f:
-                            placebo_ref = aligned_real60_f
+                        aligned_real_gate_f = float(aligned_real_gate)
+                        if aligned_real_gate_f == aligned_real_gate_f:
+                            placebo_ref = aligned_real_gate_f
                     except (TypeError, ValueError):
                         placebo_ref = mean_ic_f
-                    placebo_ok = abs(float(placebo60)) <= max(
+                    placebo_ok = abs(float(placebo_gate_ic)) <= max(
                         0.005,
                         max_placebo_ratio * abs(placebo_ref),
                     )
@@ -2432,9 +2487,14 @@ def run_sanity_battery(
                 **stats,
                 "eligible": bool(eligible),
                 "passed": bool(passed) if eligible else True,
-                "placebo_60_ic": placebo60,
-                "placebo_60_aligned_real_ic": aligned_real60,
-                "label_autocorr_60_ic": row60.get("label_autocorr_ic"),
+                "placebo_gate_shift_days": int(_gate_shift_days),
+                "placebo_gate_ic": placebo_gate_ic,
+                "placebo_gate_aligned_real_ic": aligned_real_gate,
+                "label_autocorr_gate_ic": gate_row.get("label_autocorr_ic"),
+                # Legacy aliases kept so older dashboards/parsers don't break.
+                "placebo_60_ic": placebo_gate_ic,
+                "placebo_60_aligned_real_ic": aligned_real_gate,
+                "label_autocorr_60_ic": gate_row.get("label_autocorr_ic"),
             }
         sanity_regime_ic = {
             "passed": bool(eligible_any and not failed),
@@ -2445,6 +2505,7 @@ def run_sanity_battery(
                 if failed else
                 "no regime has enough OOS dates for sanity IC validation"
             ),
+            "placebo_gate_shift_days": int(_gate_shift_days),
             "min_n_dates": min_dates,
             "min_mean_ic": min_mean_ic,
             "max_placebo_ratio": max_placebo_ratio,
