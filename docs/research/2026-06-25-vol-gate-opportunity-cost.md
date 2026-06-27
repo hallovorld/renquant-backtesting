@@ -42,17 +42,25 @@ not share a date.** Vary ONLY the cap. Sliced by the **actual market regime labe
 TRUE-exclusion vs winsorization robustness. Pure helpers are unit-tested in
 `tests/test_research_vol_gate.py`.
 
-### 3a. Leakage fix — embargo by TRADING SESSIONS, not calendar days
+### 3a. Leakage fix — embargo by TRADING SESSIONS, not calendar days; STRICT non-overlap
 The label `fwd_60d_excess` is `close.shift(-60)` = **60 trading sessions**. The original purge
 subtracted `Timedelta(days=60)` = **60 calendar days**, which on a business-day index is only
 ~42 trading sessions — so training labels near the cutoff still reached into the test interval
 (leakage that inflates OOS scores). The embargo is now counted in **trading sessions** off the
-sorted unique-date index: the training cutoff is the date `EMB_SESSIONS` positions before the
-test-start position, guaranteeing `train_end + 60 sessions ≤ test_start`. Empirically the fixed
-purge yields exactly 60 sessions (≈84 calendar days) of separation per fold; a 60-calendar-day
-purge would have left only 42–44 sessions. A regression test
-(`test_purge_is_60_trading_sessions_not_calendar_days`) asserts the last training-label-end date
-precedes the first test timestamp by ≥60 trading sessions (no overlap).
+sorted unique-date index.
+
+Crucially, a 60-session embargo on a 60-session label leaves the last training label ending
+*exactly on* the first test date (a boundary touch the test would have to permit with `≤`). To
+get **strict** non-overlap — matching the production WF-gate convention in
+`wf_gate/train_walkforward_panel.py` (`data_end = cutoff − BDay(lookahead_days)` with a strict
+`data_end<` cut) — `EMB_SESSIONS` is set to `LABEL_HORIZON_SESSIONS + 1` (= 61). The training
+cutoff is then the date 61 positions before the test-start position, so the last training label
+ends at index `(lo_i − 61) + 60 = lo_i − 1`, **strictly before** `test_lo`. `purged_test_windows`
+also **raises** if `embargo_sessions ≤ label_horizon_sessions` (fail closed rather than leak),
+and asserts `cutoff_i + horizon < lo_i` per fold. A regression test
+(`test_purge_is_trading_sessions_not_calendar_days_strict_no_overlap`) asserts the last
+training-label-end index is strictly `<` the first test index, and
+`test_purge_rejects_embargo_not_exceeding_label_horizon` pins the fail-closed behaviour.
 
 ### 3b. Regime-uniformity assert (fail closed)
 The monthly regime slice assumes the regime is a *market-level* label identical for every name on
@@ -68,33 +76,38 @@ cap sweep must pre-register the primary cap, or apply a family-wise / FDR (Benja
 correction across the caps before claiming significance.** Sweeping six caps and reporting the
 best uncorrected CI would be a multiple-comparisons error.
 
-## 4. Results (from the orchestrator run; re-run pending under the fixed purge)
-> The figures below are from the original orchestrator run, which used the looser
-> 60-calendar-day purge. The fixed 60-trading-session embargo *removes* leakage, which can only
-> *lower* OOS scores — so it strengthens (never weakens) the inconclusive verdict. A re-run on
-> the umbrella data is required before any of these point estimates is cited as evidence; it is
-> not run here (slow + needs the umbrella panel). Treat the numbers as illustrative.
+## 4. Results — RE-RUN under the fixed 61-session purge (2026-06-27)
+> These figures are from a **fresh re-run under the fixed embargo** (61 trading sessions, strict
+> non-overlap — §3a), replacing the original leaked-purge table. They are **not** a copy of the
+> orchestrator numbers and were **not** assumed to move monotonically: the earlier draft claimed
+> the fix "can only lower OOS scores," which was wrong — changing the purge changes the training
+> set, the model fit, the rankings, the selected names, and the cap deltas, so several metrics
+> moved in *both* directions (e.g. max-drawdown actually **improved**: cap-1.0 −13.8%→−9.6%,
+> while cap-1.0 Sharpe **fell** +0.70→+0.642). The verdict is unchanged because the bootstrap CIs
+> still bracket zero. Repro: `PYTHONPATH=<repo> python research/research_vol_gate_opportunity_cost.py`
+> on the umbrella panel. Still an **upper-bound** diagnostic (survivorship + XGB proxy — §2/§3).
 
-**Overall cap sweep (≈92 months, net of cost, excess vs SPY):**
+**Overall cap sweep (92 months, net of cost, excess vs SPY; OOS rows = 549,306):**
 
 | cap | Sharpe | annRet | maxDD | CVaR5 | median mo |
 |---|---|---|---|---|---|
-| **0.60 (current)** | +0.20 | +1.5% | −15.2% | −4.8% | +0.0012 |
-| 0.80 | +0.65 | +4.9% | −13.1% | −3.9% | +0.0028 |
-| 1.00 | +0.70 | +5.3% | −13.8% | −3.9% | +0.0037 |
-| 1.50 | +0.71 | +5.4% | −14.0% | −3.8% | +0.0037 |
-| ∞ | +0.71 | +5.3% | −14.0% | −3.8% | +0.0037 |
+| **0.60 (current)** | +0.179 | +1.3% | −15.9% | −4.9% | +0.00040 |
+| 0.80 | +0.599 | +4.5% | −10.5% | −3.6% | +0.00077 |
+| 1.00 | +0.642 | +4.7% | −9.6% | −3.7% | +0.00122 |
+| 1.20 | +0.648 | +4.7% | −9.8% | −3.7% | +0.00108 |
+| 1.50 | +0.661 | +4.8% | −9.9% | −3.7% | +0.00106 |
+| ∞ | +0.663 | +4.8% | −9.9% | −3.7% | +0.00114 |
 
-Point estimate: relaxing the cap *raises* the Sharpe and does NOT raise vol/drawdown (the 1/σ²
-sizing keeps high-vol names tiny). BUT — see the uncertainty below.
+Point estimate: relaxing the cap *raises* the Sharpe and does NOT raise drawdown (the 1/σ² sizing
+keeps high-vol names tiny). BUT — see the uncertainty below.
 
 **By ACTUAL regime — Sharpe by cap (n months):**
 
-| regime | 0.6 | 0.8 | 1.0 | 1.5 | ∞ |
-|---|---|---|---|---|---|
-| BULL_CALM (n=42) | +0.27 | +0.44 | +0.45 | +0.45 | +0.45 |
-| BULL_VOLATILE (n=47) | +0.36 | +0.78 | +0.85 | +0.83 | +0.83 |
-| **BEAR (n=3)** | — unmeasurable — | | | | |
+| regime | 0.6 | 0.8 | 1.0 | 1.2 | 1.5 | ∞ |
+|---|---|---|---|---|---|---|
+| BULL_CALM (n=42) | −0.01 | +0.18 | +0.21 | +0.21 | +0.21 | +0.21 |
+| BULL_VOLATILE (n=47) | +0.56 | +1.01 | +1.05 | +1.06 | +1.06 | +1.06 |
+| **BEAR (n=3)** | — unmeasurable — | | | | | |
 
 Relaxing helps in both BULL regimes; **BEAR has only 3 months → no regime-level conclusion is
 possible.** (The earlier "the cap helps in the 2022 bear" was a *calendar-period* artifact, not a
@@ -105,28 +118,30 @@ regime result — withdrawn.)
 
 | comparison | Δ mean / mo | 95% CI |
 |---|---|---|
-| 1.0 − 0.6 | +0.0032 | **[−0.0002, +0.0080]** |
-| 0.8 − 0.6 | +0.0028 | [−0.0001, +0.0073] |
-| ∞ − 0.6 | +0.0032 | [−0.0003, +0.0081] |
+| 0.8 − 0.6 | +0.00262 | [−0.00002, +0.00658] |
+| 1.0 − 0.6 | +0.00283 | **[−0.00019, +0.00711]** |
+| 1.2 − 0.6 | +0.00283 | [−0.00024, +0.00715] |
+| ∞ − 0.6 | +0.00291 | [−0.00022, +0.00733] |
 
 **Every CI includes zero.** The relaxation's benefit is a positive point estimate but is **NOT
 statistically significant** at 95% on this sample — and that is *before* any multiple-comparisons
 correction, which would only widen the bar.
 
-**Robustness (top-1% winner months):** true-exclude Sharpe ≈ winsorize (0.6: +0.11 vs +0.10;
-1.0: +0.61 vs +0.60) — but **neither removes survivorship** (both keep only 2026 survivors).
+**Robustness (top-1% winner months):** true-exclude Sharpe ≈ winsorize (0.6: +0.099 vs +0.089;
+1.0: +0.541 vs +0.554) — but **neither removes survivorship** (both keep only 2026 survivors).
 
 ## 5. Honest conclusion (exploratory)
 - The point estimates are *consistent with* the theory that, given a downstream `1/σ²` sizer, a
   hard 60% admission cap is conservative — relaxing raised Sharpe without raising drawdown.
 - BUT this is **not significant** (bootstrap CIs include 0, before FDR), BEAR is **unmeasurable**
-  by regime, the panel is **survivorship-biased** (upper bound), the ranker is a **proxy** (not
-  the live PatchTST in the live sizing/QP/gate stack), and the cited numbers predate the leakage
-  fix. **No config change is supported by this evidence.**
+  by regime, the panel is **survivorship-biased** (upper bound), and the ranker is a **proxy**
+  (not the live PatchTST in the live sizing/QP/gate stack). The numbers above are the re-run
+  under the fixed strict purge (§4). **No config change is supported by this evidence.**
 - The prior "60% is the worst point" and "1.0/0.6 regime rule" claims are withdrawn.
 
 ## 6. What a real decision needs (before ANY config PR)
-Re-run under the **fixed 60-trading-session purge** → pre-register per-regime hypotheses +
+The §4 re-run already uses the **fixed strict 61-session purge**, but it is still an upper bound.
+A deployable decision additionally needs: pre-register per-regime hypotheses +
 acceptance/risk bars and the **primary cap** (with FDR across any sweep) → re-run with **live
 PatchTST** scores and the **real Kelly μ/σ², QP, concentration caps, daily rebalance, and live
 gate order** → use a **point-in-time universe including delisted outcomes** → report paired

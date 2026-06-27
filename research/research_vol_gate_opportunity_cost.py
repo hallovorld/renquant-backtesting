@@ -10,7 +10,8 @@ repo, not the orchestrator). Two correctness fixes applied during the move:
   * LEAKAGE: the forward label ``fwd_60d_excess`` is ``close.shift(-60)`` = 60 TRADING sessions,
     but the original purge subtracted ``Timedelta(days=60)`` (~42 trading sessions) -> training
     labels near the cutoff overlapped the test interval. The embargo is now counted in TRADING
-    SESSIONS off the sorted unique date index (see ``purged_test_windows``).
+    SESSIONS off the sorted unique date index, with STRICT non-overlap (EMB_SESSIONS = horizon+1
+    = 61, so the last training label ends strictly before test_lo; see ``purged_test_windows``).
   * REGIME UNIFORMITY: the per-date regime is now asserted uniform across names (fail closed)
     before it is used; the prior code silently took ``.groupby("date").first()``.
 """
@@ -26,7 +27,9 @@ LABEL = "fwd_60d_excess"
 LABEL_HORIZON_SESSIONS = 60
 REGCOL = {"BULL_CALM": "regime_p_bull_calm", "BEAR": "regime_p_bear", "BULL_VOLATILE": "regime_p_bull_volatile"}
 REGNAME = ["BULL_CALM", "BEAR", "BULL_VOLATILE"]
-N_TEST_FOLDS, EMB_SESSIONS = 5, 60
+# EMB_SESSIONS strictly exceeds the 60-session label horizon so the last training label ends
+# STRICTLY BEFORE the first test date (no boundary overlap) — see purged_test_windows().
+N_TEST_FOLDS, EMB_SESSIONS = 5, LABEL_HORIZON_SESSIONS + 1
 CAPS = [0.6, 0.8, 1.0, 1.2, 1.5, np.inf]
 VOL_FLOOR, VOL_CEIL = 0.05, 1.5
 COST_BASE, COST_K = 0.0005, 0.0020
@@ -59,19 +62,41 @@ def block_bootstrap_ci(diff, block=3, n_boot=2000, seed=0, lo=2.5, hi=97.5):
     return float(diff.mean()), float(np.percentile(means, lo)), float(np.percentile(means, hi))
 
 
-def purged_test_windows(dates, n_folds, embargo_sessions):
+def purged_test_windows(dates, n_folds, embargo_sessions, label_horizon_sessions=None):
     """Non-overlapping purged walk-forward test windows with a TRADING-SESSION embargo.
 
     ``dates`` is the panel's full set of observation timestamps (may contain duplicates per
-    date across names). The embargo is enforced on the sorted UNIQUE date index so that the
-    training cutoff (``train_end``) is at least ``embargo_sessions`` *trading sessions* before
-    the first test date -- not ``embargo_sessions`` *calendar days*. This matches the
-    ``fwd_60d_excess`` label, which is ``close.shift(-60)`` = 60 trading sessions, so a training
-    label that ends at ``train_end`` cannot reach into the test interval.
+    date across names). The embargo is enforced on the sorted UNIQUE date index, in *trading
+    sessions* (not calendar days), to match the forward label ``fwd_60d_excess`` =
+    ``close.shift(-60)`` = 60 trading sessions.
+
+    Contract (STRICT non-overlap): a training row dated ``train_end`` carries a label whose
+    realisation window ends ``label_horizon_sessions`` sessions later, at index
+    ``idx(train_end) + label_horizon_sessions``. That index must be **strictly less** than the
+    first test index ``lo_i`` so the label's last observed price falls *outside* the test
+    interval. We therefore require ``embargo_sessions > label_horizon_sessions`` and pick the
+    largest ``train_end`` satisfying ``idx(train_end) + label_horizon_sessions < lo_i``.
+
+    This matches the production WF-gate convention in
+    ``wf_gate/train_walkforward_panel.py`` (``data_end = cutoff - BDay(lookahead_days)`` with a
+    strict ``data_end<`` cut): the final training label ends *before*, never *on*, the test
+    boundary.
 
     Returns a list of ``(train_end, test_lo, test_hi)`` timestamps. ``train_end`` is inclusive:
     callers keep rows with ``date <= train_end`` for training.
     """
+    if label_horizon_sessions is None:
+        label_horizon_sessions = LABEL_HORIZON_SESSIONS
+    embargo_sessions = int(embargo_sessions)
+    label_horizon_sessions = int(label_horizon_sessions)
+    # Strict non-overlap is only achievable if the embargo strictly exceeds the label horizon;
+    # a 60-session embargo on a 60-session label leaves the last label ending ON test_lo.
+    if embargo_sessions <= label_horizon_sessions:
+        raise ValueError(
+            f"embargo_sessions={embargo_sessions} must be STRICTLY greater than "
+            f"label_horizon_sessions={label_horizon_sessions} to keep the last training label "
+            f"end strictly before the first test date (no boundary overlap)."
+        )
     udates = np.array(sorted(pd.to_datetime(pd.unique(dates))))
     n_u = len(udates)
     b = np.linspace(0, n_u, n_folds + 2).astype(int)
@@ -81,12 +106,18 @@ def purged_test_windows(dates, n_folds, embargo_sessions):
         if lo_i > hi_i or lo_i >= n_u:
             continue
         test_lo, test_hi = udates[lo_i], udates[hi_i]
-        # Embargo cutoff index = the unique-date position that is `embargo_sessions` trading
-        # sessions BEFORE the test-start position. Clamp at 0 so early folds still purge fully.
-        cutoff_i = lo_i - int(embargo_sessions)
+        # Embargo cutoff index = the unique-date position `embargo_sessions` trading sessions
+        # BEFORE the test-start position. With embargo > horizon, the last training label
+        # (ending at cutoff_i + horizon) lands strictly before lo_i.
+        cutoff_i = lo_i - embargo_sessions
         if cutoff_i < 0:
             # Not enough history to embargo a full horizon: drop this fold rather than leak.
             continue
+        # Defensive invariant: the last training label must end strictly before the test start.
+        assert cutoff_i + label_horizon_sessions < lo_i, (
+            f"purge invariant violated: label end {cutoff_i + label_horizon_sessions} "
+            f">= test start {lo_i}"
+        )
         train_end = udates[cutoff_i]
         out.append((pd.Timestamp(train_end), pd.Timestamp(test_lo), pd.Timestamp(test_hi)))
     return out

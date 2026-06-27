@@ -27,45 +27,58 @@ def _session_gap(udates, train_end, test_lo):
     return i_test - i_train
 
 
-def test_purge_is_60_trading_sessions_not_calendar_days():
-    """THE leakage fix: with a business-day index, ~60 trading sessions span ~84 calendar
-    days. A purge of 60 *calendar* days would leave only ~42 sessions of separation and let
-    a fwd_60d label near the cutoff overlap the test interval. Assert the embargo is counted
-    in trading sessions: the last training-label-end precedes the first test timestamp by
-    >= 60 trading sessions (no label overlap)."""
+def test_purge_is_trading_sessions_not_calendar_days_strict_no_overlap():
+    """THE leakage fix + the Codex boundary point: with a business-day index, ~60 trading
+    sessions span ~84 calendar days. A purge of 60 *calendar* days would leave only ~42 sessions
+    of separation and let a fwd_60d label near the cutoff overlap the test interval. Assert the
+    embargo is counted in trading sessions AND that the last training-label-end falls STRICTLY
+    before the first test date (no boundary touch): the default embargo strictly exceeds the
+    label horizon, so label_end_idx < test_lo_idx, not <=."""
     dates = pd.to_datetime(pd.date_range("2016-01-01", "2024-12-31", freq="B")).values
-    wins = rvg.purged_test_windows(dates, n_folds=5, embargo_sessions=60)
+    wins = rvg.purged_test_windows(dates, n_folds=5, embargo_sessions=rvg.EMB_SESSIONS)
     assert len(wins) >= 1
+    assert rvg.EMB_SESSIONS > rvg.LABEL_HORIZON_SESSIONS  # strict separation is achievable
     udates = np.array(sorted(pd.to_datetime(pd.unique(dates))))
     prev_hi = None
     for train_end, lo, hi in wins:
         assert lo <= hi
-        # >= 60 TRADING SESSIONS between the training cutoff and the first test date.
+        # >= EMB_SESSIONS TRADING SESSIONS between the training cutoff and the first test date.
         gap = _session_gap(udates, train_end, lo)
-        assert gap >= 60, f"only {gap} trading sessions of embargo (need >= 60)"
-        # And the calendar gap is materially LARGER than 60 days (proving sessions != days).
+        assert gap >= rvg.EMB_SESSIONS, f"only {gap} trading sessions of embargo"
+        # And the calendar gap is materially LARGER than the session count (sessions != days).
         cal_days = (pd.Timestamp(lo) - pd.Timestamp(train_end)).days
-        assert cal_days > 60, f"calendar gap {cal_days}d not > 60 (would be a calendar-day purge)"
-        # No training label (ends at train_end, horizon 60 sessions) can reach the test start:
-        # train_end + 60 sessions <= the date at index(train_end)+60, which is <= test_lo.
+        assert cal_days > rvg.EMB_SESSIONS, f"calendar gap {cal_days}d <= embargo (calendar purge)"
+        # STRICT no-overlap: a training label (ends at train_end, horizon 60 sessions) ends
+        # strictly BEFORE the test start — label_end_idx < test_lo_idx (not <=).
         i_train = int(np.searchsorted(udates, np.datetime64(pd.Timestamp(train_end))))
+        i_test = int(np.searchsorted(udates, np.datetime64(pd.Timestamp(lo))))
         label_end_idx = i_train + rvg.LABEL_HORIZON_SESSIONS
-        if label_end_idx < len(udates):
-            assert pd.Timestamp(udates[label_end_idx]) <= pd.Timestamp(lo)
+        assert label_end_idx < i_test, (
+            f"label end idx {label_end_idx} not strictly < test start idx {i_test} (overlap)"
+        )
         # Test folds do NOT share a boundary with the previous fold.
         if prev_hi is not None:
             assert pd.Timestamp(lo) > pd.Timestamp(prev_hi)
         prev_hi = hi
 
 
+def test_purge_rejects_embargo_not_exceeding_label_horizon():
+    """A 60-session embargo on a 60-session label leaves the last training label ending exactly
+    ON test_lo (boundary overlap). The function must fail closed, not silently leak."""
+    dates = pd.to_datetime(pd.date_range("2016-01-01", "2024-12-31", freq="B")).values
+    with pytest.raises(ValueError, match="STRICTLY greater"):
+        rvg.purged_test_windows(dates, n_folds=5, embargo_sessions=60,
+                                label_horizon_sessions=60)
+
+
 def test_purge_drops_early_fold_without_enough_history():
     """A fold whose test start is fewer than `embargo_sessions` into the index cannot be
     embargoed a full horizon, so it is dropped rather than allowed to leak."""
     dates = pd.to_datetime(pd.date_range("2020-01-01", periods=120, freq="B")).values
-    wins = rvg.purged_test_windows(dates, n_folds=5, embargo_sessions=60)
+    wins = rvg.purged_test_windows(dates, n_folds=5, embargo_sessions=rvg.EMB_SESSIONS)
     udates = np.array(sorted(pd.to_datetime(pd.unique(dates))))
     for train_end, lo, _hi in wins:
-        assert _session_gap(udates, train_end, lo) >= 60
+        assert _session_gap(udates, train_end, lo) >= rvg.EMB_SESSIONS
 
 
 def test_assert_regime_uniform_passes_when_uniform_and_returns_market_label():
