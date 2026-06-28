@@ -2652,17 +2652,46 @@ def main():
     log.info("Artifact: %s  (kind=%s)", artifact_path, artifact.get("kind"))
     log.info("=" * 60)
 
-    if args.derive_config_from_prod:
-        try:
-            from .wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
-        except ImportError:
-            from wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
+    # ONE parity contract (shared with umbrella scripts/run_wf_gate.py): select
+    # the production reference whose scorer kind MATCHES the candidate's declared
+    # kind (read from artifact metadata, not a path suffix). The same selected
+    # reference is used for BOTH derivation and the parity check, so a genuine
+    # prod-vs-candidate mismatch (e.g. a GBDT candidate with no GBDT reference)
+    # STILL fails parity. Fail closed on an unknown/unmatched kind.
+    try:
+        from .wf_config_builder import (  # noqa: PLC0415
+            build_wf_config_from_prod,
+            select_prod_reference_for_candidate,
+        )
+    except ImportError:
+        from wf_config_builder import (  # noqa: PLC0415
+            build_wf_config_from_prod,
+            select_prod_reference_for_candidate,
+        )
 
+    try:
+        prod_cfg_path = select_prod_reference_for_candidate(
+            artifact.get("kind"),
+            strategy_dir=STRATEGY_DIR,
+            env_override=os.environ.get("RENQUANT_STRATEGY_CONFIG"),
+        )
+    except ValueError as exc:
+        log.error(
+            "WF config parity reference selection FAILED (fail closed): %s",
+            exc,
+        )
+        sys.exit(2)
+    log.info(
+        "Selected kind-matched production reference for candidate kind %s: %s",
+        artifact.get("kind"),
+        prod_cfg_path,
+    )
+
+    if args.derive_config_from_prod:
         base_cfg_path = STRATEGY_DIR / args.strategy_config
         if not base_cfg_path.exists():
             log.error("base strategy config not found: %s", base_cfg_path)
             sys.exit(2)
-        prod_cfg_path = _prod_strategy_config_path()
         prod_cfg = json.loads(prod_cfg_path.read_text())
         base_cfg = json.loads(base_cfg_path.read_text())
         manifest_path = ((base_cfg.get("walkforward") or {}).get("manifest_path"))
@@ -2718,7 +2747,8 @@ def main():
         {"passed": True, "reason": "skipped"}
         if args.skip_config_parity or not cfg_path.exists()
         else evaluate_wf_config_parity(
-            _prod_strategy_config_path(),
+            # Same kind-matched production reference used for derivation above.
+            prod_cfg_path,
             cfg_path,
             candidate_artifact=artifact_path,
             strategy_dir=STRATEGY_DIR,
