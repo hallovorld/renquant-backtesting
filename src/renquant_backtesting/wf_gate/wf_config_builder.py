@@ -75,6 +75,58 @@ def _set_path(obj: dict[str, Any], dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+# Artifact-suffix → scorer-kind inference, kept aligned with the parity guard
+# in ``wf_config_parity.py`` (``TORCH_ARTIFACT_SUFFIXES`` / ``PATCHTST_KINDS``
+# and ``_scorer_kind_artifact_issues``). A PyTorch checkpoint implies a
+# PatchTST scorer; a JSON ``panel-ltr*`` artifact implies the GBDT/xgb scorer.
+_TORCH_ARTIFACT_SUFFIXES = {".pt", ".pth", ".ckpt"}
+_PATCHTST_KIND = "hf_patchtst"
+_GBDT_KIND = "xgb"
+
+
+def _normalize_candidate_kind(kind: str | None) -> str | None:
+    """Normalize an explicit candidate kind to the parity-guard vocabulary.
+
+    Mirrors ``wf_config_parity._normalize_kind`` so an explicitly passed
+    ``panel_ltr_xgboost``/``xgboost`` collapses to ``xgb`` and PatchTST aliases
+    are preserved. Returns ``None`` for an empty/unknown value so the caller
+    falls back to artifact-suffix inference.
+    """
+    if not kind:
+        return None
+    value = str(kind).lower()
+    aliases = {
+        "panel_ltr_xgboost": _GBDT_KIND,
+        "xgboost": _GBDT_KIND,
+    }
+    return aliases.get(value, value) or None
+
+
+def _kind_from_artifact(artifact_path: str | None) -> str | None:
+    """Infer the panel-scoring ``kind`` implied by a candidate artifact.
+
+    The derived WF eval config must stay internally consistent: pointing
+    ``ranking.panel_scoring.artifact_path`` at a candidate while leaving
+    ``ranking.panel_scoring.kind`` at whatever the prod config carried (e.g.
+    ``hf_patchtst``) makes the parity guard
+    (``_scorer_kind_artifact_issues``) fail when prod is PatchTST but the
+    candidate is a GBDT ``panel-ltr.json``. We mirror the parity guard's
+    suffix/name heuristic so the kind always matches the artifact actually
+    loaded.
+
+    Returns the inferred kind, or ``None`` when the artifact path is empty or
+    its type cannot be classified (caller then leaves the prod kind untouched).
+    """
+    if not artifact_path:
+        return None
+    suffix = Path(artifact_path).suffix.lower()
+    if suffix in _TORCH_ARTIFACT_SUFFIXES:
+        return _PATCHTST_KIND
+    if suffix == ".json":
+        return _GBDT_KIND
+    return None
+
+
 def _first_manifest_artifact(manifest_path: Path) -> str | None:
     if not manifest_path.exists():
         return None
@@ -130,13 +182,22 @@ def build_wf_config_from_prod(
     base_wf_config: dict[str, Any] | None = None,
     strategy_dir: Path = STRATEGY_DIR,
     preserve_experiment_overrides: bool = False,
+    candidate_kind: str | None = None,
 ) -> dict[str, Any]:
     """Return a WF eval config with production decision semantics.
 
     Allowed non-semantic differences:
       - ``walkforward`` manifest dispatch.
       - ``ranking.panel_scoring.artifact_path`` placeholder for diagnostics;
-        SimAdapter uses the manifest when walkforward is enabled.
+        SimAdapter uses the manifest when walkforward is enabled. When the
+        placeholder is overwritten, ``ranking.panel_scoring.kind`` is also set
+        to the kind implied by that candidate artifact (``candidate_kind`` if
+        provided, otherwise inferred from the artifact suffix) so the derived
+        config stays internally consistent. Without this, a PatchTST prod
+        config (``kind=hf_patchtst``) evaluating a GBDT candidate
+        (``panel-ltr.json``) would keep ``kind=hf_patchtst`` while pointing at
+        a non-PatchTST JSON artifact, which the prod/WF parity guard
+        (``_scorer_kind_artifact_issues``) correctly rejects.
       - ``ranking.panel_scoring.global_calibration.*`` artifact paths. These
         are evaluation artifacts and must remain point-in-time / sim-scoped,
         not production full-sample paths.
@@ -176,6 +237,18 @@ def build_wf_config_from_prod(
     placeholder = _first_manifest_artifact(manifest_abs) if manifest_abs else None
     if placeholder:
         _set_path(cfg, "ranking.panel_scoring.artifact_path", placeholder)
+        # Keep ``kind`` consistent with the candidate artifact we just pointed
+        # at. The prod config that seeds ``cfg`` may be the PatchTST primary
+        # (``kind=hf_patchtst``); leaving that kind in place while the
+        # artifact_path points at a GBDT ``panel-ltr.json`` makes the derived
+        # config internally inconsistent and the prod/WF parity guard fails.
+        # Prefer an explicit candidate kind; otherwise infer from the artifact.
+        derived_kind = (
+            _normalize_candidate_kind(candidate_kind)
+            or _kind_from_artifact(placeholder)
+        )
+        if derived_kind:
+            _set_path(cfg, "ranking.panel_scoring.kind", derived_kind)
 
     # Preserve point-in-time calibration artifact paths from the WF base config.
     # Production calibrators are usually fitted on the full current panel, so
