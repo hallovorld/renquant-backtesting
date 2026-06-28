@@ -598,9 +598,11 @@ def _check_wf_gate(staging_data: dict, staging_path: Path) -> None:
         wf_3cut_sharpe_mean:  float
         wf_3cut_sharpe_std:   float
         wf_3cut_apy_mean:     float
-        sanity_shuffled_ic:   float       # must be ≈ 0
-        sanity_placebo_ic:    float       # must be < 0.5 × same-row aligned real IC
+        sanity_shuffled_ic:   float       # must be ≈ 0 (HARD true-leak guard)
+        sanity_placebo_ic:    float       # raw diagnostic (carries ~0.04 autocorr floor)
         sanity_placebo_aligned_real_ic: float
+        sanity_placebo_genuine_ic: float  # gate (v3): aligned_real_ic − placebo_ic,
+                                          # must clear max(0.02, 0.25×|aligned_real_ic|)
         candidate_artifact_used: bool     # True for leakage-safe static eval
         recipe_validated:      bool       # True for matching manifest eval
         run_at:               str (ISO-8601)

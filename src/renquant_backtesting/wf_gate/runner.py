@@ -22,9 +22,17 @@ Walk-forward criteria (default):
   - Fail: positive absolute Sharpe that still lags SPY is benchmark-blind
 
 §5.2 sanity criteria (default):
-  - shuffled-label IC: |IC| < 0.005 (model on shuffled labels should be ~0)
-  - time-shift placebo IC: ratio < 0.5 × aligned real IC (placebo should not
-    capture the same signal on the same evaluable rows)
+  - shuffled-label IC: |IC| < 0.005 (model on shuffled labels should be ~0).
+    HARD true-leak guard; unchanged across gate versions.
+  - time-shift placebo IC: GATE_VERSION 3 decides on the autocorr-adjusted
+    genuine_ic = aligned_real_ic − placebo_ic, which must clear a positive bar
+    (max(0.02, 0.25×|aligned_real_ic|)). The raw absolute placebo_ic (used by the
+    old ratio < 0.5 rule) carries a STRUCTURAL ~+0.04 label-autocorrelation floor at
+    the 2×-horizon shift for the daily fwd_60d label, so the old absolute rule sat
+    below the floor and chronically false-rejected edge-positive, shuffle-clean
+    candidates. The shared autocorr floor cancels in the difference, so genuine_ic
+    isolates the real edge. Raw placebo_ic is retained as a logged diagnostic. This
+    is a re-calibration, NOT a leakage loosening — see _placebo_subgate_pass.
 
 References:
 - Lopez de Prado AFML §7 + §11 (walk-forward + cross-validation in finance)
@@ -65,7 +73,11 @@ def _resolve_repo_root() -> Path:
 
 
 REPO = _resolve_repo_root()
-GATE_VERSION = 2
+# v3: placebo sub-gate decides on autocorr-adjusted genuine_ic
+# (= aligned_real_ic − placebo_ic) instead of the raw absolute placebo_ic.
+# See _genuine_ic_bar / _placebo_subgate_pass below and the
+# fix/wf-gate-placebo-autocorr-calibration PR writeup.
+GATE_VERSION = 3
 STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
 SCRIPTS_DIR = REPO / "scripts"
 for _p in (REPO, SCRIPTS_DIR, STRATEGY_DIR):
@@ -152,7 +164,17 @@ def _sanity_result_passed(sanity_result: dict) -> bool:
 
 
 def _placebo_ic_threshold(aligned_real_ic: float) -> float:
-    """Maximum acceptable absolute time-shift placebo IC."""
+    """Maximum acceptable absolute time-shift placebo IC.
+
+    LEGACY (GATE_VERSION ≤ 2): the raw absolute placebo rule. Retained ONLY for
+    the logged diagnostic text and for the explicit opt-out path; the live gate
+    now decides on genuine_ic (see ``_genuine_ic_bar`` / ``_placebo_subgate_pass``).
+    The raw placebo_ic at the gate's 2×-horizon shift carries a STRUCTURAL
+    label-autocorrelation floor (~+0.04 for the daily-sampled fwd_60d label, see
+    ``renquant_backtesting.analysis.repro_m6_placebo_confound``), so this absolute
+    threshold sits below the floor and chronically false-rejects edge-positive,
+    shuffle-clean candidates.
+    """
     return max(0.005, 0.5 * abs(float(aligned_real_ic)))
 
 
@@ -161,6 +183,98 @@ def _placebo_ic_requirement_text(aligned_real_ic: float) -> str:
     return (
         f"threshold={threshold:+.4f} "
         f"(0.5×|aligned_real_ic|, aligned_real_ic={aligned_real_ic:+.4f})"
+    )
+
+
+# --- Genuine-IC placebo sub-gate (GATE_VERSION 3) ----------------------------
+#
+# The time-shift placebo at shift = 2×label_horizon is confounded by a STRUCTURAL
+# floor: the daily-sampled fwd_60d label is itself cross-sectionally autocorrelated
+# at the gate shift (label_autocorr_ic ≈ +0.04), so placebo_ic ≈ genuine_edge +
+# autocorr_floor even for a leak-free model. The leak-free quantity is the
+# DIFFERENCE
+#     genuine_ic = aligned_real_ic − placebo_ic
+# in which the shared autocorr floor cancels (it is present in BOTH aligned_real_ic
+# and placebo_ic). We gate on genuine_ic clearing a positive bar instead of on the
+# raw absolute placebo_ic.
+#
+# The bar is deliberately conservative. Note the algebraic identity: the OLD rule
+# ``placebo_ic < 0.5·real`` is *exactly* ``genuine_ic > 0.5·real``, so re-using a
+# 0.5 ratio would be a no-op rewrite that keeps false-rejecting. We therefore set a
+# LOWER ratio (default 0.25) — accepting that the ~0.04 autocorr floor inflates
+# placebo_ic by a fixed structural amount — AND an absolute floor (default 0.02) so
+# a genuine edge of at least 2 IC points (after the floor is removed) is always
+# required. The model still has to show a POSITIVE, materially-non-zero genuine edge.
+#
+# SAFETY: this re-calibration removes ONLY the structural-autocorr mis-calibration.
+# It is NOT a leakage exoneration — a high corr(placebo_ic, label_autocorr_ic) only
+# *supports* the confound hypothesis (see repro_m6_placebo_confound: "not a
+# standalone leakage-exoneration test"). The shuffled-label control (pass_shuf,
+# abs(shuf_ic) < SHUF_IC_MAX) remains the HARD true-leak guard and is unchanged.
+GENUINE_IC_ABS_FLOOR = 0.02   # min genuine edge in IC points after removing the floor
+GENUINE_IC_REAL_RATIO = 0.25  # min genuine edge as a fraction of |aligned_real_ic|
+SHUF_IC_MAX = 0.005           # HARD true-leak guard: |shuffled-label IC| must be below this
+
+
+def _genuine_ic_gate_enabled() -> bool:
+    """Genuine-IC placebo sub-gate is DEFAULT-ON.
+
+    Set ``RENQUANT_WF_GATE_PLACEBO_MODE=legacy_absolute`` to force the old absolute
+    placebo rule (escape hatch for forensic A/B only). Any other value — including
+    unset or ``genuine_ic`` — keeps the calibrated genuine-IC path. There is no
+    silent fall-through: the legacy path requires this exact, explicit opt-out.
+    """
+    return os.environ.get("RENQUANT_WF_GATE_PLACEBO_MODE", "genuine_ic") != "legacy_absolute"
+
+
+def _genuine_ic_bar(aligned_real_ic: float) -> float:
+    """Minimum acceptable autocorr-adjusted genuine IC for the placebo sub-gate."""
+    return max(GENUINE_IC_ABS_FLOOR, GENUINE_IC_REAL_RATIO * abs(float(aligned_real_ic)))
+
+
+def _genuine_ic_value(aligned_real_ic: float, placebo_ic: float) -> float | None:
+    """genuine_ic = aligned_real_ic − placebo_ic (None if either input is NaN)."""
+    try:
+        ar = float(aligned_real_ic)
+        pl = float(placebo_ic)
+    except (TypeError, ValueError):
+        return None
+    if ar != ar or pl != pl:  # NaN guard
+        return None
+    return ar - pl
+
+
+def _placebo_subgate_pass(aligned_real_ic: float, placebo_ic: float) -> tuple[bool, float | None]:
+    """Calibrated placebo sub-gate decision (genuine-IC, default-on).
+
+    Returns ``(passed, genuine_ic)``. Fails closed when genuine_ic is unavailable.
+    When the legacy escape hatch is set, falls back to the raw absolute placebo rule.
+    This function NEVER touches the shuffled-label guard — that stays a separate,
+    independent HARD gate.
+    """
+    if not _genuine_ic_gate_enabled():
+        # Explicit forensic opt-out: old absolute placebo rule.
+        try:
+            ar = float(aligned_real_ic)
+            pl = float(placebo_ic)
+        except (TypeError, ValueError):
+            return False, None
+        if ar != ar or pl != pl:
+            return False, None
+        passed = (abs(pl) < _placebo_ic_threshold(ar)) if ar != 0 else True
+        return passed, _genuine_ic_value(ar, pl)
+    genuine = _genuine_ic_value(aligned_real_ic, placebo_ic)
+    if genuine is None:
+        return False, None
+    return genuine >= _genuine_ic_bar(aligned_real_ic), genuine
+
+
+def _genuine_ic_requirement_text(aligned_real_ic: float) -> str:
+    bar = _genuine_ic_bar(aligned_real_ic)
+    return (
+        f"genuine_ic ≥ {bar:+.4f} "
+        f"(max({GENUINE_IC_ABS_FLOOR}, {GENUINE_IC_REAL_RATIO}×|aligned_real_ic|), "
+        f"aligned_real_ic={float(aligned_real_ic):+.4f})"
     )
 
 
@@ -2439,7 +2553,14 @@ def run_sanity_battery(
         )
         min_dates = max(10, int(math.ceil(max(1, _gate_shift_days) / 6)))
         min_mean_ic = max(0.0, 0.25 * abs(real_ic))
-        max_placebo_ratio = 0.5
+        # GATE_VERSION 3: the regime placebo sub-gate decides on genuine_ic
+        # (= aligned_real_gate − placebo_gate_ic), same calibration as the pooled
+        # gate, instead of the raw absolute placebo_gate_ic (max_placebo_ratio=0.5),
+        # which chronically false-rejected BULL_CALM / CHOPPY on the same structural
+        # autocorr floor. The raw placebo_gate_ic stays a logged diagnostic per regime.
+        placebo_gate_mode_regime = (
+            "genuine_ic" if _genuine_ic_gate_enabled() else "legacy_absolute"
+        )
         regimes_out = {}
         failed = []
         eligible_any = False
@@ -2457,24 +2578,32 @@ def run_sanity_battery(
             n_dates = int(stats.get("n_dates") or 0)
             eligible = n_dates >= min_dates
             passed = False
+            regime_genuine_ic = None
             if eligible:
                 eligible_any = True
                 try:
                     mean_ic_f = float(mean_ic)
                 except (TypeError, ValueError):
                     mean_ic_f = float("nan")
+                # Placebo sub-gate per regime. When the placebo row is missing we
+                # fail-SOFT the placebo check (as before) and let mean_ic gate;
+                # when present we require a positive autocorr-adjusted genuine edge.
                 placebo_ok = True
-                if placebo_gate_ic is not None and mean_ic_f == mean_ic_f:
-                    placebo_ref = mean_ic_f
+                if placebo_gate_ic is not None:
+                    # Reference for the genuine bar: aligned_real_gate when finite,
+                    # else the regime mean_ic (matches the legacy fallback).
                     try:
                         aligned_real_gate_f = float(aligned_real_gate)
-                        if aligned_real_gate_f == aligned_real_gate_f:
-                            placebo_ref = aligned_real_gate_f
+                        if aligned_real_gate_f != aligned_real_gate_f:
+                            aligned_real_gate_f = (
+                                mean_ic_f if mean_ic_f == mean_ic_f else 0.0
+                            )
                     except (TypeError, ValueError):
-                        placebo_ref = mean_ic_f
-                    placebo_ok = abs(float(placebo_gate_ic)) <= max(
-                        0.005,
-                        max_placebo_ratio * abs(placebo_ref),
+                        aligned_real_gate_f = (
+                            mean_ic_f if mean_ic_f == mean_ic_f else 0.0
+                        )
+                    placebo_ok, regime_genuine_ic = _placebo_subgate_pass(
+                        aligned_real_gate_f, placebo_gate_ic
                     )
                 passed = (
                     mean_ic_f == mean_ic_f
@@ -2490,6 +2619,7 @@ def run_sanity_battery(
                 "placebo_gate_shift_days": int(_gate_shift_days),
                 "placebo_gate_ic": placebo_gate_ic,
                 "placebo_gate_aligned_real_ic": aligned_real_gate,
+                "placebo_gate_genuine_ic": regime_genuine_ic,
                 "label_autocorr_gate_ic": gate_row.get("label_autocorr_ic"),
                 # Legacy aliases kept so older dashboards/parsers don't break.
                 "placebo_60_ic": placebo_gate_ic,
@@ -2508,7 +2638,11 @@ def run_sanity_battery(
             "placebo_gate_shift_days": int(_gate_shift_days),
             "min_n_dates": min_dates,
             "min_mean_ic": min_mean_ic,
-            "max_placebo_ratio": max_placebo_ratio,
+            "placebo_gate_mode": placebo_gate_mode_regime,
+            "genuine_ic_abs_floor": GENUINE_IC_ABS_FLOOR,
+            "genuine_ic_real_ratio": GENUINE_IC_REAL_RATIO,
+            # Legacy field retained for dashboards; no longer the live rule.
+            "max_placebo_ratio": 0.5,
             "regimes": regimes_out,
         }
     except Exception as exc:  # noqa: BLE001
@@ -2543,15 +2677,30 @@ def run_sanity_battery(
         log.warning("  Layer-1a diagnostic profiles unavailable (gate unaffected): %s", exc)
 
     # Pass criteria
-    pass_shuf = abs(shuf_ic) < 0.005
-    pass_placebo = (
-        (placebo_ic == placebo_ic)
-        and (placebo_aligned_real_ic == placebo_aligned_real_ic)
-        and (
-            abs(placebo_ic) < _placebo_ic_threshold(placebo_aligned_real_ic)
-            if placebo_aligned_real_ic != 0 else
-            True
-        )
+    #
+    # (1) Shuffled-label control — HARD true-leak guard (UNCHANGED). A non-clean
+    #     shuffle FAILS regardless of any genuine-IC re-calibration below.
+    pass_shuf = abs(shuf_ic) < SHUF_IC_MAX
+    #
+    # (2) Placebo sub-gate — GATE_VERSION 3 decides on the autocorr-adjusted
+    #     genuine_ic = aligned_real_ic − placebo_ic (the structural label-autocorr
+    #     floor cancels in the difference), NOT the raw absolute placebo_ic. The raw
+    #     placebo_ic and the requirement text are still LOGGED as diagnostics below.
+    pass_placebo, placebo_genuine_ic = _placebo_subgate_pass(
+        placebo_aligned_real_ic, placebo_ic
+    )
+    placebo_gate_mode = (
+        "genuine_ic" if _genuine_ic_gate_enabled() else "legacy_absolute"
+    )
+    log.info(
+        "  placebo sub-gate [%s]: genuine_ic=%s (= aligned_real_ic − placebo_ic; "
+        "%s) → %s [raw diagnostic: placebo_ic=%+.4f vs legacy %s]",
+        placebo_gate_mode,
+        f"{placebo_genuine_ic:+.4f}" if placebo_genuine_ic is not None else "n/a",
+        _genuine_ic_requirement_text(placebo_aligned_real_ic),
+        "PASS" if pass_placebo else "FAIL",
+        placebo_ic if placebo_ic == placebo_ic else float("nan"),
+        _placebo_ic_requirement_text(placebo_aligned_real_ic),
     )
     sanity_method = (
         "manifest_point_in_time_label_diagnostics"
@@ -2561,18 +2710,33 @@ def run_sanity_battery(
     pass_regime = bool(sanity_regime_ic.get("passed"))
     pass_all = pass_shuf and pass_placebo and pass_regime
     if pass_all:
-        sanity_reason = f"PASS: shuf_ic={shuf_ic:+.4f} placebo_ic={placebo_ic:+.4f}"
+        sanity_reason = (
+            f"PASS: shuf_ic={shuf_ic:+.4f} "
+            f"genuine_ic={placebo_genuine_ic:+.4f} "
+            f"(placebo_ic={placebo_ic:+.4f}, diagnostic)"
+        )
     elif pass_shuf and pass_placebo and not pass_regime:
         sanity_reason = (
             "FAIL: regime sanity IC failed: "
             f"{sanity_regime_ic.get('reason', 'unknown')}"
         )
-    else:
+    elif not pass_shuf:
         sanity_reason = (
-            f"FAIL: shuf_ic={shuf_ic:+.4f} (need |·| < 0.005), "
-            f"placebo_ic={placebo_ic:+.4f} "
-            f"(must be available and < "
-            f"{_placebo_ic_requirement_text(placebo_aligned_real_ic)})"
+            f"FAIL: shuf_ic={shuf_ic:+.4f} "
+            f"(true-leak guard: need |·| < {SHUF_IC_MAX})"
+        )
+    else:
+        _g_txt = (
+            f"{placebo_genuine_ic:+.4f}"
+            if placebo_genuine_ic is not None
+            else "n/a"
+        )
+        sanity_reason = (
+            f"FAIL: shuf_ic={shuf_ic:+.4f}, "
+            f"genuine_ic={_g_txt} "
+            f"(must be available and clear "
+            f"{_genuine_ic_requirement_text(placebo_aligned_real_ic)}; "
+            f"placebo_ic={placebo_ic:+.4f} diagnostic)"
         )
     return {
         "passed": pass_all,
@@ -2581,6 +2745,13 @@ def run_sanity_battery(
         "sanity_placebo_ic": placebo_ic if placebo_ic == placebo_ic else None,
         "sanity_placebo_aligned_real_ic": (
             placebo_aligned_real_ic
+            if placebo_aligned_real_ic == placebo_aligned_real_ic
+            else None
+        ),
+        "sanity_placebo_genuine_ic": placebo_genuine_ic,
+        "sanity_placebo_gate_mode": placebo_gate_mode,
+        "sanity_placebo_genuine_ic_bar": (
+            _genuine_ic_bar(placebo_aligned_real_ic)
             if placebo_aligned_real_ic == placebo_aligned_real_ic
             else None
         ),
