@@ -54,6 +54,7 @@ def synthetic_artifact(tmp_path):
         "kind": "panel_ltr_xgboost",
         "trained_date": "2026-05-18",
         "config_fingerprint": "sha256:abc",
+        "feature_cols": ["f1", "f2"],
     }))
     return p
 
@@ -175,8 +176,20 @@ def test_pipeline_runnable_with_stubs(synthetic_artifact, tmp_path, monkeypatch)
     monkeypatch.setattr(wf_runner, "run_sanity_battery",
                         lambda *a, **kw: {"passed": True, "real_ic": 0.05})
 
-    # Minimal strategy config for the few Tasks that read it
-    (tmp_path / "strategy_config.shadow.json").write_text("{}")
+    # Minimal strategy config for the few Tasks that read it. Under the
+    # converged parity contract, CheckConfigParityTask selects this GBDT/shadow
+    # config as the kind-matched reference for the panel_ltr_xgboost candidate,
+    # so it must declare kind=xgb and point at the candidate artifact (the
+    # static-artifact fallback the feature-contract check reads).
+    (tmp_path / "strategy_config.shadow.json").write_text(json.dumps({
+        "ranking": {
+            "panel_scoring": {
+                "enabled": True,
+                "kind": "xgb",
+                "artifact_path": str(synthetic_artifact),
+            }
+        }
+    }))
 
     pipeline = build_wf_gate_pipeline()
     ctx = WfGateContext(
