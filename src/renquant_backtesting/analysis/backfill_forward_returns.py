@@ -4,7 +4,8 @@
 Joins each candidate decision day with the parquet OHLCV cache and
 writes close_price + fwd_{1,5,10,20,60}d into the ticker_forward_returns
 table. Idempotent upsert: skips rows where all 4 horizons are already
-populated.
+populated. Decision dates without their own bar (weekend/holiday-dated
+live runs) resolve as-of: base = last bar at or before the date.
 
 Usage::
 
@@ -63,6 +64,10 @@ def _load_ohlcv(ticker: str, cache_root: Path) -> "pd.DataFrame | None":
     # Parquet cache indexes on Date already; normalise if not
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
+    # _compute_row's as-of searchsorted (and the old idx+h arithmetic alike)
+    # requires a sorted index; parquets are written sorted, guard anyway.
+    if not df.index.is_monotonic_increasing:
+        df = df.sort_index()
     return df
 
 
@@ -71,14 +76,26 @@ def _compute_row(
     ticker: str,
     df: "pd.DataFrame",
 ) -> dict | None:
-    """Return an upsert payload dict, or None if close_price unavailable."""
+    """Return an upsert payload dict, or None if no bar exists at or before `date`.
+
+    As-of semantics (S5 ledger-coverage fix): the base bar is the LAST bar at
+    or before `date`, not an exact index hit. Decision rows recorded on
+    non-trading dates (ad-hoc weekend live sessions) previously got no
+    ticker_forward_returns row EVER — the pair re-entered the backfill
+    worklist daily and was re-skipped daily, which left 597/5199 aged live
+    candidate rows (11.5%) permanently unjoinable to a forward outcome. For a
+    Saturday decision the base is Friday's close — exactly the price context
+    the decision saw — and fwd_h counts trading bars after that base, so a
+    weekend row resolves identically to the preceding session's row. For
+    trading-day dates the base bar is the date's own bar: behavior unchanged.
+    """
     import pandas as pd  # noqa: PLC0415
     ts = pd.Timestamp(date)
-    if ts not in df.index:
-        return None
+    idx = int(df.index.searchsorted(ts, side="right")) - 1
+    if idx < 0:
+        return None  # date precedes the first cached bar (not yet listed)
 
-    close = float(df.loc[ts, "close"])
-    idx   = df.index.get_loc(ts)
+    close = float(df.iloc[idx]["close"])
 
     out: dict = {
         "as_of_date":  date,
