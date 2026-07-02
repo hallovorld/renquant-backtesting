@@ -4,7 +4,8 @@
 Joins each candidate decision day with the parquet OHLCV cache and
 writes close_price + fwd_{1,5,10,20,60}d into the ticker_forward_returns
 table. Idempotent upsert: skips rows where all 4 horizons are already
-populated.
+populated. Decision dates without their own bar (weekend/holiday-dated
+live runs) resolve as-of: base = last bar at or before the date.
 
 Usage::
 
@@ -25,6 +26,9 @@ import logging
 import sys
 from pathlib import Path
 
+from renquant_backtesting.analysis.session_resolution import (
+    classify_date, nyse_sessions, session_key,
+)
 from renquant_backtesting.repo_root import resolve_repo_root
 
 logging.basicConfig(
@@ -63,6 +67,10 @@ def _load_ohlcv(ticker: str, cache_root: Path) -> "pd.DataFrame | None":
     # Parquet cache indexes on Date already; normalise if not
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
+    # _compute_row's as-of searchsorted (and the old idx+h arithmetic alike)
+    # requires a sorted index; parquets are written sorted, guard anyway.
+    if not df.index.is_monotonic_increasing:
+        df = df.sort_index()
     return df
 
 
@@ -70,15 +78,43 @@ def _compute_row(
     date: datetime.date,
     ticker: str,
     df: "pd.DataFrame",
+    sessions: "pd.DatetimeIndex | None" = None,
 ) -> dict | None:
-    """Return an upsert payload dict, or None if close_price unavailable."""
+    """Return an upsert payload dict, or None if no admissible base bar exists.
+
+    As-of semantics (S5 ledger-coverage fix): the base bar is the LAST bar at
+    or before `date`, not an exact index hit. Decision rows recorded on
+    non-trading dates (ad-hoc weekend live sessions) previously got no
+    ticker_forward_returns row EVER — the pair re-entered the backfill
+    worklist daily and was re-skipped daily, which left 597/5199 aged live
+    candidate rows (11.5%) permanently unjoinable to a forward outcome. For a
+    Saturday decision the base is Friday's close — exactly the price context
+    the decision saw — and fwd_h counts trading bars after that base, so a
+    weekend row resolves identically to the preceding session's row. For
+    trading-day dates the base bar is the date's own bar: behavior unchanged.
+
+    Staleness guard (#60 review round 2): as-of resolution is only admissible
+    when the base bar is not OLDER than the canonical previous NYSE session
+    for `date` (`session_resolution.session_key`). Without the guard a
+    truncated parquet — e.g. a de-watchlisted ticker whose feed stopped —
+    would silently fabricate a weeks-stale base (DOCU's parquet ends
+    2026-05-29; a June decision date must NOT resolve to a 05-29 base close).
+    Such pairs return None, exactly the pre-fix fail-closed posture.
+    """
     import pandas as pd  # noqa: PLC0415
     ts = pd.Timestamp(date)
-    if ts not in df.index:
+    idx = int(df.index.searchsorted(ts, side="right")) - 1
+    if idx < 0:
+        return None  # date precedes the first cached bar (not yet listed)
+
+    base_ts = df.index[idx]
+    if base_ts != ts and base_ts.date() < session_key(date, sessions):
+        # No own bar AND the last cached bar predates the canonical previous
+        # NYSE session -> the parquet is truncated/stale at this date (or the
+        # date is a weekday session the ticker has no bar for). Fail closed.
         return None
 
-    close = float(df.loc[ts, "close"])
-    idx   = df.index.get_loc(ts)
+    close = float(df.iloc[idx]["close"])
 
     out: dict = {
         "as_of_date":  date,
@@ -281,7 +317,17 @@ def main() -> None:
     log.info("Backfilling %d (date, ticker) pairs across %d tickers",
              len(pairs), len(by_ticker))
 
+    # One shared NYSE calendar for the whole worklist (weekend vs holiday
+    # provenance + the _compute_row staleness guard). None -> degraded
+    # weekday fallback, logged once inside nyse_sessions().
+    all_dates = sorted({d for d, _ in pairs})
+    sessions = nyse_sessions(
+        datetime.date.fromisoformat(all_dates[0]) - datetime.timedelta(days=14),
+        datetime.date.fromisoformat(all_dates[-1]) + datetime.timedelta(days=7),
+    )
+
     total_written = 0
+    non_session_counts = {"weekend": 0, "holiday": 0}
     for ticker, dates in sorted(by_ticker.items()):
         df = _load_ohlcv(ticker, cache_root)
         if df is None:
@@ -289,17 +335,35 @@ def main() -> None:
                         ticker, cache_root.name, ticker, len(dates))
             continue
         payload = []
+        ticker_non_session = 0
         for d in dates:
-            row = _compute_row(datetime.date.fromisoformat(d), ticker, df)
+            date = datetime.date.fromisoformat(d)
+            row = _compute_row(date, ticker, df, sessions)
             if row is not None:
                 payload.append(row)
+                kind = classify_date(date, sessions)
+                if kind != "session":
+                    ticker_non_session += 1
+                    non_session_counts[kind] += 1
         if payload:
             written = record_forward_returns(conn, payload)
             total_written += written
-            log.info("  %-6s — wrote %d rows", ticker, written)
+            log.info("  %-6s — wrote %d rows (%d weekend/holiday as-of, resolving to "
+                      "an earlier real session — not an independent observation)",
+                      ticker, written, ticker_non_session)
 
     conn.commit()
-    log.info("Done. %d rows upserted into ticker_forward_returns.", total_written)
+    total_non_session = sum(non_session_counts.values())
+    log.info(
+        "Done. %d rows upserted into ticker_forward_returns "
+        "(storage coverage); %d of those (%.1f%%; %d weekend, %d holiday) are "
+        "non-session as-of duplicates of an earlier real session — "
+        "deduplicate by base_session_date before treating rows as "
+        "independent statistical observations (see analysis.session_resolution).",
+        total_written, total_non_session,
+        100.0 * total_non_session / total_written if total_written else 0.0,
+        non_session_counts["weekend"], non_session_counts["holiday"],
+    )
 
 
 if __name__ == "__main__":

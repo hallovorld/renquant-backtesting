@@ -32,7 +32,7 @@ def _seed_parquet(cache_root: Path, ticker: str, closes: list[float]) -> None:
     df.to_parquet(out)
 
 
-def _seed_candidate_db(db_path: Path) -> None:
+def _seed_candidate_db(db_path: Path, run_date: dt.date = dt.date(2026, 4, 1)) -> None:
     from renquant_pipeline.kernel.persistence import (  # noqa: PLC0415
         get_connection,
         record_candidate_scores,
@@ -47,7 +47,7 @@ def _seed_candidate_db(db_path: Path) -> None:
     run_id = record_pipeline_run(
         conn,
         run_type="live",
-        run_date=dt.date(2026, 4, 1),
+        run_date=run_date,
         strategy="renquant_104",
     )
     candidate = SimpleNamespace(
@@ -129,6 +129,89 @@ def test_repo_root_backfill_computes_forward_returns(
     assert fwd_10d == pytest.approx(0.10)
     assert fwd_20d == pytest.approx(0.20)
     assert fwd_60d == pytest.approx(0.60)
+
+
+def test_compute_row_asof_semantics() -> None:
+    """S5 ledger coverage: non-trading as_of dates resolve as-of, not exact-hit.
+
+    Live runs recorded on weekend dates (04-25/04-26/05-03/05-09/05-17 in the
+    live DB) previously returned None here forever — 597/5199 aged live
+    candidate rows (11.5%) were permanently unjoinable to a forward outcome.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    closes = [100.0 + i for i in range(65)]
+    dates = pd.bdate_range(start=dt.date(2026, 4, 1), periods=len(closes))
+    df = pd.DataFrame({"close": closes}, index=dates)
+
+    # Saturday 2026-04-04: base = Friday 04-03 bar (close 102.0).
+    row = backfill._compute_row(dt.date(2026, 4, 4), "NVDA", df)
+    assert row is not None
+    assert row["close_price"] == 102.0
+    assert row["fwd_1d"] == pytest.approx(103.0 / 102.0 - 1.0)
+    assert row["fwd_20d"] == pytest.approx(122.0 / 102.0 - 1.0)
+    # ... and resolves identically to the preceding Friday's row.
+    fri = backfill._compute_row(dt.date(2026, 4, 3), "NVDA", df)
+    assert fri is not None and fri["fwd_20d"] == row["fwd_20d"]
+
+    # Trading-day behavior unchanged: base is the date's own bar.
+    wed = backfill._compute_row(dt.date(2026, 4, 1), "NVDA", df)
+    assert wed is not None and wed["close_price"] == 100.0
+    assert wed["fwd_1d"] == pytest.approx(0.01)
+
+    # A date before the first cached bar still yields no row.
+    assert backfill._compute_row(dt.date(2026, 3, 31), "NVDA", df) is None
+
+    # Horizons past the cached tail stay None (COALESCE-filled later).
+    tail = backfill._compute_row(dt.date(2026, 4, 4), "NVDA", df.head(10))
+    assert tail is not None
+    assert tail["fwd_5d"] is not None and tail["fwd_20d"] is None
+
+
+def test_repo_root_backfill_covers_weekend_run_date(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fixture-DB proof that the weekend-run gap class is closed end-to-end:
+    a live run recorded on Saturday gets a joinable non-null fwd_20d row."""
+    repo_root = tmp_path / "umbrella"
+    cache_root = repo_root / "data" / "ohlcv"
+    db_path = repo_root / "data" / "runs.db"
+    (repo_root / "backtesting" / "renquant_104").mkdir(parents=True)
+    _seed_parquet(cache_root, "NVDA", [100.0 + i for i in range(65)])
+    _seed_candidate_db(db_path, run_date=dt.date(2026, 4, 4))  # Saturday
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "backfill_forward_returns",
+            "--repo-root",
+            str(repo_root),
+            "--db",
+            "data/runs.db",
+            "--cache-root",
+            "data/ohlcv",
+            "--benchmarks",
+            "",
+        ],
+    )
+    backfill.main()
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        """
+        SELECT tfr.close_price, tfr.fwd_20d
+          FROM candidate_scores cs
+          JOIN pipeline_runs ps ON ps.run_id = cs.run_id
+          JOIN ticker_forward_returns tfr
+            ON tfr.as_of_date = ps.run_date AND tfr.ticker = cs.ticker
+        """
+    ).fetchone()
+    assert row is not None, "Saturday-dated decision row must join a forward outcome"
+    close, fwd_20d = row
+    assert close == 102.0  # Friday 2026-04-03 close, the decision's price context
+    assert fwd_20d == pytest.approx(122.0 / 102.0 - 1.0)
 
 
 def test_rows_needing_backfill_covers_score_distribution_mu(tmp_path: Path) -> None:
