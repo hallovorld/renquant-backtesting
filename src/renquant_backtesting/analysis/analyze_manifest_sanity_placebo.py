@@ -22,6 +22,15 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from renquant_backtesting.analysis.pick_table import (
+    build_pick_table,
+    build_pick_table_manifest,
+    canonical_table_content_hash,
+    default_sidecar_path,
+    refuse_production_output_path,
+    sha256_file,
+    verify_pick_table,
+)
 from renquant_backtesting.wf_gate.runner import (
     REPO,
     STRATEGY_DIR,
@@ -324,38 +333,6 @@ def regime_shift_diagnostics(
     return out
 
 
-def build_pick_table(
-    val: pd.DataFrame,
-    mu: pd.Series,
-    label: str,
-    regimes: pd.DataFrame,
-) -> pd.DataFrame:
-    """Per-(date,ticker) OOS prediction table for downstream research.
-
-    Columns: date, ticker, score (the manifest-scored mu), <label>, regime,
-    decile_rank (per-date score decile, 9 = top). This is the durable pick
-    table the Track-A conditional test consumes (orchestrator direction
-    decision §4); the scoring stays HERE so faithfulness to the gate's own
-    evaluation holds by construction.
-    """
-    out = val[["date", "ticker", label]].copy()
-    out["score"] = pd.to_numeric(mu, errors="coerce").to_numpy()
-    out = out.dropna(subset=["score"])
-    if not regimes.empty:
-        out = out.merge(regimes, on="date", how="left")
-    else:
-        out["regime"] = None
-
-    def _decile(g: pd.Series) -> pd.Series:
-        r = g.rank(pct=True, method="average")
-        return np.minimum((r * 10).astype(int), 9)
-
-    out["decile_rank"] = out.groupby("date")["score"].transform(_decile)
-    return out.sort_values(
-        ["date", "score"], ascending=[True, False]
-    ).reset_index(drop=True)
-
-
 def analyze_manifest(
     *,
     artifact_path: Path,
@@ -368,6 +345,10 @@ def analyze_manifest(
 ) -> dict[str, Any]:
     logging.getLogger("kernel.panel_pipeline.hf_patchtst_scorer").setLevel(logging.WARNING)
     logging.getLogger("kernel.panel_pipeline.patchtst_scorer").setLevel(logging.WARNING)
+    if dump_predictions is not None:
+        # Fail fast (before any scoring) on canonical production paths: the
+        # pick table embeds realized forward labels and is research-only.
+        refuse_production_output_path(dump_predictions)
     artifact = _load_artifact_payload(artifact_path)
     if str(label).lower() in {"", "auto"}:
         label = _sanity_model_label_col(artifact)
@@ -397,13 +378,45 @@ def analyze_manifest(
     shifts_out = shift_diagnostics(panel, val, mu, label, shifts=shifts,
                                    min_names=min_names)
     regimes = build_regime_series(val["date"].unique(), strategy_dir=strategy_dir)
+    dump_info: dict[str, Any] | None = None
     if dump_predictions is not None:
         table = build_pick_table(val, mu, label, regimes)
         dump_predictions.parent.mkdir(parents=True, exist_ok=True)
         table.to_parquet(dump_predictions, index=False)
+        content_sha = canonical_table_content_hash(table, label=label)
+        sidecar = build_pick_table_manifest(
+            table,
+            label=label,
+            generator=(
+                "renquant_backtesting/analysis/analyze_manifest_sanity_placebo.py"
+            ),
+            generator_path=Path(__file__).resolve(),
+            manifest_input=manifest_path,
+            reference_artifact=artifact_path,
+            val_cut=val_cut.date().isoformat(),
+            val_start=pd.Timestamp(val["date"].min()).date().isoformat(),
+            val_end=pd.Timestamp(val["date"].max()).date().isoformat(),
+            label_lookahead_days=int(artifact.get("lookahead_days") or 0) or None,
+            output_content_sha256=content_sha,
+            output_parquet_sha256=sha256_file(dump_predictions),
+        )
+        sidecar_path = default_sidecar_path(dump_predictions)
+        sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True) + "\n")
+        # Round-trip self-check: reload the parquet and prove the stamped
+        # canonical content hash verifies — writing is not evidence, matching
+        # output_content_sha256 is.
+        verified = verify_pick_table(dump_predictions, sidecar_path)
+        dump_info = {
+            "parquet": str(dump_predictions),
+            "sidecar": str(sidecar_path),
+            "output_content_sha256": content_sha,
+            "verified_after_reload": bool(verified["content_verified"]),
+        }
         logging.getLogger(__name__).info(
-            "dump-predictions: wrote %d rows / %d dates -> %s",
+            "dump-predictions: wrote %d rows / %d dates -> %s "
+            "(content sha256 %s, sidecar %s, reload-verified)",
             len(table), table["date"].nunique(), dump_predictions,
+            content_sha, sidecar_path,
         )
     by_regime = regime_diagnostics(val, mu, label, regimes, min_names=min_names)
     by_regime_shift = regime_shift_diagnostics(
@@ -425,7 +438,7 @@ def analyze_manifest(
         and p60 is not None
         and abs(float(p60)) < max(0.005, 0.5 * abs(float(aligned_real_60)))
     )
-    return {
+    result: dict[str, Any] = {
         "artifact": str(artifact_path),
         "manifest": str(manifest_path),
         "label": label,
@@ -461,6 +474,9 @@ def analyze_manifest(
             ),
         },
     }
+    if dump_info is not None:
+        result["dump_predictions"] = dump_info
+    return result
 
 
 def _fmt(v: Any, ndigits: int = 4) -> str:
@@ -562,9 +578,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--dump-predictions",
         default="",
-        help=("optional parquet path: write the per-(date,ticker) OOS "
-              "prediction table {date,ticker,score,<label>,regime,decile_rank} "
-              "(the durable pick table for downstream research)"),
+        help=("optional parquet path: write the per-(date,name) OOS pick "
+              "table {date,name,score,decile_rank,<label>,regime} (the "
+              "RenQuant#430 durable-evidence contract) plus a sidecar "
+              "<stem>.manifest.json with input/generator hashes and the "
+              "canonical output content hash. RESEARCH-ONLY: the table "
+              "embeds realized forward labels; canonical production paths "
+              "(data/ outside data/exp/, artifacts/) are refused."),
     )
     return ap.parse_args()
 
