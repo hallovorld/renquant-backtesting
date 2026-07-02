@@ -92,23 +92,50 @@ def _fetch_joined(
     return df
 
 
+def _weights(df: "pd.DataFrame") -> "pd.Series":
+    """Per-row observation weight: ``session_weight`` (distinct decisions
+    sharing one realized return split ONE observation between them — see
+    session_resolution.add_session_weights) or 1.0 when the caller skipped
+    session annotation (--no-dedupe-sessions raw view)."""
+    import pandas as pd  # noqa: PLC0415
+    if "session_weight" in df.columns:
+        return df["session_weight"].astype(float)
+    return pd.Series(1.0, index=df.index)
+
+
+def _wmean(values: "pd.Series", w: "pd.Series") -> float:
+    tot = float(w.sum())
+    return float((values * w).sum() / tot) if tot > 0 else float("nan")
+
+
 def _print_quantile_ic(df: "pd.DataFrame", q: int) -> None:
-    """Quantile table: rank_score bucket → mean fwd, hit rate, n."""
+    """Quantile table: rank_score bucket → mean fwd, hit rate, n.
+
+    Session-weighted: a weekend/holiday duplicate cohort (or same-session
+    re-run set) contributes ONE observation of its shared realization."""
     import pandas as pd  # noqa: PLC0415
     if df.empty:
         print("  (no rows)")
         return
     # Quantile-bin per-bar to avoid date-aggregation bias
     df = df.copy()
+    df["_w"] = _weights(df)
     df["bucket"] = (df.groupby("run_date")["rank_score"]
                       .transform(lambda s: pd.qcut(s, q=q, labels=False, duplicates="drop")))
-    grouped = df.groupby("bucket")["fwd"].agg(
-        mean_fwd = "mean",
-        median_fwd = "median",
-        hit_rate = lambda s: float((s > 0).mean()),
-        n = "count",
-    ).round(4)
-    print(grouped.to_string())
+    rows = []
+    for bucket, sub in df.groupby("bucket"):
+        w = sub["_w"]
+        rows.append((
+            bucket,
+            round(_wmean(sub["fwd"], w), 4),
+            round(float(sub["fwd"].median()), 4),
+            round(_wmean((sub["fwd"] > 0).astype(float), w), 4),
+            len(sub),
+            round(float(w.sum()), 1),
+        ))
+    print(f"  {'bucket':>6} {'mean_fwd':>10} {'median_fwd':>11} {'hit_rate':>9} {'n':>7} {'n_eff':>8}")
+    for bucket, mean_fwd, med, hit, n, n_eff in rows:
+        print(f"  {bucket!s:>6} {mean_fwd:>10} {med:>11} {hit:>9} {n:>7} {n_eff:>8}")
 
 
 def _print_tier_realization(df: "pd.DataFrame", cuts: list[float]) -> None:
@@ -122,16 +149,28 @@ def _print_tier_realization(df: "pd.DataFrame", cuts: list[float]) -> None:
         if n == 0:
             print(f"  rank_score ≥ {cut:.3f}  →  n=0  (skipped)")
             continue
-        base = float((slice_["fwd"] > 0).mean())
-        mean_fwd = float(slice_["fwd"].mean())
-        print(f"  rank_score ≥ {cut:.3f}  →  n={n:5d}  P(fwd>0)={base:.3f}  "
-              f"mean fwd={mean_fwd:+.4%}")
+        w = _weights(slice_)
+        base = _wmean((slice_["fwd"] > 0).astype(float), w)
+        mean_fwd = _wmean(slice_["fwd"], w)
+        print(f"  rank_score ≥ {cut:.3f}  →  n={n:5d} (n_eff={float(w.sum()):7.1f})  "
+              f"P(fwd>0)={base:.3f}  mean fwd={mean_fwd:+.4%}")
 
 
 def _print_regime_ic(df: "pd.DataFrame") -> None:
-    """Spearman corr(rank_score, fwd) per-regime."""
+    """Spearman corr(rank_score, fwd) per-regime.
+
+    When session annotation is present, decisions are first collapsed to one
+    observation per (ticker, base_session) cluster — score = cluster mean,
+    fwd shared — so a duplicate cohort cannot vote its one realization
+    multiple times in the rank correlation."""
     import pandas as pd  # noqa: PLC0415
     from scipy.stats import spearmanr  # type: ignore  # noqa: PLC0415
+    if "base_session_date" in df.columns:
+        df = (
+            df.groupby(["ticker", "base_session_date"], as_index=False)
+            .agg(rank_score=("rank_score", "mean"), fwd=("fwd", "first"),
+                 regime=("regime", "first"))
+        )
     rows = []
     for regime, sub in df.groupby("regime"):
         rho, _ = spearmanr(sub["rank_score"], sub["fwd"], nan_policy="omit")
@@ -158,8 +197,9 @@ def _print_selected_bucket(df: "pd.DataFrame", cuts: list[float]) -> None:
         s = sel[(sel["rank_score"] >= lo) & (sel["rank_score"] < hi)]
         if s.empty:
             continue
-        hit = float((s["fwd"] > 0).mean())
-        mean_fwd = float(s["fwd"].mean())
+        w = _weights(s)
+        hit = _wmean((s["fwd"] > 0).astype(float), w)
+        mean_fwd = _wmean(s["fwd"], w)
         rows.append((lo, hi, len(s), hit, mean_fwd))
     print(f"  {'rank_score':>18} {'n':>6} {'hit':>7} {'mean fwd':>10}")
     for lo, hi, n, hit, mean_fwd in rows:
@@ -169,7 +209,10 @@ def _print_selected_bucket(df: "pd.DataFrame", cuts: list[float]) -> None:
 def _print_slots_filled(df: "pd.DataFrame") -> None:
     """How many selected candidates per run (bar) — answers whether tier 2/3
     ever actually get used. Groups by run_id (not run_date — multiple runs
-    can fire on one date during A/B sweeps; each is a distinct decision bar)."""
+    can fire on one date during A/B sweeps; each is a distinct decision bar).
+    Intentionally UNweighted: this table describes decision structure per
+    run, not inference over realized returns, so session weights don't
+    apply."""
     import pandas as pd  # noqa: PLC0415
     sel = df[df["selected"] == 1]
     if sel.empty:
@@ -199,8 +242,9 @@ def _print_block_outcomes(df: "pd.DataFrame") -> None:
         reason_series = reason_series.mask(df["selected"] == 1, "(selected)")
     for reason, sub in df.groupby(reason_series):
         n = len(sub)
-        base = float((sub["fwd"] > 0).mean())
-        mean_fwd = float(sub["fwd"].mean())
+        w = _weights(sub)
+        base = _wmean((sub["fwd"] > 0).astype(float), w)
+        mean_fwd = _wmean(sub["fwd"], w)
         rows.append((reason, n, base, mean_fwd))
     rows.sort(key=lambda r: -r[1])
     print(f"  {'reason':28} {'n':>6} {'P(fwd>0)':>10} {'mean fwd':>10}")
@@ -223,20 +267,19 @@ def main() -> None:
     p.add_argument("--tier-cuts", nargs="+", type=float,
                    default=[0.10, 0.20, 0.27, 0.35, 0.45, 0.60],
                    help="rank_score cut points for tier realization table.")
-    p.add_argument("--cache-root", default="data/ohlcv",
-                   help="Root of per-ticker parquet cache, for session-"
-                        "deduplication (see --no-dedupe-sessions).")
     p.add_argument(
         "--no-dedupe-sessions", action="store_true",
-        help="Disable session deduplication and use raw (run_date, ticker) "
-             "rows as-is. Weekend/holiday decision dates resolve their "
-             "forward return as-of the prior trading session (Plan AA "
-             "S5 fix), so a Fri/Sat/Sun trio of decision dates shares one "
-             "real market realization — treating all 3 as independent "
-             "observations overweights that realization up to 3x. Default "
-             "is deduplicated (one row per base_session_date x ticker); "
-             "only disable this for raw storage-coverage inspection, never "
-             "for a statistic that assumes independent observations.",
+        help="Disable session handling and use raw (run_date, ticker) rows "
+             "as-is. Weekend/holiday decision dates resolve their forward "
+             "return as-of the prior trading session (Plan AA S5 fix), so a "
+             "Fri/Sat/Sun trio of decision dates shares one real market "
+             "realization — treating all rows as independent observations "
+             "overweights that realization. Default: exact re-recordings of "
+             "one decision are collapsed; genuinely different decisions "
+             "sharing a session are RETAINED and weighted 1/cluster-size so "
+             "each realization counts once. Only disable for raw "
+             "storage-coverage inspection, never for a statistic that "
+             "assumes independent observations.",
     )
     args = p.parse_args()
 
@@ -265,22 +308,44 @@ def main() -> None:
     raw_n = len(df)
     if not args.no_dedupe_sessions:
         from renquant_backtesting.analysis.session_resolution import (  # noqa: PLC0415
-            annotate_base_sessions, dedupe_by_session,
+            add_session_weights, annotate_base_sessions,
+            collapse_rerecorded_decisions,
         )
-        df = annotate_base_sessions(
-            df, date_col="run_date", ticker_col="ticker",
-            cache_root=REPO_ROOT / args.cache_root,
+        # Session key is date-level against the shared NYSE calendar (see
+        # session_resolution docstring) — weekend AND holiday dated rows
+        # resolve to their real preceding session; per-ticker cache coverage
+        # cannot change the key.
+        df = annotate_base_sessions(df, date_col="run_date")
+        if not bool(df["session_resolved"].all()):
+            print("WARNING: NYSE calendar unavailable — session identity "
+                  "UNRESOLVED for all rows (weekday holidays undetectable). "
+                  "Treat every statistic below as potentially inflated; "
+                  "install pandas_market_calendars for admissible output.\n")
+        n_weekend = int((df["non_session_kind"] == "weekend").sum())
+        n_holiday = int((df["non_session_kind"] == "holiday").sum())
+        # Exact re-recordings of one decision (same session, identical
+        # decision content — weekend re-stamps and same-day re-runs) carry
+        # zero new information: collapse them. Decisions that DIFFER but
+        # share a session keep their identity (equal outcome identity is
+        # not equal decision identity) and are weighted 1/cluster-size so
+        # the shared realization counts exactly once in the tables below.
+        # NOT keyed on run_id: every re-run gets a distinct run_id, which
+        # would defeat the collapse entirely.
+        decision_cols = [c for c in (
+            "role", "rank_score", "panel_score", "mu", "sigma",
+            "selected", "blocked_by", "regime",
+        ) if c in df.columns]
+        df = collapse_rerecorded_decisions(
+            df, "base_session_date", ["ticker"], decision_cols,
         )
-        n_non_session = int(df["non_session_run"].sum())
-        # NOT run_id: a Fri/Sat/Sun trio of ad-hoc weekend decisions all get
-        # DIFFERENT run_ids but share one real market realization for a
-        # given ticker — including run_id here would defeat the dedup
-        # entirely, since every row would then have a distinct key.
-        df = dedupe_by_session(df, "base_session_date", ["ticker"])
-        print(f"Rows: {raw_n:,} raw (storage coverage)  →  {len(df):,} unique-session "
-              f"admissible ({n_non_session:,} raw rows were weekend/holiday duplicates "
-              f"of an earlier session, now collapsed)    date range: "
-              f"{df['run_date'].min().date()} → {df['run_date'].max().date()}    "
+        df = add_session_weights(df, "base_session_date", ["ticker"])
+        n_sessions = int(df.groupby(["ticker", "base_session_date"]).ngroups)
+        print(f"Rows: {raw_n:,} raw (storage coverage)  →  {len(df):,} distinct "
+              f"decisions (exact re-recordings collapsed; {n_weekend:,} weekend + "
+              f"{n_holiday:,} holiday raw rows)  →  {n_sessions:,} unique "
+              f"(ticker, session) realizations (session-weighted below)    "
+              f"date range: {df['run_date'].min().date()} → "
+              f"{df['run_date'].max().date()}    "
               f"tickers: {df['ticker'].nunique()}\n")
     else:
         print(f"Rows: {raw_n:,} raw (--no-dedupe-sessions: NOT statistically admissible "

@@ -8,6 +8,7 @@ The CLI (`scripts/reconcile_live_sim.py`) wires these together.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import math
 import sqlite3
@@ -358,6 +359,16 @@ def _load_score_realized_pairs(
     """Join candidate_scores.rank_score with ticker_forward_returns.fwd_Nd.
 
     Returns [] (with a logged warn) when either table is missing or empty.
+
+    Clustered by (ticker, NYSE session) — #60 review rounds 2-3: weekend/
+    holiday-dated live runs resolve their forward return as-of the preceding
+    real session, so a Fri/Sat/Sun decision-date trio (and same-day re-runs)
+    shares ONE market realization per ticker. Counting each raw row would
+    overweight that realization in the IC. Each cluster contributes exactly
+    one (rank, fwd) pair: rank = mean of the cluster's DISTINCT rank_scores
+    (exact re-recordings collapse; genuinely different decisions are
+    averaged, not arbitrarily discarded), fwd is shared by construction.
+    See analysis.session_resolution.
     """
     if horizon_days not in {1, 5, 10, 20, 60}:
         raise ValueError(f"unsupported IC horizon_days={horizon_days}")
@@ -370,7 +381,7 @@ def _load_score_realized_pairs(
         try:
             rows = conn.execute(
                 f"""
-                SELECT cs.rank_score, tfr.{fwd_col}
+                SELECT p.run_date, cs.ticker, cs.rank_score, tfr.{fwd_col}
                 FROM candidate_scores cs
                 JOIN pipeline_runs p ON cs.run_id = p.run_id
                 JOIN ticker_forward_returns tfr
@@ -378,6 +389,7 @@ def _load_score_realized_pairs(
                 WHERE p.run_date >= ? AND p.run_date <= ?
                   AND cs.rank_score IS NOT NULL
                   AND tfr.{fwd_col} IS NOT NULL
+                ORDER BY p.run_date, p.run_id, cs.ticker
                 """,
                 (start_date, end_date),
             ).fetchall()
@@ -386,8 +398,32 @@ def _load_score_realized_pairs(
             return []
     finally:
         conn.close()
-    return [(float(r[0]), float(r[1])) for r in rows
-            if r[0] is not None and r[1] is not None]
+
+    from renquant_backtesting.analysis.session_resolution import (  # noqa: PLC0415
+        nyse_sessions, session_key,
+    )
+    sessions = None
+    if rows:
+        sessions = nyse_sessions(
+            dt.date.fromisoformat(str(rows[0][0])[:10]) - dt.timedelta(days=14),
+            dt.date.fromisoformat(str(rows[-1][0])[:10]) + dt.timedelta(days=7),
+        )
+    # One observation per (ticker, session) cluster: collect the DISTINCT
+    # rank_scores (exact re-recordings of one decision collapse; different
+    # decisions are retained) and average them against the shared fwd.
+    clusters: dict[tuple[str, str], tuple[set, float]] = {}
+    for run_date, ticker, rank, fwd in rows:
+        if rank is None or fwd is None:
+            continue
+        d = dt.date.fromisoformat(str(run_date)[:10])
+        key = (str(ticker), session_key(d, sessions).isoformat())
+        ranks, _ = clusters.setdefault(key, (set(), float(fwd)))
+        ranks.add(float(rank))
+    return [
+        (sum(ranks) / len(ranks), fwd)
+        for ranks, fwd in clusters.values()
+        if ranks
+    ]
 
 
 def _spearman_ic(xs: Sequence[float], ys: Sequence[float]) -> float:
