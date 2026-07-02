@@ -9,9 +9,11 @@ overlapping-horizon / regime-persistence structure in the labels.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
+import subprocess
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
@@ -324,6 +326,36 @@ def regime_shift_diagnostics(
     return out
 
 
+N_DECILES = 10
+
+
+def _decile_rank(scores: pd.Series) -> pd.Series:
+    """Cross-sectional decile of `scores` within one date, 0 (worst)..9
+    (best/top) — decile 9 is the model's top-decile long-side candidates.
+
+    Ported from RenQuant `scripts/regen_oos_pick_table.py` (#430, merged):
+    the naive `(rank(pct=True) * 10).astype(int).clip(upper=9)` approach
+    breaks on exactly N_DECILES distinct scores (produces ranks 1..10,
+    clips 10 to 9, so decile 0 is never populated and decile 9 gets two
+    observations) — a common case for small cross-sections, not an edge
+    case. Ties are broken by `rank(method="first")` before `qcut` so `qcut`
+    bins strictly-ordered integer ranks (never raw floats), making
+    `duplicates="drop"` a pure safety net rather than something that
+    silently reshuffles bin membership. Falls back to fewer than
+    N_DECILES buckets on a date with too few distinct names for 10 clean
+    bins (documented, not a crash) — `qcut` needs at least as many distinct
+    values as bins.
+    """
+    n_unique = int(scores.nunique())
+    if n_unique < 2:
+        return pd.Series(0, index=scores.index, dtype=int)
+    n_bins = min(N_DECILES, n_unique)
+    ranks = pd.qcut(
+        scores.rank(method="first"), n_bins, labels=False, duplicates="drop"
+    )
+    return ranks.astype(int)
+
+
 def build_pick_table(
     val: pd.DataFrame,
     mu: pd.Series,
@@ -337,23 +369,205 @@ def build_pick_table(
     table the Track-A conditional test consumes (orchestrator direction
     decision §4); the scoring stays HERE so faithfulness to the gate's own
     evaluation holds by construction.
+
+    `mu` is aligned to `val`'s index EXPLICITLY (never `.to_numpy()`, which
+    discards the index and does positional assignment — if `mu`'s labels
+    were the same set as `val`'s but in a different order, that silently
+    attaches each score to the wrong ticker). Missing or duplicate index
+    entries in `mu` relative to `val` fail loudly rather than producing
+    misaligned output.
     """
+    if mu.index.has_duplicates:
+        dupes = mu.index[mu.index.duplicated()].unique().tolist()
+        raise ValueError(f"mu has duplicate index entries: {dupes[:10]}")
+    missing = val.index.difference(mu.index)
+    if len(missing) > 0:
+        raise ValueError(
+            f"mu is missing {len(missing)} index entries present in val "
+            f"(e.g. {missing[:10].tolist()}) — cannot align scores to tickers"
+        )
     out = val[["date", "ticker", label]].copy()
-    out["score"] = pd.to_numeric(mu, errors="coerce").to_numpy()
+    out["score"] = pd.to_numeric(mu, errors="coerce").reindex(out.index)
     out = out.dropna(subset=["score"])
     if not regimes.empty:
         out = out.merge(regimes, on="date", how="left")
     else:
         out["regime"] = None
 
-    def _decile(g: pd.Series) -> pd.Series:
-        r = g.rank(pct=True, method="average")
-        return np.minimum((r * 10).astype(int), 9)
-
-    out["decile_rank"] = out.groupby("date")["score"].transform(_decile)
+    out["decile_rank"] = out.groupby("date")["score"].transform(_decile_rank)
     return out.sort_values(
         ["date", "score"], ascending=[True, False]
     ).reset_index(drop=True)
+
+
+def canonical_pick_table_content_hash(table: pd.DataFrame, label: str) -> str:
+    """SHA256 of `table`'s CONTENT — the actual scores/labels/regimes, not
+    just its shape. Ported from RenQuant `canonical_table_content_hash()`
+    (#430, merged) — same two required properties: ORDER-INDEPENDENT
+    (canonically re-sorted by (date, ticker) here regardless of caller row
+    order) and PLATFORM-STABLE FLOAT REPRESENTATION (fixed 10-decimal-place
+    string, not raw float64 bytes, which can differ subtly across
+    platforms/numpy versions for "the same" value). Parametrized on `label`
+    since this repo's label column name varies by call (unlike #430's
+    single hardcoded `fwd_60d_excess`)."""
+    canon = table[["date", "ticker", "score", "decile_rank", label, "regime"]].copy()
+    canon["date"] = pd.to_datetime(canon["date"]).dt.strftime("%Y-%m-%d")
+    canon["ticker"] = canon["ticker"].astype(str)
+    canon["score"] = canon["score"].astype(float).map(lambda v: f"{v:.10f}")
+    canon["decile_rank"] = canon["decile_rank"].astype(int)
+    canon[label] = canon[label].astype(float).map(lambda v: f"{v:.10f}")
+    canon["regime"] = canon["regime"].astype(str)
+    canon = canon.sort_values(["date", "ticker"]).reset_index(drop=True)
+    lines = [
+        "|".join(str(v) for v in row)
+        for row in canon.itertuples(index=False, name=None)
+    ]
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_head_commit(repo: Path) -> str | None:
+    """Best-effort HEAD sha at generation time — informational only, not
+    the provenance anchor (see generator_sha256)."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo),
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+# Substrings that mark a --dump-predictions target as a recognized live/
+# production artifact location, never an appropriate destination for a
+# research-only artifact carrying REALIZED forward labels (see
+# build_pick_table_manifest's research_only stamp). This is a path-name
+# heuristic, not an exhaustive registry (this repo has no canonical
+# production-path list to check against, unlike renquant-orchestrator's
+# PROD_PATH_RULES) — it exists as an active guard on top of the manifest's
+# passive research_only metadata, not a substitute for it.
+_PRODUCTION_PATH_MARKERS = ("live", "prod", "production")
+
+
+class ResearchOnlyOutputPathError(ValueError):
+    """Raised when --dump-predictions targets what looks like a live/
+    production artifact path without --allow-production-path."""
+
+
+def _guard_research_only_output_path(path: Path, *, allow_production: bool = False) -> None:
+    if allow_production:
+        return
+    parts = [p.lower() for p in path.resolve().parts]
+    for marker in _PRODUCTION_PATH_MARKERS:
+        if any(marker in part for part in parts):
+            raise ResearchOnlyOutputPathError(
+                f"--dump-predictions target {path} contains {marker!r} in its "
+                "path, which looks like a live/production artifact location. "
+                "This table contains REALIZED forward labels and must never "
+                "be written where it could be mistaken for or consumed as a "
+                "live inference input. Pass --allow-production-path only if "
+                "you have verified this destination is genuinely a research/ "
+                "experimental artifact contract, not a live-serving path."
+            )
+
+
+def build_pick_table_manifest(
+    table: pd.DataFrame,
+    *,
+    label: str,
+    output_path: Path,
+) -> dict:
+    """Reproducibility recipe + evidence-provenance manifest for a
+    --dump-predictions pick table, in the SAME schema shape RenQuant #430's
+    regen_oos_pick_table.py manifest uses (schema/recipe/counts/output
+    sections, generator_sha256 as the real provenance anchor,
+    output_content_sha256 as the content-reproducibility anchor) — a
+    consumer of either artifact sees one consistent contract.
+
+    RESEARCH-ONLY: this table contains REALIZED forward labels (`label`),
+    not only model predictions. A downstream consumer must never mistake
+    this for a live inference input — the manifest stamps that explicitly,
+    machine-readably, not just in prose.
+    """
+    generator_path = Path(__file__).resolve()
+    content_hash = canonical_pick_table_content_hash(table, label)
+    parquet_hash = _sha256_file(output_path) if output_path.exists() else None
+    return {
+        "research_only": True,
+        "research_only_note": (
+            "this artifact contains REALIZED forward labels, not only "
+            "predictions — it must never be consumed as a live inference "
+            "input. temporal_semantics below states exactly when each field "
+            "was actually knowable."
+        ),
+        "temporal_semantics": {
+            "score": "point-in-time model output, knowable AS OF `date`",
+            label: (
+                "REALIZED forward-looking outcome, NOT knowable as of `date` "
+                "— only knowable once the forward window has elapsed"
+            ),
+            "regime": "live regime label as of `date`",
+        },
+        "schema": {
+            "columns": ["date", "ticker", "score", "decile_rank", label, "regime"],
+            "description": (
+                "one row per (date, ticker); score = point-in-time model raw "
+                "score (mu); decile_rank = cross-sectional decile within date, "
+                f"0(worst)-9(best/top); {label} = REALIZED forward outcome "
+                "(research-only, not a live-inference field); regime = live "
+                "regime label at pick date"
+            ),
+        },
+        "recipe": {
+            "generator": str(
+                generator_path.relative_to(REPO)
+                if generator_path.is_relative_to(REPO)
+                else generator_path
+            ),
+            "generator_sha256": _sha256_file(generator_path),
+            "generator_commit": _git_head_commit(REPO),
+            "generator_commit_note": (
+                "best-effort `git rev-parse HEAD` at generation time — "
+                "informational only, NOT the provenance anchor; "
+                "generator_sha256 above is a content hash of the generator's "
+                "own bytes and is self-consistent regardless of git history"
+            ),
+            "label": label,
+        },
+        "counts": {
+            "n_rows": int(len(table)),
+            "n_dates": int(table["date"].nunique()),
+            "n_tickers": int(table["ticker"].nunique()),
+        },
+        "output": {
+            "output_content_sha256": content_hash,
+            "output_content_sha256_note": (
+                "the PROVENANCE ANCHOR — sha256 of the table's actual content "
+                "(canonically re-sorted by (date, ticker), floats formatted "
+                "to a fixed 10-decimal-place string), NOT its shape. A fresh "
+                "regeneration's output_content_sha256 must match this stamped "
+                "value to prove it reproduced this evidence table's content — "
+                "matching n_rows/n_dates/n_tickers alone does not."
+            ),
+            "output_parquet_sha256": parquet_hash,
+            "output_parquet_sha256_note": (
+                "a SECONDARY, weaker transport hash of the literal on-disk "
+                ".parquet file bytes — detects local file corruption, but is "
+                "NOT portable across parquet library/compression-setting "
+                "versions even for identical logical content. Use "
+                "output_content_sha256 above to verify reproducibility."
+            ),
+        },
+    }
 
 
 def analyze_manifest(
@@ -365,6 +579,7 @@ def analyze_manifest(
     shifts: Iterable[int],
     min_names: int,
     dump_predictions: Path | None = None,
+    allow_production_path: bool = False,
 ) -> dict[str, Any]:
     logging.getLogger("kernel.panel_pipeline.hf_patchtst_scorer").setLevel(logging.WARNING)
     logging.getLogger("kernel.panel_pipeline.patchtst_scorer").setLevel(logging.WARNING)
@@ -398,12 +613,22 @@ def analyze_manifest(
                                    min_names=min_names)
     regimes = build_regime_series(val["date"].unique(), strategy_dir=strategy_dir)
     if dump_predictions is not None:
+        _guard_research_only_output_path(
+            dump_predictions, allow_production=allow_production_path,
+        )
         table = build_pick_table(val, mu, label, regimes)
         dump_predictions.parent.mkdir(parents=True, exist_ok=True)
         table.to_parquet(dump_predictions, index=False)
+        manifest_out = build_pick_table_manifest(
+            table, label=label, output_path=dump_predictions,
+        )
+        manifest_path_out = dump_predictions.with_suffix(".manifest.json")
+        manifest_path_out.write_text(json.dumps(manifest_out, indent=2, sort_keys=True) + "\n")
         logging.getLogger(__name__).info(
-            "dump-predictions: wrote %d rows / %d dates -> %s",
+            "dump-predictions: wrote %d rows / %d dates -> %s (manifest: %s, "
+            "output_content_sha256=%s)",
             len(table), table["date"].nunique(), dump_predictions,
+            manifest_path_out, manifest_out["output"]["output_content_sha256"][:12],
         )
     by_regime = regime_diagnostics(val, mu, label, regimes, min_names=min_names)
     by_regime_shift = regime_shift_diagnostics(
@@ -566,6 +791,14 @@ def parse_args() -> argparse.Namespace:
               "prediction table {date,ticker,score,<label>,regime,decile_rank} "
               "(the durable pick table for downstream research)"),
     )
+    ap.add_argument(
+        "--allow-production-path",
+        action="store_true",
+        help=("bypass the research-only path guard on --dump-predictions "
+              "(the output contains REALIZED forward labels; only pass this "
+              "if the destination is genuinely a verified research/exp "
+              "artifact contract, not a live-serving path)"),
+    )
     return ap.parse_args()
 
 
@@ -586,6 +819,7 @@ def main() -> None:
             Path(args.dump_predictions).resolve()
             if str(args.dump_predictions).strip() else None
         ),
+        allow_production_path=bool(args.allow_production_path),
     )
     out_dir = (
         Path(args.output_dir).resolve()
