@@ -117,7 +117,7 @@ def harness(tmp_path, monkeypatch):
     }
 
 
-def _run_cli(harness, dump_path: Path) -> Path:
+def _run_cli(harness, dump_path: Path, extra: list[str] | None = None) -> Path:
     tmp_path = harness["tmp_path"]
     out_dir = tmp_path / "out"
     harness["monkeypatch"].setattr(sys, "argv", [
@@ -127,6 +127,7 @@ def _run_cli(harness, dump_path: Path) -> Path:
         "--label", LABEL,
         "--output-dir", str(out_dir),
         "--dump-predictions", str(dump_path),
+        *(extra or []),
     ])
     amsp.main()
     return out_dir
@@ -193,7 +194,7 @@ def test_cli_sidecar_manifest_and_hash_verify_after_reload(harness):
     assert ts["label_lookahead_days"] == 60
 
 
-def test_cli_refuses_production_data_path_before_scoring(harness):
+def test_cli_refuses_canonical_data_tree_before_scoring(harness):
     calls = {"n": 0}
     original = amsp._load_artifact_payload
 
@@ -212,5 +213,12 @@ def test_cli_refuses_production_data_path_before_scoring(harness):
 def test_cli_allows_data_exp_research_path(harness):
     dump = harness["tmp_path"] / "data" / "exp" / "pick_table.parquet"
     _run_cli(harness, dump)
+    assert dump.exists()
+    assert (dump.parent / "pick_table.manifest.json").exists()
+
+
+def test_cli_override_flag_bypasses_research_only_guard(harness):
+    dump = harness["tmp_path"] / "data" / "pick_table.parquet"
+    _run_cli(harness, dump, extra=["--allow-production-path"])
     assert dump.exists()
     assert (dump.parent / "pick_table.manifest.json").exists()

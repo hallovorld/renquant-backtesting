@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from renquant_backtesting.analysis.pick_table import (
+    ResearchOnlyOutputPathError,
     build_pick_table,
     build_pick_table_manifest,
     canonical_table_content_hash,
@@ -127,6 +128,15 @@ def test_decile_ties_deterministic_and_near_balanced():
     # monotone: a higher score never gets a lower decile
     ordered = a[scores.sort_values(kind="stable").index].tolist()
     assert ordered == sorted(ordered)
+
+
+def test_decile_ties_exact_per_position_result():
+    """Ties are broken by position (rank method='first'), so a 3-way tie can
+    split across a bin boundary — assert the exact deterministic per-position
+    result, not a 'ties always share a bucket' property the #430 reference
+    method deliberately does not provide (bin sizes stay balanced instead)."""
+    scores = pd.Series([1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+    assert decile_rank(scores).tolist() == [0, 0, 1, 2, 3, 3, 4, 5, 6, 6]
 
 
 def test_decile_constant_scores_single_bucket():
@@ -300,8 +310,27 @@ def test_sidecar_stamps_realized_label_semantics(tmp_path):
     "/repo/backtesting/renquant_104/artifacts/sim/pick.parquet",
 ])
 def test_refuses_canonical_production_paths(bad):
-    with pytest.raises(ValueError, match="refusing"):
+    with pytest.raises(ResearchOnlyOutputPathError, match="refusing"):
         refuse_production_output_path(Path(bad))
+
+
+@pytest.mark.parametrize("bad", [
+    "/repo/research/live_mirror/pick.parquet",
+    "/repo/prod_dumps/pick.parquet",
+    "/repo/outputs/production/pick.parquet",
+])
+def test_refuses_live_prod_marker_paths(bad):
+    """Name-based heuristic layered on the structural rules: any resolved
+    path component containing live/prod/production is refused."""
+    with pytest.raises(ResearchOnlyOutputPathError, match="refusing"):
+        refuse_production_output_path(Path(bad))
+
+
+def test_allow_production_flag_bypasses_guard():
+    refuse_production_output_path(
+        Path("/repo/data/pick.parquet"), allow_production=True)
+    refuse_production_output_path(
+        Path("/repo/live/pick.parquet"), allow_production=True)
 
 
 def test_allows_research_and_scratch_paths(tmp_path):

@@ -23,6 +23,7 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 from renquant_backtesting.analysis.pick_table import (
+    ResearchOnlyOutputPathError,  # noqa: F401 — re-exported for callers/tests
     build_pick_table,
     build_pick_table_manifest,
     canonical_table_content_hash,
@@ -342,13 +343,16 @@ def analyze_manifest(
     shifts: Iterable[int],
     min_names: int,
     dump_predictions: Path | None = None,
+    allow_production_path: bool = False,
 ) -> dict[str, Any]:
     logging.getLogger("kernel.panel_pipeline.hf_patchtst_scorer").setLevel(logging.WARNING)
     logging.getLogger("kernel.panel_pipeline.patchtst_scorer").setLevel(logging.WARNING)
     if dump_predictions is not None:
         # Fail fast (before any scoring) on canonical production paths: the
         # pick table embeds realized forward labels and is research-only.
-        refuse_production_output_path(dump_predictions)
+        refuse_production_output_path(
+            dump_predictions, allow_production=allow_production_path,
+        )
     artifact = _load_artifact_payload(artifact_path)
     if str(label).lower() in {"", "auto"}:
         label = _sanity_model_label_col(artifact)
@@ -584,7 +588,16 @@ def parse_args() -> argparse.Namespace:
               "<stem>.manifest.json with input/generator hashes and the "
               "canonical output content hash. RESEARCH-ONLY: the table "
               "embeds realized forward labels; canonical production paths "
-              "(data/ outside data/exp/, artifacts/) are refused."),
+              "(data/ outside data/exp/, artifacts/, live/prod-named paths) "
+              "are refused."),
+    )
+    ap.add_argument(
+        "--allow-production-path",
+        action="store_true",
+        help=("bypass the research-only path guard on --dump-predictions "
+              "(the output contains REALIZED forward labels; only pass this "
+              "if the destination is genuinely a verified research/exp "
+              "artifact contract, not a live-serving path)"),
     )
     return ap.parse_args()
 
@@ -606,6 +619,7 @@ def main() -> None:
             Path(args.dump_predictions).resolve()
             if str(args.dump_predictions).strip() else None
         ),
+        allow_production_path=bool(args.allow_production_path),
     )
     out_dir = (
         Path(args.output_dir).resolve()

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,18 @@ N_DECILES = 10
 #: into (same contract RenQuant#430 established: ``data/exp/`` is the explicit
 #: experiment area; every other ``data/`` path is canonical production data).
 RESEARCH_DATA_SEGMENT = "exp"
+
+#: Substrings that mark a dump target as a recognized live/production artifact
+#: location — a path-name heuristic layered ON TOP of the structural
+#: ``data/``/``artifacts/`` rules (this repo has no exhaustive canonical
+#: production-path registry, unlike renquant-orchestrator's PROD_PATH_RULES).
+_PRODUCTION_PATH_MARKERS = ("live", "prod", "production")
+
+
+class ResearchOnlyOutputPathError(ValueError):
+    """Raised when a pick-table dump targets a canonical production path (or a
+    path that looks like a live/production artifact location) without an
+    explicit override."""
 
 
 def pick_table_columns(label: str) -> list[str]:
@@ -200,6 +213,23 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _git_head_commit(cwd: Path) -> str | None:
+    """Best-effort ``git rev-parse HEAD`` at generation time — informational
+    context only, NOT the provenance anchor: a manifest written by a run of
+    this code necessarily predates whatever commit it lands in, so a stamped
+    commit hash can go stale undetectably. ``generator_sha256`` (a content
+    hash of the generator's own bytes) is the verifiable anchor (RenQuant#430
+    review round 2)."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(cwd),
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
 def _portable_ref(path: Path) -> str:
     """Best-effort portable reference for the sidecar: prefer the stable
     ``backtesting/...`` suffix over a machine-absolute path (never load-bearing
@@ -251,6 +281,13 @@ def build_pick_table_manifest(
         else "the label horizon"
     )
     return {
+        "research_only": True,
+        "research_only_note": (
+            "this artifact contains REALIZED forward labels, not only "
+            "predictions — it must never be consumed as a live inference "
+            "input. temporal_semantics below states when each field was "
+            "actually knowable."
+        ),
         "schema": {
             "columns": pick_table_columns(label),
             "description": (
@@ -265,6 +302,13 @@ def build_pick_table_manifest(
         "recipe": {
             "generator": str(generator),
             "generator_sha256": sha256_file(Path(generator_path)),
+            "generator_commit": _git_head_commit(Path(generator_path).resolve().parent),
+            "generator_commit_note": (
+                "best-effort `git rev-parse HEAD` at generation time — "
+                "informational only, NOT the provenance anchor; "
+                "generator_sha256 above is a content hash of the generator's "
+                "own bytes and is self-consistent regardless of git history"
+            ),
             "contract_module": "renquant_backtesting/analysis/pick_table.py",
             "contract_module_sha256": sha256_file(contract_path),
             "manifest_input": _portable_ref(manifest_input),
@@ -303,6 +347,19 @@ def build_pick_table_manifest(
         },
         "temporal_semantics": {
             "research_only": True,
+            "fields": {
+                "score": "point-in-time model output, knowable AS OF `date`",
+                "decile_rank": (
+                    "cross-sectional transform of `score` within `date`, "
+                    "knowable AS OF `date`"
+                ),
+                str(label): (
+                    "REALIZED forward-looking outcome, NOT knowable as of "
+                    "`date` — only knowable once the forward window has "
+                    "elapsed"
+                ),
+                "regime": "live regime label as of `date`",
+            },
             "label_realized": (
                 f"the `{label}` column is a REALIZED forward excess return: "
                 f"for a row dated D it is only observable {horizon_text} AFTER "
@@ -381,29 +438,59 @@ def verify_pick_table(parquet_path: Path, sidecar_path: Path | None = None) -> d
     }
 
 
-def refuse_production_output_path(path: Path) -> None:
+def refuse_production_output_path(
+    path: Path, *, allow_production: bool = False
+) -> None:
     """Refuse canonical production data/artifact paths for the research dump.
 
     The pick table embeds REALIZED forward labels — a research-only artifact
     that must never sit where it could be mistaken for (or read as) a live
-    inference input. The only ``data/`` location the research-artifact
-    contract permits is the explicit experiment area ``data/exp/`` (the
-    contract RenQuant#430 established); any other ``(^|/)data/`` path and any
-    ``(^|/)artifacts/`` path (the canonical sim/prod artifact trees) is
-    refused. Scratch/tmp/home research paths are unaffected.
+    inference input. Two complementary rules, both failing closed with
+    :class:`ResearchOnlyOutputPathError`:
+
+    * STRUCTURAL — the only ``data/`` location the research-artifact contract
+      permits is the explicit experiment area ``data/exp/`` (the contract
+      RenQuant#430 established); any other ``(^|/)data/`` path and any
+      ``(^|/)artifacts/`` path (the canonical sim/prod artifact trees) is
+      refused.
+    * HEURISTIC — any resolved path component containing ``live``/``prod``/
+      ``production`` is refused (a name-based net for live-serving locations
+      this repo has no registry of).
+
+    ``allow_production=True`` (the ``--allow-production-path`` CLI flag)
+    bypasses the guard — pass it only when the destination is verified to be
+    governed by an explicit research-artifact contract. Scratch/tmp/home
+    research paths are unaffected.
     """
-    posix = Path(path).resolve().as_posix()
+    if allow_production:
+        return
+    resolved = Path(path).resolve()
+    posix = resolved.as_posix()
     parts = posix.split("/")
     for i, seg in enumerate(parts[:-1]):
         if seg == "artifacts":
-            raise ValueError(
+            raise ResearchOnlyOutputPathError(
                 "refusing to write the research pick table under a canonical "
                 f"artifacts/ tree: {posix} — it embeds realized forward labels "
-                "(research-only); write to a data/exp/ or scratch path instead"
+                "(research-only); write to a data/exp/ or scratch path "
+                "instead, or pass --allow-production-path after verifying the "
+                "destination is a research artifact contract"
             )
         if seg == "data" and parts[i + 1] != RESEARCH_DATA_SEGMENT:
-            raise ValueError(
+            raise ResearchOnlyOutputPathError(
                 "refusing to write the research pick table under a canonical "
                 f"data/ tree (only data/{RESEARCH_DATA_SEGMENT}/ is permitted "
                 f"by the research-artifact contract): {posix}"
+            )
+    lowered = [p.lower() for p in resolved.parts]
+    for marker in _PRODUCTION_PATH_MARKERS:
+        if any(marker in part for part in lowered):
+            raise ResearchOnlyOutputPathError(
+                f"refusing pick-table dump target {posix}: path contains "
+                f"{marker!r}, which looks like a live/production artifact "
+                "location. The table contains REALIZED forward labels and "
+                "must never be written where it could be consumed as a live "
+                "inference input. Pass --allow-production-path only if this "
+                "destination is verified to be a genuine research/experimental "
+                "artifact contract, not a live-serving path."
             )
