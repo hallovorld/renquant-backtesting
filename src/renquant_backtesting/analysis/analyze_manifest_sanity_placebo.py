@@ -324,6 +324,38 @@ def regime_shift_diagnostics(
     return out
 
 
+def build_pick_table(
+    val: pd.DataFrame,
+    mu: pd.Series,
+    label: str,
+    regimes: pd.DataFrame,
+) -> pd.DataFrame:
+    """Per-(date,ticker) OOS prediction table for downstream research.
+
+    Columns: date, ticker, score (the manifest-scored mu), <label>, regime,
+    decile_rank (per-date score decile, 9 = top). This is the durable pick
+    table the Track-A conditional test consumes (orchestrator direction
+    decision §4); the scoring stays HERE so faithfulness to the gate's own
+    evaluation holds by construction.
+    """
+    out = val[["date", "ticker", label]].copy()
+    out["score"] = pd.to_numeric(mu, errors="coerce").to_numpy()
+    out = out.dropna(subset=["score"])
+    if not regimes.empty:
+        out = out.merge(regimes, on="date", how="left")
+    else:
+        out["regime"] = None
+
+    def _decile(g: pd.Series) -> pd.Series:
+        r = g.rank(pct=True, method="average")
+        return np.minimum((r * 10).astype(int), 9)
+
+    out["decile_rank"] = out.groupby("date")["score"].transform(_decile)
+    return out.sort_values(
+        ["date", "score"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+
 def analyze_manifest(
     *,
     artifact_path: Path,
@@ -332,6 +364,7 @@ def analyze_manifest(
     strategy_dir: Path,
     shifts: Iterable[int],
     min_names: int,
+    dump_predictions: Path | None = None,
 ) -> dict[str, Any]:
     logging.getLogger("kernel.panel_pipeline.hf_patchtst_scorer").setLevel(logging.WARNING)
     logging.getLogger("kernel.panel_pipeline.patchtst_scorer").setLevel(logging.WARNING)
@@ -364,6 +397,14 @@ def analyze_manifest(
     shifts_out = shift_diagnostics(panel, val, mu, label, shifts=shifts,
                                    min_names=min_names)
     regimes = build_regime_series(val["date"].unique(), strategy_dir=strategy_dir)
+    if dump_predictions is not None:
+        table = build_pick_table(val, mu, label, regimes)
+        dump_predictions.parent.mkdir(parents=True, exist_ok=True)
+        table.to_parquet(dump_predictions, index=False)
+        logging.getLogger(__name__).info(
+            "dump-predictions: wrote %d rows / %d dates -> %s",
+            len(table), table["date"].nunique(), dump_predictions,
+        )
     by_regime = regime_diagnostics(val, mu, label, regimes, min_names=min_names)
     by_regime_shift = regime_shift_diagnostics(
         panel,
@@ -518,6 +559,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--output-dir", default="")
     ap.add_argument("--shifts", default=",".join(str(x) for x in DEFAULT_SHIFTS))
     ap.add_argument("--min-names", type=int, default=5)
+    ap.add_argument(
+        "--dump-predictions",
+        default="",
+        help=("optional parquet path: write the per-(date,ticker) OOS "
+              "prediction table {date,ticker,score,<label>,regime,decile_rank} "
+              "(the durable pick table for downstream research)"),
+    )
     return ap.parse_args()
 
 
@@ -534,6 +582,10 @@ def main() -> None:
         strategy_dir=strategy_dir,
         shifts=shifts,
         min_names=int(args.min_names),
+        dump_predictions=(
+            Path(args.dump_predictions).resolve()
+            if str(args.dump_predictions).strip() else None
+        ),
     )
     out_dir = (
         Path(args.output_dir).resolve()
