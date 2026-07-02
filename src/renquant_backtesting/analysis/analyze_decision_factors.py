@@ -223,6 +223,21 @@ def main() -> None:
     p.add_argument("--tier-cuts", nargs="+", type=float,
                    default=[0.10, 0.20, 0.27, 0.35, 0.45, 0.60],
                    help="rank_score cut points for tier realization table.")
+    p.add_argument("--cache-root", default="data/ohlcv",
+                   help="Root of per-ticker parquet cache, for session-"
+                        "deduplication (see --no-dedupe-sessions).")
+    p.add_argument(
+        "--no-dedupe-sessions", action="store_true",
+        help="Disable session deduplication and use raw (run_date, ticker) "
+             "rows as-is. Weekend/holiday decision dates resolve their "
+             "forward return as-of the prior trading session (Plan AA "
+             "S5 fix), so a Fri/Sat/Sun trio of decision dates shares one "
+             "real market realization — treating all 3 as independent "
+             "observations overweights that realization up to 3x. Default "
+             "is deduplicated (one row per base_session_date x ticker); "
+             "only disable this for raw storage-coverage inspection, never "
+             "for a statistic that assumes independent observations.",
+    )
     args = p.parse_args()
 
     db_path = resolve_db_path(args.source, args.db)
@@ -246,8 +261,32 @@ def main() -> None:
         print("No (candidate × fwd return) rows found.")
         print("Run: python scripts/backfill_forward_returns.py")
         return
-    print(f"Rows: {len(df):,}    date range: {df['run_date'].min().date()} → "
-          f"{df['run_date'].max().date()}    tickers: {df['ticker'].nunique()}\n")
+
+    raw_n = len(df)
+    if not args.no_dedupe_sessions:
+        from renquant_backtesting.analysis.session_resolution import (  # noqa: PLC0415
+            annotate_base_sessions, dedupe_by_session,
+        )
+        df = annotate_base_sessions(
+            df, date_col="run_date", ticker_col="ticker",
+            cache_root=REPO_ROOT / args.cache_root,
+        )
+        n_non_session = int(df["non_session_run"].sum())
+        # NOT run_id: a Fri/Sat/Sun trio of ad-hoc weekend decisions all get
+        # DIFFERENT run_ids but share one real market realization for a
+        # given ticker — including run_id here would defeat the dedup
+        # entirely, since every row would then have a distinct key.
+        df = dedupe_by_session(df, "base_session_date", ["ticker"])
+        print(f"Rows: {raw_n:,} raw (storage coverage)  →  {len(df):,} unique-session "
+              f"admissible ({n_non_session:,} raw rows were weekend/holiday duplicates "
+              f"of an earlier session, now collapsed)    date range: "
+              f"{df['run_date'].min().date()} → {df['run_date'].max().date()}    "
+              f"tickers: {df['ticker'].nunique()}\n")
+    else:
+        print(f"Rows: {raw_n:,} raw (--no-dedupe-sessions: NOT statistically admissible "
+              f"if weekend/holiday duplicates are present)    date range: "
+              f"{df['run_date'].min().date()} → {df['run_date'].max().date()}    "
+              f"tickers: {df['ticker'].nunique()}\n")
 
     print(f"─ 1. IC by rank_score quantile (q={args.quantiles}) ─")
     _print_quantile_ic(df, args.quantiles)

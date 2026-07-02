@@ -26,6 +26,9 @@ import logging
 import sys
 from pathlib import Path
 
+from renquant_backtesting.analysis.session_resolution import (
+    is_non_session_run, resolve_base_session_date,
+)
 from renquant_backtesting.repo_root import resolve_repo_root
 
 logging.basicConfig(
@@ -299,6 +302,7 @@ def main() -> None:
              len(pairs), len(by_ticker))
 
     total_written = 0
+    total_non_session = 0
     for ticker, dates in sorted(by_ticker.items()):
         df = _load_ohlcv(ticker, cache_root)
         if df is None:
@@ -306,17 +310,33 @@ def main() -> None:
                         ticker, cache_root.name, ticker, len(dates))
             continue
         payload = []
+        ticker_non_session = 0
         for d in dates:
-            row = _compute_row(datetime.date.fromisoformat(d), ticker, df)
+            date = datetime.date.fromisoformat(d)
+            row = _compute_row(date, ticker, df)
             if row is not None:
                 payload.append(row)
+                base = resolve_base_session_date(date, df)
+                if base is not None and is_non_session_run(date, base):
+                    ticker_non_session += 1
         if payload:
             written = record_forward_returns(conn, payload)
             total_written += written
-            log.info("  %-6s — wrote %d rows", ticker, written)
+            total_non_session += ticker_non_session
+            log.info("  %-6s — wrote %d rows (%d weekend/holiday as-of, resolving to "
+                      "an earlier real session — not an independent observation)",
+                      ticker, written, ticker_non_session)
 
     conn.commit()
-    log.info("Done. %d rows upserted into ticker_forward_returns.", total_written)
+    log.info(
+        "Done. %d rows upserted into ticker_forward_returns "
+        "(storage coverage); %d of those (%.1f%%) are weekend/holiday as-of "
+        "duplicates of an earlier real session — deduplicate by "
+        "base_session_date before treating rows as independent statistical "
+        "observations (see analysis.session_resolution).",
+        total_written, total_non_session,
+        100.0 * total_non_session / total_written if total_written else 0.0,
+    )
 
 
 if __name__ == "__main__":
