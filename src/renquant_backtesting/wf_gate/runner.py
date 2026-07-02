@@ -21,30 +21,35 @@ Walk-forward criteria (default):
   - Pass: absolute Sharpe floor AND SPY-relative benchmark floor
   - Fail: positive absolute Sharpe that still lags SPY is benchmark-blind
 
-§5.2 sanity criteria (default) — ENFORCED gate v3 (2026-07-02, S3):
+§5.2 sanity criteria (default) — ENFORCED gate v2 (UNCHANGED real-money behavior;
+Codex 2026-07-02 review of the v3 rollout attempt below):
   - shuffled-label IC: |IC| < 0.005 (model on shuffled labels should be ~0).
     HARD true-leak guard, UNCHANGED.
-  - time-shift placebo — pre-registered DIFFERENCE test (gate v3, S3 of the
-    unified 107 master plan; design lineage: merged #210 freshness-governance
-    Fix-3, plan S1–S3 row):
-        genuine_ic = aligned_real_ic − placebo_ic > 0.02   (margin FROZEN)
-    The daily fwd_60d label carries a measured ~+0.04 embargo-leakage /
-    label-autocorrelation floor (label_autocorr_ic ≈ +0.04; wf-gate corpus)
-    that is SHARED by aligned_real_ic and placebo_ic, so the old absolute
-    ceiling (placebo_ic < 0.5×|aligned_real_ic|) was structurally
-    unsatisfiable for leak-free long-horizon candidates. The shared floor
-    cancels in the difference: the floor alone can no longer fail an
-    otherwise-good model NOR pass a no-edge one. The margin (0.02) is FROZEN
-    2026-07-02 and may NOT be tuned without a new design PR.
+  - time-shift placebo IC: ratio < 0.5 × aligned real IC (placebo should not
+    capture the same signal on the same evaluable rows). This remains the
+    conservative ABSOLUTE rule and the enforced promotion criterion.
 
-§5.2 DIAGNOSTIC-ONLY evidence (stamped, never decides pass/fail):
-  - the LEGACY absolute-ceiling readout and its would-be verdict
-    (sanity_placebo_absolute_rule_pass) — kept STAMPED for continuity of
-    evidence (evidence fields are never deleted), enforced through gate v2 only;
+§5.2 SHADOW-ONLY v3 candidate (stamped, NEVER decides pass/fail — see
+``sanity_placebo_v3_gating`` == False on every verdict): a pre-registered
+DIFFERENCE test, genuine_ic = aligned_real_ic − placebo_ic > 0.02 (margin
+frozen 2026-07-02), proposed to replace the absolute-ceiling rule because the
+daily fwd_60d label carries a measured ~+0.04 embargo-leakage /
+label-autocorrelation floor shared by aligned_real_ic and placebo_ic, making
+the absolute ceiling structurally unsatisfiable for leak-free long-horizon
+candidates. This PR's first attempt made v3 the ENFORCED rule with a margin
+selected while inspecting the specific candidate it flips — Codex correctly
+flagged that as post-outcome gate calibration, not a valid frozen threshold,
+and noted its own overlap-aware CI stayed diagnostic-only while the noisy
+point estimate alone would have decided real capital. v3 stays SHADOW-ONLY —
+computed, stamped, and evaluated against history — until a historical-corpus
+replay and a genuinely prospective held-out run validate it (see
+``doc/research/2026-07-02-wf-gate-v3-shadow-eval.md``). v2's absolute ceiling
+remains the enforced rule with NO CHANGE from before this PR.
+
+§5.2 DIAGNOSTIC-ONLY evidence (stamped, never decides pass/fail, unchanged):
   - the positive-aligned-real-guarded decomposition payload: multi-shift placebo
     profile, label_autocorr_ic, and the overlap-aware conservative lower
-    confidence bound on genuine_ic (the ENFORCED quantity is the genuine_ic
-    POINT ESTIMATE only; the CI/reference-bar fields remain diagnostic).
+    confidence bound on genuine_ic.
 
 References:
 - Lopez de Prado AFML §7 + §11 (walk-forward + cross-validation in finance)
@@ -85,17 +90,16 @@ def _resolve_repo_root() -> Path:
 
 
 REPO = _resolve_repo_root()
-# ENFORCED gate version — v3 (2026-07-02, S3 of the unified 107 master plan;
-# design lineage: merged #210 freshness-governance Fix-3, plan S1–S3 row). The
-# placebo sub-gate now decides on the pre-registered DIFFERENCE test
-#     genuine_ic = aligned_real_ic − placebo_ic > PLACEBO_GENUINE_IC_MARGIN
-# with the margin FROZEN at 0.02 (see PLACEBO_GENUINE_IC_MARGIN below). The old
-# conservative ABSOLUTE ceiling (placebo_ic < 0.5×|aligned_real_ic|, gate v2)
-# was structurally unsatisfiable: the daily fwd_60d label carries a measured
-# ~+0.04 embargo-leakage floor shared by BOTH aligned_real_ic and placebo_ic,
-# which cancels in the difference. The absolute-ceiling readout stays STAMPED
-# as a diagnostic (evidence fields are never deleted).
-GATE_VERSION = 3
+# ENFORCED gate version — UNCHANGED at v2 pending v3 shadow validation (Codex
+# 2026-07-02 review: the v3 difference-test's margin was selected while
+# inspecting the candidate it flips, and its own CI stayed diagnostic-only
+# while a noisy point estimate alone would have decided capital — both are
+# blockers for enforcement). The placebo sub-gate still decides on the
+# conservative ABSOLUTE rule (placebo_ic < 0.5×|aligned_real_ic|). Do NOT bump
+# this until v3's shadow evaluation (historical-corpus replay + a genuinely
+# prospective held-out run) validates it — see
+# ``doc/research/2026-07-02-wf-gate-v3-shadow-eval.md``.
+GATE_VERSION = 2
 # Diagnostic schema version — bumped when the LOGGED/STAMPED diagnostics change.
 # This NEVER affects pass/fail; it only versions the diagnostic payload.
 # v2 (gate v3): legacy absolute-ceiling verdict + threshold stamped as
@@ -188,31 +192,33 @@ def _sanity_result_passed(sanity_result: dict) -> bool:
 
 SHUF_IC_MAX = 0.005  # HARD true-leak guard: |shuffled-label IC| must be below this
 
-# ENFORCED placebo criterion — gate v3 (S3). The margin is FROZEN 2026-07-02,
-# pre-registered in the unified 107 master plan's S1–S3 row (proposed 0.02
-# against the measured ~+0.04 shared embargo-leakage floor; design lineage:
-# merged #210 freshness-governance Fix-3). It may NOT be tuned without a new
-# design PR.
+# SHADOW-ONLY (gate v3 candidate) placebo criterion — NOT enforced pending a
+# historical-corpus replay and a prospective held-out run (Codex 2026-07-02
+# review: this margin was selected while inspecting the candidate it flips,
+# a form of post-outcome gate calibration, not a valid frozen threshold for
+# a gate that decides real capital). Proposed 0.02 against the measured
+# ~+0.04 shared embargo-leakage floor; design lineage: merged #210
+# freshness-governance Fix-3, unified 107 master plan S1–S3 row. See
+# doc/research/2026-07-02-wf-gate-v3-shadow-eval.md.
 PLACEBO_GENUINE_IC_MARGIN = 0.02
-PLACEBO_CRITERION = "genuine_ic>0.02 (frozen 2026-07-02)"
+PLACEBO_CRITERION = "genuine_ic>0.02 (shadow-only, not enforced)"
 
 
 def _placebo_ic_threshold(aligned_real_ic: float) -> float:
-    """LEGACY absolute placebo ceiling — DIAGNOSTIC-ONLY since gate v3.
+    """ENFORCED absolute placebo ceiling — gate v2, UNCHANGED.
 
-    Through gate v2 this was the ENFORCED rule: placebo_ic had to stay below
-    0.5×|aligned_real_ic| (floored at 0.005). The daily fwd_60d label carries a
-    measured ~+0.04 embargo-leakage floor shared by aligned_real_ic and
-    placebo_ic, which made this ceiling structurally unsatisfiable for leak-free
-    long-horizon candidates. Gate v3 enforces the pre-registered DIFFERENCE test
-    (``_placebo_difference_pass``) instead; this readout stays computed and
-    STAMPED for continuity of evidence and MUST NOT be re-wired into pass/fail.
+    placebo_ic must stay below 0.5×|aligned_real_ic| (floored at 0.005). This
+    remains the live pass/fail rule for the placebo sub-gate. A pre-registered
+    DIFFERENCE-test alternative (``_placebo_difference_pass``, gate v3
+    candidate) is investigated in SHADOW ONLY — see the module docstring and
+    ``_pooled_placebo_verdict`` — and does not change this threshold or the
+    gate verdict.
     """
     return max(0.005, 0.5 * abs(float(aligned_real_ic)))
 
 
 def _placebo_ic_requirement_text(aligned_real_ic: float) -> str:
-    """Human-readable LEGACY absolute-ceiling readout (diagnostic-only, gate v3)."""
+    """Human-readable ENFORCED absolute-ceiling requirement (gate v2)."""
     threshold = _placebo_ic_threshold(aligned_real_ic)
     return (
         f"threshold={threshold:+.4f} "
@@ -221,7 +227,7 @@ def _placebo_ic_requirement_text(aligned_real_ic: float) -> str:
 
 
 def _placebo_genuine_ic_requirement_text() -> str:
-    """Human-readable ENFORCED difference-test requirement (gate v3)."""
+    """Human-readable SHADOW-ONLY difference-test requirement (gate v3 candidate)."""
     return (
         f"genuine_ic = aligned_real_ic − placebo_ic > "
         f"{PLACEBO_GENUINE_IC_MARGIN:+.3f} [{PLACEBO_CRITERION}]"
@@ -229,10 +235,12 @@ def _placebo_genuine_ic_requirement_text() -> str:
 
 
 def _placebo_difference_pass(genuine_ic) -> bool:
-    """ENFORCED placebo verdict — gate v3 pre-registered DIFFERENCE test (S3).
+    """SHADOW-ONLY placebo verdict — gate v3 candidate DIFFERENCE test (S3).
 
-    Passes iff ``genuine_ic`` is a finite number strictly above
-    ``PLACEBO_GENUINE_IC_MARGIN`` (0.02, FROZEN 2026-07-02). ``genuine_ic`` is
+    NOT enforced (see module docstring and ``_pooled_placebo_verdict``) pending
+    a historical-corpus replay and a prospective held-out run. Passes iff
+    ``genuine_ic`` is a finite number strictly above
+    ``PLACEBO_GENUINE_IC_MARGIN`` (0.02). ``genuine_ic`` is
     produced by ``_genuine_ic_value`` and is therefore ``None`` (→ FAIL,
     fail-closed) whenever the placebo or aligned real IC is missing/NaN or the
     aligned real IC is non-positive (positive-aligned-real guard: a model with
@@ -268,20 +276,26 @@ def _placebo_absolute_rule_pass(aligned_real_ic: float, placebo_ic: float) -> bo
 
 
 def _pooled_placebo_verdict(placebo_aligned_real_ic: float, placebo_ic: float) -> dict:
-    """ENFORCED pooled placebo sub-gate (gate v3) + stamped evidence fields.
+    """ENFORCED pooled placebo sub-gate (gate v2, UNCHANGED) + v3 SHADOW evidence.
 
-    Single source for the pooled placebo leg: the pass/fail comes from the
-    pre-registered DIFFERENCE test (``_placebo_difference_pass``); the legacy
-    absolute-ceiling verdict/threshold are computed alongside and stamped as
-    DIAGNOSTICS so no evidence field is lost across the gate v2 → v3 switch.
+    Per Codex's 2026-07-02 review of the v3 rollout PR: the genuine_ic > 0.02
+    difference test was calibrated while inspecting the specific candidate it
+    flips (post-outcome threshold selection), and its own overlap-aware CI
+    remains diagnostic-only while the noisy point estimate alone would decide
+    real capital. v3 is therefore SHADOW-ONLY until a historical-corpus replay
+    and a prospective held-out run validate it (see
+    ``doc/research/2026-07-02-wf-gate-v3-shadow-eval.md``). The ENFORCED
+    pass/fail is v2's absolute-ceiling rule, unchanged from before this PR.
+    Every v3 field is still computed and stamped so the shadow evaluation has
+    real data to work from; none of them feed ``pass_placebo``.
     """
     genuine = _genuine_ic_value(placebo_aligned_real_ic, placebo_ic)
     return {
-        "pass_placebo": _placebo_difference_pass(genuine),
-        "placebo_criterion": PLACEBO_CRITERION,
-        "sanity_placebo_genuine_ic": genuine,
-        "sanity_placebo_genuine_ic_margin": PLACEBO_GENUINE_IC_MARGIN,
-        # LEGACY absolute-ceiling readout — DIAGNOSTIC-ONLY since gate v3:
+        # ENFORCED (gate v2, UNCHANGED) — see _placebo_absolute_rule_pass docstring.
+        "pass_placebo": _placebo_absolute_rule_pass(
+            placebo_aligned_real_ic, placebo_ic
+        ),
+        "placebo_criterion": _placebo_ic_requirement_text(placebo_aligned_real_ic),
         "sanity_placebo_absolute_rule_pass": _placebo_absolute_rule_pass(
             placebo_aligned_real_ic, placebo_ic
         ),
@@ -290,10 +304,16 @@ def _pooled_placebo_verdict(placebo_aligned_real_ic: float, placebo_ic: float) -
             if placebo_aligned_real_ic == placebo_aligned_real_ic
             else None
         ),
+        # SHADOW-ONLY (gate v3 candidate, NOT enforced — see module docstring):
+        "sanity_placebo_genuine_ic": genuine,
+        "sanity_placebo_genuine_ic_margin": PLACEBO_GENUINE_IC_MARGIN,
+        "sanity_placebo_v3_shadow_verdict": _placebo_difference_pass(genuine),
+        "sanity_placebo_v3_criterion": PLACEBO_CRITERION,
+        "sanity_placebo_v3_gating": False,
     }
 
 
-# --- genuine_ic decomposition (POINT ESTIMATE ENFORCED since gate v3 / S3) ----
+# --- genuine_ic decomposition (SHADOW-ONLY gate v3 candidate, NOT enforced) ---
 #
 # The time-shift placebo at shift = 2×label_horizon carries a STRUCTURAL floor:
 # the daily-sampled fwd_60d label is itself cross-sectionally autocorrelated at
@@ -302,16 +322,18 @@ def _pooled_placebo_verdict(placebo_aligned_real_ic: float, placebo_ic: float) -
 # leak-free quantity is the DIFFERENCE
 #     genuine_ic = aligned_real_ic − placebo_ic
 # in which the shared autocorr floor cancels (it is present in BOTH
-# aligned_real_ic and placebo_ic). Since gate v3 (S3, 2026-07-02) the genuine_ic
-# POINT ESTIMATE is the ENFORCED placebo criterion:
-#     pass_placebo ⇔ genuine_ic > PLACEBO_GENUINE_IC_MARGIN  (0.02, FROZEN)
-# via ``_placebo_difference_pass``. The positive-aligned-real guard inside
-# ``_genuine_ic_value`` is part of the enforced rule (None → fail-closed).
+# aligned_real_ic and placebo_ic). This is a CANDIDATE replacement (gate v3)
+# for the enforced absolute ceiling:
+#     shadow verdict ⇔ genuine_ic > PLACEBO_GENUINE_IC_MARGIN  (0.02)
+# via ``_placebo_difference_pass``. It is SHADOW-ONLY (see module docstring and
+# ``_pooled_placebo_verdict``) — computed and stamped for the pending
+# historical-corpus replay, does NOT decide pass/fail. The positive-aligned-real
+# guard inside ``_genuine_ic_value`` is part of the shadow rule (None → shadow
+# FAIL).
 #
-# STILL DIAGNOSTIC-ONLY (stamped, never decide pass/fail): the overlap-aware
-# conservative lower confidence bound, and the LEGACY reference bar
-# max(0.02, 0.25×|aligned_real_ic|) below, which predates the frozen margin and
-# is kept only so historical stamped payloads remain comparable.
+# ALSO DIAGNOSTIC/SHADOW-ONLY (stamped, never decide pass/fail): the
+# overlap-aware conservative lower confidence bound, and the reference bar
+# max(0.02, 0.25×|aligned_real_ic|) below.
 #
 # SAFETY: genuine_ic is NOT a leakage exoneration — a high
 # corr(placebo_ic, label_autocorr_ic) only *supports* the confound hypothesis (see
@@ -335,7 +357,7 @@ def _genuine_ic_diag_reference_bar(aligned_real_ic: float) -> float:
 
 
 def _genuine_ic_value(aligned_real_ic: float, placebo_ic: float) -> float | None:
-    """genuine_ic = aligned_real_ic − placebo_ic — ENFORCED quantity since gate v3.
+    """genuine_ic = aligned_real_ic − placebo_ic — SHADOW-ONLY gate v3 candidate quantity.
 
     Returns ``None`` (not a number) when:
       - either input is NaN / non-numeric, OR
@@ -344,8 +366,9 @@ def _genuine_ic_value(aligned_real_ic: float, placebo_ic: float) -> float | None
     The positive-aligned-real guard is mandatory: a "positive" genuine_ic produced
     by a NEGATIVE aligned_real_ic minus a MORE-negative placebo_ic is meaningless
     (the model has no real edge to certify), so we refuse to report it. Under the
-    gate-v3 difference test a ``None`` here FAILS the placebo leg (fail-closed;
-    see ``_placebo_difference_pass``).
+    shadow-only gate-v3 candidate difference test a ``None`` here means shadow
+    FAIL (see ``_placebo_difference_pass``); it does not affect the enforced
+    gate-v2 absolute-ceiling verdict.
     """
     try:
         ar = float(aligned_real_ic)
@@ -375,10 +398,11 @@ def _genuine_ic_diagnostic(
     an overlap-aware conservative lower confidence bound (a moving-block bootstrap
     whose block length respects the overlapping 60d label).
 
-    Since gate v3 the genuine_ic POINT ESTIMATE is enforced elsewhere
-    (``_pooled_placebo_verdict`` → ``_placebo_difference_pass``); this payload is
-    stamped evidence only and must stay fail-soft — an exception here can never
-    flip the verdict, because the enforced quantity is computed independently.
+    This entire payload is SHADOW-ONLY (gate v3 candidate evidence, NOT
+    enforced — see ``_pooled_placebo_verdict``); it must stay fail-soft — an
+    exception here can never flip the verdict, because the enforced quantity
+    (the gate-v2 absolute ceiling) is computed independently and does not
+    depend on this payload at all.
     """
     genuine = _genuine_ic_value(aligned_real_ic, placebo_ic)
     positive_real = None
@@ -406,8 +430,9 @@ def _genuine_ic_diagnostic(
         "ci_alpha": ci_alpha,
         "ci_method": None,
         "tag": (
-            "genuine_ic point estimate ENFORCED (gate v3); "
-            "CI/reference-bar fields diagnostic-only"
+            "gate v3 candidate SHADOW-ONLY, NOT enforced; "
+            "genuine_ic point estimate, CI, and reference-bar fields are all "
+            "shadow evidence"
         ),
     }
     if genuine is not None and paired_ics:
@@ -2782,15 +2807,20 @@ def run_sanity_battery(
         )
         min_dates = max(10, int(math.ceil(max(1, _gate_shift_days) / 6)))
         min_mean_ic = max(0.0, 0.25 * abs(real_ic))
-        # ENFORCED per-regime placebo rule — gate v3 DIFFERENCE test (S3): when a
-        # placebo reading exists for the regime, its genuine_ic =
-        # aligned_real_gate − placebo_gate_ic must exceed PLACEBO_GENUINE_IC_MARGIN
-        # (same frozen criterion as the pooled leg — structure of the regime
-        # sub-gate is otherwise unchanged: eligibility and the mean-IC floor stay
-        # as they were). The LEGACY absolute ceiling
-        # (≤ max(0.005, 0.5×|ref|)) is still computed and STAMPED per regime as a
-        # diagnostic (placebo_gate_absolute_rule_pass) but no longer decides.
-        max_placebo_ratio = 0.5  # LEGACY diagnostic ceiling ratio (stamped only)
+        # ENFORCED per-regime placebo rule — gate v2, UNCHANGED (Codex 2026-07-02
+        # review: v3's per-regime difference test is ALSO a per-regime multiple
+        # look with no family-wise error control across regimes, on top of the
+        # pooled-leg calibration concerns — see _pooled_placebo_verdict docstring
+        # and doc/research/2026-07-02-wf-gate-v3-shadow-eval.md). When a placebo
+        # reading exists for the regime, the ABSOLUTE ceiling
+        # (≤ max(0.005, 0.5×|ref|)) decides pass/fail, exactly as before this PR.
+        # v3's per-regime genuine_ic difference test is computed and STAMPED
+        # (placebo_gate_v3_shadow_pass) as shadow-only evidence for the same
+        # replay this PR's pooled-leg shadow evaluation runs — it does NOT
+        # decide anything, and even once v3's pooled leg is validated, promoting
+        # the per-regime leg additionally requires either a family-wise
+        # correction across regimes or an explicit non-gating designation.
+        max_placebo_ratio = 0.5  # ENFORCED ceiling ratio (gate v2, unchanged)
         regimes_out = {}
         failed = []
         eligible_any = False
@@ -2808,9 +2838,12 @@ def run_sanity_battery(
             n_dates = int(stats.get("n_dates") or 0)
             eligible = n_dates >= min_dates
             passed = False
-            # ENFORCED (gate v3) genuine_ic per regime (positive-aligned-real guarded).
+            # SHADOW-ONLY (gate v3 candidate) genuine_ic per regime
+            # (positive-aligned-real guarded). Computed for the replay/shadow
+            # evaluation; does not feed `passed`.
             regime_genuine_ic = _genuine_ic_value(aligned_real_gate, placebo_gate_ic)
-            # LEGACY absolute-ceiling verdict — DIAGNOSTIC-ONLY since gate v3.
+            regime_v3_shadow_pass = None
+            # ENFORCED (gate v2, UNCHANGED) absolute-ceiling verdict.
             regime_absolute_rule_pass = None
             if eligible:
                 eligible_any = True
@@ -2820,8 +2853,8 @@ def run_sanity_battery(
                     mean_ic_f = float("nan")
                 placebo_ok = True
                 if placebo_gate_ic is not None and mean_ic_f == mean_ic_f:
-                    # LEGACY absolute ceiling (gate v2) — computed for the
-                    # diagnostic stamp only, verbatim from the old enforced rule.
+                    # ENFORCED absolute ceiling (gate v2, unchanged from before
+                    # this PR).
                     placebo_ref = mean_ic_f
                     try:
                         aligned_real_gate_f = float(aligned_real_gate)
@@ -2833,11 +2866,11 @@ def run_sanity_battery(
                         0.005,
                         max_placebo_ratio * abs(placebo_ref),
                     )
-                    # ENFORCED (gate v3): pre-registered difference test, same
-                    # frozen margin as the pooled leg. Fail-closed when
-                    # genuine_ic is unavailable (missing/NaN aligned real or
-                    # non-positive aligned real).
-                    placebo_ok = _placebo_difference_pass(regime_genuine_ic)
+                    placebo_ok = regime_absolute_rule_pass
+                    # SHADOW-ONLY (gate v3 candidate): pre-registered difference
+                    # test, same frozen margin as the pooled leg. Computed for
+                    # the shadow replay only — does not decide `placebo_ok`.
+                    regime_v3_shadow_pass = _placebo_difference_pass(regime_genuine_ic)
                 passed = (
                     mean_ic_f == mean_ic_f
                     and mean_ic_f >= min_mean_ic
@@ -2849,13 +2882,16 @@ def run_sanity_battery(
                 **stats,
                 "eligible": bool(eligible),
                 "passed": bool(passed) if eligible else True,
-                "placebo_criterion": PLACEBO_CRITERION,
+                # ENFORCED (gate v2, unchanged) — drives `passed` above.
+                "placebo_criterion": "absolute ceiling: |placebo_ic| <= max(0.005, 0.5x|ref|)",
                 "placebo_gate_shift_days": int(_gate_shift_days),
                 "placebo_gate_ic": placebo_gate_ic,
                 "placebo_gate_aligned_real_ic": aligned_real_gate,
-                # ENFORCED criterion input since gate v3:
+                # SHADOW-ONLY (gate v3 candidate) evidence, not enforced:
                 "placebo_gate_genuine_ic": regime_genuine_ic,
-                # LEGACY absolute-ceiling verdict — DIAGNOSTIC-ONLY since gate v3
+                "placebo_gate_v3_shadow_pass": regime_v3_shadow_pass,
+                "placebo_gate_v3_gating": False,
+                # ENFORCED (gate v2, UNCHANGED) absolute-ceiling verdict
                 # (None when the regime was ineligible or had no placebo reading):
                 "placebo_gate_absolute_rule_pass": regime_absolute_rule_pass,
                 "label_autocorr_gate_ic": gate_row.get("label_autocorr_ic"),
@@ -2873,7 +2909,11 @@ def run_sanity_battery(
                 if failed else
                 "no regime has enough OOS dates for sanity IC validation"
             ),
-            "placebo_criterion": PLACEBO_CRITERION,
+            # ENFORCED (gate v2, unchanged) — drives `passed` above.
+            "placebo_criterion": "absolute ceiling: |placebo_ic| <= max(0.005, 0.5x|ref|)",
+            # SHADOW-ONLY (gate v3 candidate) — see placebo_gate_v3_shadow_pass
+            # per regime; does not drive `passed`.
+            "placebo_v3_shadow_criterion": PLACEBO_CRITERION,
             "genuine_ic_margin": PLACEBO_GENUINE_IC_MARGIN,
             "placebo_gate_shift_days": int(_gate_shift_days),
             "min_n_dates": min_dates,
@@ -2916,34 +2956,36 @@ def run_sanity_battery(
     except Exception as exc:  # noqa: BLE001 — diagnostic-only; must NEVER fail the gate
         log.warning("  Layer-1a diagnostic profiles unavailable (gate unaffected): %s", exc)
 
-    # Pass criteria — ENFORCED gate v3 (S3: pre-registered placebo DIFFERENCE test).
+    # Pass criteria — ENFORCED gate v2 (UNCHANGED; the gate v3 candidate
+    # DIFFERENCE test below is SHADOW-ONLY, not enforced — see module docstring).
     #
     # (1) Shuffled-label control — HARD true-leak guard, UNCHANGED. A non-clean
     #     shuffle FAILS. (SHUF_IC_MAX == 0.005, identical to the prior literal.)
     pass_shuf = abs(shuf_ic) < SHUF_IC_MAX
     #
-    # (2) Time-shift placebo sub-gate — ENFORCED DIFFERENCE test (gate v3, S3):
+    # (2) Time-shift placebo sub-gate — SHADOW-ONLY candidate DIFFERENCE test:
     #     genuine_ic = aligned_real_ic − placebo_ic must be available (both terms
     #     finite, aligned_real_ic > 0 per the positive-aligned-real guard) AND
     #     exceed PLACEBO_GENUINE_IC_MARGIN (0.02, FROZEN 2026-07-02). The measured
     #     ~+0.04 embargo-leakage floor is shared by BOTH terms and cancels in the
     #     difference, so the floor alone can neither fail an otherwise-good model
-    #     nor pass a no-edge one. Fail-closed: missing placebo, missing aligned
-    #     real, or non-positive aligned real → genuine_ic=None → FAIL.
-    #     The LEGACY absolute-ceiling verdict (enforced through gate v2) is
-    #     computed alongside and STAMPED as a DIAGNOSTIC — evidence fields are
-    #     never deleted.
+    #     nor pass a no-edge one. It is SHADOW-ONLY (see _pooled_placebo_verdict
+    #     docstring) pending a historical-corpus replay and a genuinely
+    #     prospective held-out run.
+    #     The ENFORCED verdict is the ABSOLUTE-ceiling rule (gate v2, unchanged).
     pooled_placebo_verdict = _pooled_placebo_verdict(placebo_aligned_real_ic, placebo_ic)
     pass_placebo = bool(pooled_placebo_verdict["pass_placebo"])
     placebo_genuine_ic = pooled_placebo_verdict["sanity_placebo_genuine_ic"]
-    # genuine_ic CI payload — the overlap-aware conservative CI and legacy
-    # reference bar remain DIAGNOSTIC-ONLY. Wrapped fail-soft: an exception here
-    # can never flip the verdict (the ENFORCED point estimate above is computed
-    # independently by _pooled_placebo_verdict).
+    # genuine_ic CI payload — SHADOW-ONLY evidence for the same v3 candidate;
+    # the overlap-aware conservative CI and legacy reference bar are all
+    # informational here. Wrapped fail-soft: an exception here can never flip
+    # the verdict (the ENFORCED absolute-ceiling rule above is computed
+    # independently by _pooled_placebo_verdict and does not depend on this).
     genuine_ic_diagnostic: dict = {
         "tag": (
-            "genuine_ic point estimate ENFORCED (gate v3); "
-            "CI/reference-bar fields diagnostic-only"
+            "gate v3 candidate SHADOW-ONLY, NOT enforced; "
+            "genuine_ic point estimate, CI, and reference-bar fields are all "
+            "shadow evidence for the pending v3 shadow-evaluation replay"
         ),
     }
     try:
@@ -2956,21 +2998,22 @@ def run_sanity_battery(
     except Exception as exc:  # noqa: BLE001 — diagnostic payload; fail-soft
         log.warning("  genuine_ic CI diagnostic unavailable (verdict unaffected): %s", exc)
     log.info(
-        "  placebo sub-gate [ENFORCED difference, gate v3]: genuine_ic=%s vs %s → %s "
+        "  placebo sub-gate [ENFORCED absolute ceiling, gate v2]: %s → %s "
         "(aligned_real_ic=%s, placebo_ic=%s) "
-        "[DIAGNOSTIC-ONLY: legacy absolute ceiling %s → %s; ci_lower=%s, positive_real=%s]",
-        f"{placebo_genuine_ic:+.4f}" if placebo_genuine_ic is not None else "n/a",
-        _placebo_genuine_ic_requirement_text(),
+        "[SHADOW-ONLY gate v3 candidate, NOT enforced: genuine_ic=%s vs %s → %s; "
+        "ci_lower=%s, positive_real=%s]",
+        _placebo_ic_requirement_text(placebo_aligned_real_ic),
         "PASS" if pass_placebo else "FAIL",
         (
             f"{placebo_aligned_real_ic:+.4f}"
             if placebo_aligned_real_ic == placebo_aligned_real_ic else "n/a"
         ),
         f"{placebo_ic:+.4f}" if placebo_ic == placebo_ic else "n/a",
-        _placebo_ic_requirement_text(placebo_aligned_real_ic),
+        f"{placebo_genuine_ic:+.4f}" if placebo_genuine_ic is not None else "n/a",
+        _placebo_genuine_ic_requirement_text(),
         (
             "would-PASS"
-            if pooled_placebo_verdict["sanity_placebo_absolute_rule_pass"]
+            if pooled_placebo_verdict["sanity_placebo_v3_shadow_verdict"]
             else "would-FAIL"
         ),
         (
@@ -2992,8 +3035,9 @@ def run_sanity_battery(
     )
     if pass_all:
         sanity_reason = (
-            f"PASS: shuf_ic={shuf_ic:+.4f} genuine_ic={_genuine_txt} "
-            f"(placebo_ic={placebo_ic:+.4f}; {PLACEBO_CRITERION})"
+            f"PASS: shuf_ic={shuf_ic:+.4f} placebo_ic={placebo_ic:+.4f} "
+            f"({_placebo_ic_requirement_text(placebo_aligned_real_ic)}) "
+            f"[shadow genuine_ic={_genuine_txt}, not enforced]"
         )
     elif pass_shuf and pass_placebo and not pass_regime:
         sanity_reason = (
@@ -3023,23 +3067,30 @@ def run_sanity_battery(
             if placebo_aligned_real_ic == placebo_aligned_real_ic
             else None
         ),
-        # ENFORCED placebo criterion (gate v3, S3) — every verdict self-documents
-        # which rule judged it. The genuine_ic point estimate below IS the
-        # enforced quantity; the legacy absolute-ceiling verdict/threshold are
-        # STAMPED as diagnostics (evidence fields are never deleted).
-        "sanity_placebo_gate_mode": "genuine_ic_difference_enforced_absolute_diagnostic",
+        # ENFORCED placebo criterion (gate v2, unchanged) — every verdict
+        # self-documents which rule judged it. The absolute-ceiling verdict
+        # below IS the enforced quantity; the gate v3 candidate fields are
+        # SHADOW-ONLY (see sanity_placebo_v3_gating == False).
+        "sanity_placebo_gate_mode": "absolute_ceiling_enforced_v3_shadow",
         "placebo_criterion": pooled_placebo_verdict["placebo_criterion"],
-        "sanity_placebo_genuine_ic": placebo_genuine_ic,
-        "sanity_placebo_genuine_ic_margin": pooled_placebo_verdict[
-            "sanity_placebo_genuine_ic_margin"
-        ],
-        # LEGACY absolute-ceiling readout — DIAGNOSTIC-ONLY since gate v3:
         "sanity_placebo_absolute_rule_pass": pooled_placebo_verdict[
             "sanity_placebo_absolute_rule_pass"
         ],
         "sanity_placebo_absolute_rule_threshold": pooled_placebo_verdict[
             "sanity_placebo_absolute_rule_threshold"
         ],
+        # SHADOW-ONLY (gate v3 candidate), NOT enforced:
+        "sanity_placebo_genuine_ic": placebo_genuine_ic,
+        "sanity_placebo_genuine_ic_margin": pooled_placebo_verdict[
+            "sanity_placebo_genuine_ic_margin"
+        ],
+        "sanity_placebo_v3_shadow_verdict": pooled_placebo_verdict[
+            "sanity_placebo_v3_shadow_verdict"
+        ],
+        "sanity_placebo_v3_criterion": pooled_placebo_verdict[
+            "sanity_placebo_v3_criterion"
+        ],
+        "sanity_placebo_v3_gating": pooled_placebo_verdict["sanity_placebo_v3_gating"],
         "sanity_placebo_genuine_ic_positive_real": genuine_ic_diagnostic.get(
             "positive_aligned_real"
         ),
@@ -3415,21 +3466,27 @@ def main():
         "sanity_placebo_aligned_real_ic": (
             sanity_result.get("sanity_placebo_aligned_real_ic")
         ),
-        # ENFORCED placebo criterion (gate v3, S3) — the verdict self-documents
-        # which rule judged it. genuine_ic is the enforced quantity; the legacy
-        # absolute-ceiling verdict is stamped as a diagnostic only.
-        "placebo_criterion":   PLACEBO_CRITERION,
+        # ENFORCED placebo criterion (gate v2, unchanged) — the verdict
+        # self-documents which rule judged it. The absolute-ceiling verdict is
+        # the enforced quantity; gate v3 candidate fields are SHADOW-ONLY.
+        "placebo_criterion":   sanity_result.get("placebo_criterion"),
         "sanity_placebo_gate_mode": sanity_result.get("sanity_placebo_gate_mode"),
-        "sanity_placebo_genuine_ic": sanity_result.get("sanity_placebo_genuine_ic"),
-        "sanity_placebo_genuine_ic_margin": sanity_result.get(
-            "sanity_placebo_genuine_ic_margin"
-        ),
         "sanity_placebo_absolute_rule_pass": sanity_result.get(
             "sanity_placebo_absolute_rule_pass"
         ),
         "sanity_placebo_absolute_rule_threshold": sanity_result.get(
             "sanity_placebo_absolute_rule_threshold"
         ),
+        # SHADOW-ONLY (gate v3 candidate), NOT enforced:
+        "sanity_placebo_genuine_ic": sanity_result.get("sanity_placebo_genuine_ic"),
+        "sanity_placebo_genuine_ic_margin": sanity_result.get(
+            "sanity_placebo_genuine_ic_margin"
+        ),
+        "sanity_placebo_v3_shadow_verdict": sanity_result.get(
+            "sanity_placebo_v3_shadow_verdict"
+        ),
+        "sanity_placebo_v3_criterion": sanity_result.get("sanity_placebo_v3_criterion"),
+        "sanity_placebo_v3_gating": sanity_result.get("sanity_placebo_v3_gating"),
         "sanity_label_col":    sanity_result.get("sanity_label_col"),
         "sanity_label_horizon_days": sanity_result.get("sanity_label_horizon_days"),
         "sanity_placebo_gate_shift_days": (

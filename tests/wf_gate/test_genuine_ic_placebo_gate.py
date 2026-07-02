@@ -1,31 +1,33 @@
-"""Gate v3 (S3) — the placebo leg gates on the pre-registered DIFFERENCE test.
+"""Gate v2 (UNCHANGED, enforced) + gate v3 candidate (SHADOW-ONLY, S3).
 
-SAFETY-CRITICAL. This pins the ENFORCED §5.2 placebo criterion switched in S3 of
-the unified 107 master plan (design lineage: merged #210 freshness-governance
-Fix-3, plan S1–S3 row):
+SAFETY-CRITICAL. Round 2 of the S3 rollout (Codex 2026-07-02 review): the
+first attempt made the pre-registered DIFFERENCE test
 
-    pass_placebo  ⇔  genuine_ic = aligned_real_ic − placebo_ic > 0.02
+    genuine_ic = aligned_real_ic − placebo_ic > 0.02
 
-with the margin FROZEN 2026-07-02 (``PLACEBO_CRITERION`` self-documents every
-verdict). WHY: the daily fwd_60d label carries a measured ~+0.04
-embargo-leakage / label-autocorrelation floor SHARED by aligned_real_ic and
-placebo_ic, so the old absolute ceiling (placebo_ic < 0.5×|aligned_real_ic|,
-gate v2) was structurally unsatisfiable for leak-free long-horizon candidates.
-The shared floor cancels in the difference.
+the ENFORCED §5.2 placebo criterion, but its 0.02 margin was selected while
+inspecting the specific candidate it flips (post-outcome gate calibration),
+and its own overlap-aware CI stayed diagnostic-only while the noisy point
+estimate alone would decide real capital. Both are blockers for a gate that
+authorizes capital deployment.
 
-These tests pin FOUR things:
-  (a) a synthetic CLEAN model (real IC well above placebo + margin) PASSES;
-  (b) a LEAKY model (placebo ≈ real) FAILS;
-  (c) a model sitting exactly at the embargo floor (real ≈ placebo ≈ +0.04,
-      genuine ≈ 0) FAILS — the floor alone can no longer FAIL an otherwise-good
-      model (the real 2026-06-23 false-reject now passes) NOR PASS a no-edge one;
-  (d) the OLD absolute-ceiling criterion's would-be verdict is still STAMPED as
-      a diagnostic (evidence fields are never deleted) — and it no longer
-      decides in EITHER direction.
-
-The margin is FROZEN: any change to PLACEBO_GENUINE_IC_MARGIN / the criterion
-string requires a new design PR, and must consciously rewrite the freeze tests
-below.
+This file now pins:
+  (1) The ENFORCED verdict is v2's absolute ceiling
+      (placebo_ic < 0.5×|aligned_real_ic|), UNCHANGED from before this PR.
+  (2) The v3 DIFFERENCE test (genuine_ic > 0.02, margin still frozen at 0.02
+      for the SHADOW evaluation) is computed and STAMPED on every verdict as
+      SHADOW-ONLY evidence (``sanity_placebo_v3_shadow_verdict``,
+      ``sanity_placebo_v3_gating`` == False) — it does not decide anything
+      until a historical-corpus replay and a prospective held-out run
+      validate it (see doc/research/2026-07-02-wf-gate-v3-shadow-eval.md).
+  (3) The real 2026-06-23 candidate the gate-v2 absolute ceiling
+      false-rejected: v3's shadow verdict shows the fix WOULD repair that
+      false reject, but the currently ENFORCED verdict is still FAIL — this
+      is exactly why v3 needs shadow validation before promotion, not an
+      inconsistency.
+  (4) genuine_ic's positive-aligned-real guard, the CI/reference-bar shadow
+      payload, and the shuffled-label hard leak guard are all unchanged from
+      the prior round.
 """
 from __future__ import annotations
 
@@ -73,34 +75,50 @@ _TODAY = {
 
 
 def _enforced(fx: dict) -> bool:
-    """The REAL enforced pooled placebo verdict (production code path)."""
+    """The REAL enforced pooled placebo verdict (production code path) — gate v2."""
     return bool(
         _pooled_placebo_verdict(fx["aligned_real_ic"], fx["placebo_ic"])["pass_placebo"]
     )
 
 
+def _shadow(fx: dict) -> bool:
+    """The SHADOW-ONLY gate v3 candidate verdict — never decides pass_placebo."""
+    return bool(
+        _pooled_placebo_verdict(fx["aligned_real_ic"], fx["placebo_ic"])[
+            "sanity_placebo_v3_shadow_verdict"
+        ]
+    )
+
+
 # --------------------------------------------------------------------------- #
-# (0) FROZEN criterion — margin and self-documentation string are pinned.
+# (0) Gate version UNCHANGED; shadow criterion margin is pinned for the replay.
 # --------------------------------------------------------------------------- #
-def test_gate_version_bumped_for_criterion_switch():
-    """The ENFORCED rule changed (absolute ceiling → difference test) ⇒ gate v3."""
-    assert GATE_VERSION == 3
+def test_gate_version_unchanged_v3_is_shadow_only():
+    """The ENFORCED rule is still v2's absolute ceiling; GATE_VERSION stays 2
+    until v3's shadow evaluation validates it."""
+    assert GATE_VERSION == 2
     assert GATE_DIAGNOSTIC_VERSION == 2
 
 
 def test_margin_is_frozen_at_0_02():
-    """FROZEN 2026-07-02 (unified 107 master plan S1–S3 row: 0.02 vs the measured
-    ~+0.04 shared embargo floor). Changing this constant requires a NEW design PR —
-    do not 'tune' it here."""
+    """FROZEN for the SHADOW evaluation (unified 107 master plan S1–S3 row: 0.02
+    vs the measured ~+0.04 shared embargo floor). Changing this constant requires
+    a NEW design PR — do not 'tune' it here."""
     assert PLACEBO_GENUINE_IC_MARGIN == 0.02
 
 
-def test_criterion_string_self_documents_the_freeze():
-    """Every stamped verdict carries this exact string (placebo_criterion)."""
-    assert PLACEBO_CRITERION == "genuine_ic>0.02 (frozen 2026-07-02)"
+def test_criterion_strings_distinguish_enforced_from_shadow():
+    """Every stamped verdict distinguishes the ENFORCED (v2) criterion from the
+    SHADOW-ONLY (v3 candidate) criterion — they must never be presented as the
+    same string, since only one of them decides pass_placebo."""
     verdict = _pooled_placebo_verdict(_TODAY["aligned_real_ic"], _TODAY["placebo_ic"])
-    assert verdict["placebo_criterion"] == PLACEBO_CRITERION
+    assert "0.5" in verdict["placebo_criterion"] or "aligned_real_ic" in verdict[
+        "placebo_criterion"
+    ]
+    assert verdict["placebo_criterion"] != PLACEBO_CRITERION
+    assert verdict["sanity_placebo_v3_criterion"] == PLACEBO_CRITERION
     assert verdict["sanity_placebo_genuine_ic_margin"] == PLACEBO_GENUINE_IC_MARGIN
+    assert verdict["sanity_placebo_v3_gating"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -112,13 +130,17 @@ def test_clean_model_passes():
     assert _enforced(_CLEAN) is True
 
 
-def test_structural_floor_false_reject_is_repaired():
-    """The floor alone can no longer FAIL an otherwise-good model: the real
-    2026-06-23 candidate (genuine_ic +0.0324, shuffle-clean) now PASSES, where the
-    gate-v2 absolute ceiling false-rejected it (0.0529 ≥ 0.5×0.0853 = 0.04265)."""
+def test_structural_floor_false_reject_shadow_shows_the_fix_not_yet_enforced():
+    """The real 2026-06-23 candidate (genuine_ic +0.0324, shuffle-clean) is
+    exactly the false reject the v3 difference test was designed to repair: its
+    SHADOW verdict PASSES, showing the fix works. But the currently ENFORCED
+    gate-v2 absolute ceiling still FAILS it (0.0529 ≥ 0.5×0.0853 = 0.04265) —
+    this is the expected, correct state while v3 remains shadow-only pending
+    historical-corpus validation, not a contradiction."""
     g = _genuine_ic_value(_TODAY["aligned_real_ic"], _TODAY["placebo_ic"])
     assert g == pytest.approx(0.0324, abs=1e-9)
-    assert _enforced(_TODAY) is True
+    assert _shadow(_TODAY) is True
+    assert _enforced(_TODAY) is False
     # Its shuffled-label control was independently clean (hard guard unchanged).
     assert abs(_TODAY["shuf_ic"]) < SHUF_IC_MAX
 
@@ -151,38 +173,45 @@ def test_floor_only_model_fails():
 def test_margin_boundary_is_strict():
     """genuine_ic exactly AT the frozen margin does not pass (strict >); the
     exact-boundary semantics are pinned on the helper (no float-subtraction noise),
-    and the pooled path is checked just below / just above the margin."""
+    and the SHADOW pooled path (not the enforced one, which is v2's absolute
+    ceiling and has no relationship to this margin) is checked just below/above."""
     assert _placebo_difference_pass(PLACEBO_GENUINE_IC_MARGIN) is False   # strict >
     assert _placebo_difference_pass(PLACEBO_GENUINE_IC_MARGIN + 1e-9) is True
     just_below = {"aligned_real_ic": 0.06, "placebo_ic": 0.045}   # genuine 0.015
-    assert _enforced(just_below) is False
+    assert _shadow(just_below) is False
     just_above = {"aligned_real_ic": 0.06, "placebo_ic": 0.035}   # genuine 0.025
-    assert _enforced(just_above) is True
+    assert _shadow(just_above) is True
 
 
 # --------------------------------------------------------------------------- #
-# (d) The OLD absolute-ceiling verdict is still STAMPED — as a DIAGNOSTIC.
+# (d) The v3 candidate DIFFERENCE-test verdict is STAMPED as SHADOW evidence.
 # --------------------------------------------------------------------------- #
-def test_old_criterion_verdict_still_stamped_as_diagnostic():
-    """Every pooled verdict stamps the gate-v2 absolute-ceiling would-be verdict and
-    threshold (evidence continuity) without letting them decide."""
+def test_v3_shadow_verdict_stamped_alongside_enforced_absolute_rule():
+    """Every pooled verdict stamps BOTH the ENFORCED gate-v2 absolute-ceiling
+    verdict (which decides pass_placebo) and the SHADOW-ONLY gate-v3 difference
+    test (which does not) — evidence continuity in both directions."""
     v = _pooled_placebo_verdict(_TODAY["aligned_real_ic"], _TODAY["placebo_ic"])
-    # Old rule would-FAIL (0.0529 ≥ 0.04265) — stamped…
+    # ENFORCED absolute rule: FAILS (0.0529 ≥ 0.04265) — this decides pass_placebo.
     assert v["sanity_placebo_absolute_rule_pass"] is False
     assert v["sanity_placebo_absolute_rule_threshold"] == pytest.approx(
         0.04265, abs=1e-9
     )
-    # …but the ENFORCED verdict is the difference test → PASS.
-    assert v["pass_placebo"] is True
+    assert v["pass_placebo"] is False
+    # SHADOW v3 difference test: PASSES (genuine_ic 0.0324 > 0.02) — stamped, but
+    # does not decide anything.
+    assert v["sanity_placebo_v3_shadow_verdict"] is True
+    assert v["sanity_placebo_v3_gating"] is False
 
 
-def test_old_criterion_no_longer_decides_in_either_direction():
-    """The switch is real in BOTH directions: a tiny-edge candidate the old rule
-    would have PASSED (placebo under the 0.005 floor) now FAILS the difference
-    test (genuine 0.009 < 0.02) — the new criterion is not 'old rule plus'."""
+def test_shadow_verdict_diverges_from_enforced_in_either_direction():
+    """The two rules are genuinely independent and diverge in BOTH directions: a
+    tiny-edge candidate the ENFORCED absolute rule PASSES (placebo under the
+    0.005 floor) FAILS the SHADOW difference test (genuine 0.009 < 0.02) — the
+    shadow candidate is not 'enforced rule plus'."""
     v = _pooled_placebo_verdict(0.01, 0.001)  # aligned_real 0.01, placebo 0.001
-    assert v["sanity_placebo_absolute_rule_pass"] is True   # old rule: would-PASS
-    assert v["pass_placebo"] is False                        # enforced: FAIL
+    assert v["sanity_placebo_absolute_rule_pass"] is True    # enforced: PASS
+    assert v["pass_placebo"] is True
+    assert v["sanity_placebo_v3_shadow_verdict"] is False    # shadow: FAIL
 
 
 def test_absolute_rule_stamp_matches_verbatim_gate_v2_rule():
@@ -200,7 +229,7 @@ def test_absolute_rule_stamp_matches_verbatim_gate_v2_rule():
 
 
 # --------------------------------------------------------------------------- #
-# Fail-closed behavior of the ENFORCED difference test.
+# Fail-closed behavior of the SHADOW-ONLY difference test's genuine_ic guard.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "aligned_real, placebo, label",
@@ -208,14 +237,32 @@ def test_absolute_rule_stamp_matches_verbatim_gate_v2_rule():
         (float("nan"), 0.05, "missing aligned real (NaN)"),
         (0.08, float("nan"), "missing placebo (NaN)"),
         (-0.05, -0.09, "negative real, more-negative placebo (spurious positive diff)"),
-        (0.0, -0.02, "zero real (no edge to certify; old special-case now FAILS)"),
+        (0.0, -0.02, "zero real (no edge to certify)"),
         (-0.10, 0.02, "negative real, positive placebo"),
     ],
 )
-def test_enforced_gate_fails_closed(aligned_real, placebo, label):
-    """Missing evidence or a non-positive aligned real IC → genuine_ic None → FAIL."""
+def test_shadow_genuine_ic_guard_fails_closed(aligned_real, placebo, label):
+    """Missing evidence or a non-positive aligned real IC → genuine_ic None →
+    SHADOW verdict FAILS. This guard is independent of the ENFORCED gate-v2
+    absolute rule, which has its own separate (and, for aligned_real==0 or a
+    small |placebo|, sometimes PASSING) special-case behavior — see
+    test_v2_zero_and_negative_aligned_real_special_cases below for that."""
     assert _genuine_ic_value(aligned_real, placebo) is None, label
-    assert _pooled_placebo_verdict(aligned_real, placebo)["pass_placebo"] is False, label
+    v = _pooled_placebo_verdict(aligned_real, placebo)
+    assert v["sanity_placebo_v3_shadow_verdict"] is False, label
+
+
+def test_v2_zero_and_negative_aligned_real_special_cases():
+    """The ENFORCED gate-v2 absolute rule has its own pre-existing special cases
+    that are genuinely independent of the shadow difference test's
+    positive-aligned-real guard: aligned_real_ic == 0 is a legacy pass special
+    case (_placebo_absolute_rule_pass docstring), and a negative aligned_real
+    with a placebo comfortably inside the (still-computed) 0.5x|aligned_real|
+    ceiling also passes. Both PASS under the enforced v2 rule even though their
+    shadow genuine_ic is None (guarded, shadow-FAILs) — this is real, unchanged
+    v2 behavior, not a bug introduced by keeping v2 enforced."""
+    assert _pooled_placebo_verdict(0.0, -0.02)["pass_placebo"] is True
+    assert _pooled_placebo_verdict(-0.10, 0.02)["pass_placebo"] is True
 
 
 def test_difference_pass_helper_guards():
@@ -235,12 +282,20 @@ def test_shuffle_guard_unchanged():
 
 
 # --------------------------------------------------------------------------- #
-# Per-regime leg uses the SAME frozen criterion (shared helper).
+# The per-regime shadow candidate reuses the SAME helper/margin as the pooled
+# leg — but per-regime ENFORCEMENT is the absolute rule (gate v2, unchanged);
+# this test exercises the shared SHADOW-candidate helper directly, not the
+# actual per-regime gating in runner.py (which now uses the absolute rule,
+# same as the pooled leg — see runner.py's regime loop).
 # --------------------------------------------------------------------------- #
-def test_regime_leg_same_frozen_criterion():
-    """The per-regime placebo leg gates on the same difference test: the real
-    structural-floor regime (aligned 0.057 / placebo 0.0359, genuine +0.0211) now
-    passes the placebo leg; a floor-only regime (genuine ≈ 0) fails."""
+def test_regime_shadow_candidate_uses_same_helper_and_margin():
+    """The shared genuine_ic/difference-test helpers behave identically whether
+    called for the pooled leg or a per-regime reading: the real
+    structural-floor regime (aligned 0.057 / placebo 0.0359, genuine +0.0211)
+    shadow-passes; a floor-only regime (genuine ≈ 0) shadow-fails. Per-regime
+    ENFORCEMENT itself is the gate-v2 absolute rule, per Codex's 2026-07-02
+    review (per-regime looks are an additional multiplicity concern on top of
+    the pooled-leg calibration concern, so v3 stays shadow-only there too)."""
     floor_inflated_regime = _genuine_ic_value(0.057, 0.0359)
     assert floor_inflated_regime == pytest.approx(0.0211, abs=1e-9)
     assert _placebo_difference_pass(floor_inflated_regime) is True
@@ -254,15 +309,15 @@ def test_regime_leg_same_frozen_criterion():
 # Diagnostic payload (CI / reference bar) — still stamped, still fail-soft.
 # --------------------------------------------------------------------------- #
 def test_diagnostic_payload_tagged_and_carries_no_verdict():
-    """The CI payload stamps evidence, is tagged, and never carries pass/fail —
-    the enforced point estimate is computed independently by _pooled_placebo_verdict."""
+    """The CI payload stamps evidence, is tagged as SHADOW-ONLY, and never
+    carries pass/fail — the enforced verdict (gate v2's absolute ceiling) is
+    computed independently by _pooled_placebo_verdict and does not depend on
+    this payload at all."""
     d = _genuine_ic_diagnostic(_TODAY["aligned_real_ic"], _TODAY["placebo_ic"])
     assert d["genuine_ic"] == pytest.approx(0.0324, abs=1e-9)
     assert d["positive_aligned_real"] is True
-    assert d["tag"] == (
-        "genuine_ic point estimate ENFORCED (gate v3); "
-        "CI/reference-bar fields diagnostic-only"
-    )
+    assert "SHADOW-ONLY" in d["tag"]
+    assert "NOT enforced" in d["tag"]
     assert "passed" not in d
     assert "pass_placebo" not in d
 
