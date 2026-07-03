@@ -401,3 +401,59 @@ def test_positive_aligned_real_passes_guard():
     """A genuinely positive aligned-real candidate reports a real genuine_ic."""
     assert _genuine_ic_value(0.30, 0.10) == pytest.approx(0.20, abs=1e-9)
     assert math.isclose(0.057 - 0.0359, 0.0211, abs_tol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Historical-corpus replay regression (2026-07-03, PR #61 round 3+).
+#
+# Only two independent candidate fingerprints exist in the available
+# production wf_gate_metadata corpus (weekly staging/rollback snapshots,
+# 2026-06-15..2026-06-30 -- 20 stamped records collapse to 2 distinct
+# `candidate_recipe_fingerprint`s once repeated re-stagings of the same
+# untrained-since model are deduped). NOTE: the top-level `passed` field in
+# these artifacts is the FULL gate's verdict (shuffle leg + placebo leg +
+# regime-sanity leg + WF-parity, etc combined) and must NOT be read as the
+# placebo sub-gate's own verdict -- recompute via `_placebo_absolute_rule_pass`
+# directly, which is what this test (and the replay doc) do.
+#
+# Ground truth: the challenger candidate's placebo leg disagrees with v3 in
+# 8 of its 9 observed (rolling-window) evaluations -- always in the SAME
+# direction (v2 placebo-leg FAIL, v3 PASS). The incumbent candidate's placebo
+# leg AGREES with v3 (both FAIL). This is n=2 independent underlying models
+# -- far too small to validate a frozen threshold, which is the negative
+# finding this test pins so it can't silently rot if the gate functions
+# change. See docs/progress/2026-07-03-wf-gate-genuine-ic-historical-replay.md.
+# --------------------------------------------------------------------------- #
+def test_replay_regression_challenger_candidate_typical_week():
+    """Challenger (fp sha256:cfdd6cb8e950da0f), 2026-06-23 stamp: v2 placebo
+    leg FAILS, v3 shadow rule PASSES -- the typical week (8 of 9 observed)."""
+    aligned_real_ic = 0.08534983744871315
+    placebo_ic = 0.0529174995311023
+    assert _placebo_absolute_rule_pass(aligned_real_ic, placebo_ic) is False
+    genuine_ic = _genuine_ic_value(aligned_real_ic, placebo_ic)
+    assert genuine_ic == pytest.approx(0.0324, abs=5e-4)
+    assert _placebo_difference_pass(genuine_ic) is True
+
+
+def test_replay_regression_challenger_candidate_exception_week():
+    """Same challenger fingerprint, 2026-06-21/22 stamp: the ONE week (of 9)
+    where the rolling eval window shifted enough that v2's placebo leg also
+    passes -- v2 and v3 agree here. Not evidence the threshold is validated;
+    it is one data point in the same tiny sample."""
+    aligned_real_ic = 0.07587675482134941
+    placebo_ic = 0.03434988208038318
+    assert _placebo_absolute_rule_pass(aligned_real_ic, placebo_ic) is True
+    genuine_ic = _genuine_ic_value(aligned_real_ic, placebo_ic)
+    assert genuine_ic == pytest.approx(0.0415, abs=5e-4)
+    assert _placebo_difference_pass(genuine_ic) is True
+
+
+def test_replay_regression_incumbent_candidate():
+    """Incumbent/rollback candidate (fp sha256:aeb1cd20db700361), 2026-06-30
+    stamp: v2 placebo leg FAILS, v3 shadow rule ALSO FAILS -- they agree."""
+    aligned_real_ic = 0.052921747444921494
+    placebo_ic = 0.040151728638540385
+    assert _placebo_absolute_rule_pass(aligned_real_ic, placebo_ic) is False
+    genuine_ic = _genuine_ic_value(aligned_real_ic, placebo_ic)
+    assert genuine_ic == pytest.approx(0.0128, abs=5e-4)
+    assert _placebo_difference_pass(genuine_ic) is False

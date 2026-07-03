@@ -84,8 +84,24 @@ guard stays in place regardless.
 ## Status / next
 
 - [x] Diagnostic decomposition + guard + CI shipped (PR #57), gate UNCHANGED.
-- [ ] A1: historical replay over accepted/rejected candidates.
+- [~] A1: historical replay over accepted/rejected candidates — ATTEMPTED
+      2026-07-03 (PR #61 round 3+), result is a NEGATIVE finding, see
+      `docs/progress/2026-07-03-wf-gate-genuine-ic-historical-replay.md`.
+      The available corpus has only **2 independent candidates** once
+      repeated-fingerprint re-stagings are deduped — nowhere near enough to
+      estimate a false-accept/false-reject rate. A one-directional
+      disagreement (v3 more lenient than v2) was observed for the one
+      borderline candidate. This STRENGTHENS (does not resolve) Codex's
+      original post-outcome-calibration concern. Item remains open pending a
+      genuinely larger corpus.
 - [ ] A1: synthetic leak / no-edge injection separation study.
-- [ ] A1: pre-registered threshold from the calibration.
-- [ ] Shadow over several weekly gates.
+- [x] A1: pre-registered promotion criterion drafted (lower-confidence-bound +
+      minimum-effective-N + no-single-regime-dominance guard) — see
+      `docs/progress/2026-07-03-wf-gate-genuine-ic-historical-replay.md`.
+      NOT calibrated against real data yet (blocked by the same n=2 problem
+      above); this is the frozen RULE SHAPE, not a fitted threshold.
+- [ ] Shadow over several weekly gates — blocked on calendar time: no WF-gate
+      run has occurred since v3 was demoted to shadow-only (PR #61 round 2,
+      commit `d6b2b65`). Confirmed 2026-07-03: no `wf_gate_metadata` stamp
+      postdates that commit.
 - [ ] Enforcement PR (separate) — bumps enforced GATE_VERSION.
