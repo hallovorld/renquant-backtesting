@@ -23,8 +23,10 @@ Walk-forward criteria (default):
 
 §5.2 sanity criteria (default):
   - shuffled-label IC: |IC| < 0.005 (model on shuffled labels should be ~0)
-  - time-shift placebo IC: ratio < 0.5 × aligned real IC (placebo should not
-    capture the same signal on the same evaluable rows)
+  - placebo difference test (S3): genuine_ic = real_ic − placebo_ic ≥ 0.02
+    (the 60d label has ~30d embargo overlap inflating placebo IC by ~+0.04;
+    the raw ratio test was structurally unfair — the difference test isolates
+    real predictive content from the embargo floor)
 
 References:
 - Lopez de Prado AFML §7 + §11 (walk-forward + cross-validation in finance)
@@ -152,8 +154,15 @@ def _sanity_result_passed(sanity_result: dict) -> bool:
 
 
 def _placebo_ic_threshold(aligned_real_ic: float) -> float:
-    """Maximum acceptable absolute time-shift placebo IC."""
+    """Maximum acceptable absolute time-shift placebo IC (legacy ratio test)."""
     return max(0.005, 0.5 * abs(float(aligned_real_ic)))
+
+
+# S3 placebo difference test — master plan §S3: "margin frozen pre-impl at
+# 0.02 vs the measured +0.04 embargo floor".  The 60d label has ~30d embargo
+# overlap that inflates placebo IC by ~+0.04 structurally; the DIFFERENCE
+# (genuine_ic = real_ic − placebo_ic) isolates real predictive content.
+PLACEBO_DIFF_MARGIN: float = 0.02
 
 
 def _placebo_ic_requirement_text(aligned_real_ic: float) -> str:
@@ -2475,15 +2484,24 @@ def run_sanity_battery(
         )
         _g2 = ((model_placebo_profile or {}).get("pooled", {}).get("2x", {}) or {}).get("genuine_ic")
         log.info(
-            "  Layer-1a genuine_ic@2x (pooled) = %s (diagnostic-only, gate unaffected)",
+            "  Layer-1a genuine_ic@2x (pooled) = %s",
             f"{_g2:+.4f}" if isinstance(_g2, (int, float)) else "n/a",
         )
-    except Exception as exc:  # noqa: BLE001 — diagnostic-only; must NEVER fail the gate
-        log.warning("  Layer-1a diagnostic profiles unavailable (gate unaffected): %s", exc)
+    except Exception as exc:  # noqa: BLE001 — profile failure must not block the gate
+        log.warning("  Layer-1a diagnostic profiles unavailable: %s", exc)
 
-    # Pass criteria
-    pass_shuf = abs(shuf_ic) < 0.005
-    pass_placebo = (
+    # --- S3 placebo difference test (primary) ---------------------------------
+    # genuine_ic = aligned_real_ic − placebo_ic from the Layer-1a profile at the
+    # gate shift (2×horizon).  Falls back to the legacy ratio test if the profile
+    # is unavailable (pre-Layer-1a artifacts or import failure).
+    _genuine_ic_2x = (
+        ((model_placebo_profile or {}).get("pooled", {}).get("2x", {}) or {})
+        .get("genuine_ic")
+    )
+    _has_genuine = isinstance(_genuine_ic_2x, (int, float)) and _genuine_ic_2x == _genuine_ic_2x
+
+    # Legacy ratio test (logged for comparison; used as fallback only)
+    _legacy_ratio_pass = (
         (placebo_ic == placebo_ic)
         and (placebo_aligned_real_ic == placebo_aligned_real_ic)
         and (
@@ -2492,6 +2510,19 @@ def run_sanity_battery(
             True
         )
     )
+    log.info(
+        "  placebo gate: legacy_ratio_pass=%s, genuine_ic=%s, margin=%.4f",
+        _legacy_ratio_pass,
+        f"{_genuine_ic_2x:+.4f}" if _has_genuine else "n/a",
+        PLACEBO_DIFF_MARGIN,
+    )
+
+    # Pass criteria
+    pass_shuf = abs(shuf_ic) < 0.005
+    if _has_genuine:
+        pass_placebo = float(_genuine_ic_2x) >= PLACEBO_DIFF_MARGIN
+    else:
+        pass_placebo = _legacy_ratio_pass
     sanity_method = (
         "manifest_point_in_time_label_diagnostics"
         if sanity_meta.get("sanity_eval_scope") == "walkforward_manifest"
@@ -2499,8 +2530,14 @@ def run_sanity_battery(
     )
     pass_regime = bool(sanity_regime_ic.get("passed"))
     pass_all = pass_shuf and pass_placebo and pass_regime
+    _placebo_detail = (
+        f"genuine_ic={_genuine_ic_2x:+.4f} (need ≥{PLACEBO_DIFF_MARGIN:+.4f})"
+        if _has_genuine else
+        f"placebo_ic={placebo_ic:+.4f} (legacy ratio; need < "
+        f"{_placebo_ic_requirement_text(placebo_aligned_real_ic)})"
+    )
     if pass_all:
-        sanity_reason = f"PASS: shuf_ic={shuf_ic:+.4f} placebo_ic={placebo_ic:+.4f}"
+        sanity_reason = f"PASS: shuf_ic={shuf_ic:+.4f} {_placebo_detail}"
     elif pass_shuf and pass_placebo and not pass_regime:
         sanity_reason = (
             "FAIL: regime sanity IC failed: "
@@ -2509,9 +2546,7 @@ def run_sanity_battery(
     else:
         sanity_reason = (
             f"FAIL: shuf_ic={shuf_ic:+.4f} (need |·| < 0.005), "
-            f"placebo_ic={placebo_ic:+.4f} "
-            f"(must be available and < "
-            f"{_placebo_ic_requirement_text(placebo_aligned_real_ic)})"
+            f"{_placebo_detail}"
         )
     return {
         "passed": pass_all,
@@ -2523,6 +2558,9 @@ def run_sanity_battery(
             if placebo_aligned_real_ic == placebo_aligned_real_ic
             else None
         ),
+        "sanity_genuine_ic": float(_genuine_ic_2x) if _has_genuine else None,
+        "sanity_placebo_diff_margin": PLACEBO_DIFF_MARGIN,
+        "sanity_placebo_test": "difference" if _has_genuine else "legacy_ratio",
         "sanity_label_col": LABEL,
         "sanity_label_horizon_days": placebo_label_horizon_days,
         "sanity_placebo_gate_shift_days": placebo_gate_shift_days,
