@@ -17,8 +17,9 @@ import json
 import shutil
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
+
+from renquant_common.notify import send as _send_notification
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -118,22 +119,12 @@ def notify_local(title: str, body: str) -> None:
 
 
 def notify_ntfy(title: str, body: str, topic: str) -> None:
-    """Send a push notification to iPhone via ntfy.sh."""
-    import os
-    if os.environ.get("RENQUANT_NO_NOTIFY") == "1":
-        return
-    url = f"https://ntfy.sh/{topic}"
-    req = urllib.request.Request(
-        url,
-        data=body.encode("utf-8"),
-        headers={"Title": title},
-        method="POST",
-    )
-    try:
-        urllib.request.urlopen(req, timeout=10)
+    """Send a push notification via the canonical ``renquant_common.notify``
+    sender (campaign B6 re-point). RENQUANT_NO_NOTIFY suppression and the
+    never-raise guarantee live there; timeout is the standardized 5 s (this
+    module's local copy was the fleet's lone 10 s outlier)."""
+    if _send_notification(title, body, topic):
         print(f"ntfy notification sent to topic: {topic}")
-    except Exception as e:
-        print(f"Warning: could not send ntfy notification: {e}")
 
 
 def main() -> int:
