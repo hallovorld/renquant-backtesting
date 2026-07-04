@@ -62,3 +62,22 @@ Suite A/B vs pristine main: identical failure set (5 pre-existing
 environmental failures both sides: sibling-layout byte-equivalence pins +
 umbrella-path-dependent CLI tests); branch adds 8 passing pins in
 `tests/walk_forward/test_loader_fingerprint_dispatch.py`.
+
+## Round 2 (codex review — import-surface regression)
+
+Codex: "The new loader imports renquant_pipeline.kernel.panel_pipeline.fingerprint_dispatch
+through the panel_pipeline package, and in CI that import path pulls panel_scorer and
+hard-requires xgboost during test collection."
+
+Confirmed and fixed — but NOT in this repo. `walk_forward/loader.py`'s import statement
+was already correct (`fingerprint_dispatch` is the right owner per M6 stage-2 design);
+the bug was `renquant-pipeline`'s `panel_pipeline/__init__.py` eagerly importing
+`panel_scorer` (xgboost at module scope) at PACKAGE-import time, which Python triggers
+for any submodule import regardless of what that submodule itself needs.
+
+Fixed upstream: `renquant-pipeline#172` converts `panel_pipeline/__init__.py`'s eager
+imports to PEP 562 lazy attributes. Verified directly against that fix: this repo's
+`walk_forward/loader.py` now imports cleanly with `xgboost` import blocked outright
+(the exact CI failure class). 197/197 loader + wf_gate tests pass under the same
+xgboost-blocked condition. No code change needed in this repo — this PR's own import
+was correct all along.
