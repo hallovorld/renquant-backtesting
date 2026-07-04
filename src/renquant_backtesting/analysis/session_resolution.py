@@ -25,7 +25,8 @@ the orchestrator KPI scorecard — can derive the identical key. Backfill and
 every in-repo consumer call the SAME functions here, so they can never
 disagree.
 
-Degraded fallback: when ``pandas_market_calendars`` is unavailable,
+Degraded fallback: when the canonical calendar
+(``renquant_common.market_calendar``, campaign B5) is unavailable,
 Saturday/Sunday dates roll back to the preceding Friday and weekdays map to
 themselves. Exchange holidays are then NOT detected (a holiday-dated run
 keys to itself and its as-of forward-return row is not written) — same
@@ -49,28 +50,31 @@ def nyse_sessions(
 ) -> "pd.DatetimeIndex | None":
     """Real NYSE sessions in [start, end], tz-naive and normalized.
 
-    Returns None when ``pandas_market_calendars`` is unavailable — callers
-    then degrade to the weekday fallback in :func:`session_key` /
+    Campaign B5 (audit #296 §4.1 row 4 / XC-3): delegates to the canonical
+    :func:`renquant_common.market_calendar.sessions_between` (equivalence-
+    proven on a 10-year fixture against the hand-copy that lived here). The
+    canonical is fail-closed; THIS call-site keeps this module's documented
+    lenient contract — returns None when the calendar backend (or a stale
+    renquant_common install predating market_calendar) is unavailable, and
+    callers then degrade to the weekday fallback in :func:`session_key` /
     :func:`classify_date` (weekends handled, holidays not).
     """
     global _FALLBACK_WARNED  # noqa: PLW0603
-    import pandas as pd  # noqa: PLC0415
     try:
-        import pandas_market_calendars as mcal  # noqa: PLC0415
-    except Exception:  # pragma: no cover — mcal is in the umbrella .venv
+        from renquant_common.market_calendar import (  # noqa: PLC0415
+            sessions_between,
+        )
+
+        return sessions_between(start, end)
+    except Exception:  # pragma: no cover — common+mcal are in the umbrella .venv
         if not _FALLBACK_WARNED:
             log.warning(
-                "pandas_market_calendars unavailable — session resolution "
-                "degrades to weekday-only (weekends roll to Friday; NYSE "
-                "holidays NOT detected)."
+                "renquant_common.market_calendar unavailable — session "
+                "resolution degrades to weekday-only (weekends roll to "
+                "Friday; NYSE holidays NOT detected)."
             )
             _FALLBACK_WARNED = True
         return None
-    cal = mcal.get_calendar("NYSE")
-    days = pd.DatetimeIndex(cal.valid_days(start_date=start, end_date=end))
-    if days.tz is not None:
-        days = days.tz_localize(None)
-    return days.normalize()
 
 
 def session_key(
@@ -88,10 +92,18 @@ def session_key(
     import pandas as pd  # noqa: PLC0415
     ts = pd.Timestamp(date).normalize()
     if sessions is not None and len(sessions):
-        idx = int(sessions.searchsorted(ts, side="right")) - 1
-        if idx >= 0:
-            return sessions[idx].date()
-        # date precedes the calendar window — fall through to weekday logic
+        # Campaign B5: the at-or-before semantics live in the canonical
+        # renquant_common.market_calendar.session_key; ValueError (date
+        # precedes the calendar window) falls through to the weekday logic —
+        # byte-identical to the pre-B5 behavior.
+        from renquant_common.market_calendar import (  # noqa: PLC0415
+            session_key as _canonical_session_key,
+        )
+
+        try:
+            return _canonical_session_key(ts, sessions)
+        except ValueError:
+            pass
     d = ts.date()
     if d.weekday() >= 5:  # Sat=5 / Sun=6 → preceding Friday
         return d - datetime.timedelta(days=d.weekday() - 4)
