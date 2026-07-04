@@ -27,11 +27,33 @@ from typing import Any
 
 from renquant_common import Job, Pipeline, Task
 
+import os
+
 from renquant_backtesting.repo_root import resolve_strategy_config_path
+from renquant_backtesting.wf_gate.wf_config_builder import (
+    select_prod_reference_for_candidate,
+)
 
 
-def prod_strategy_config_path(strategy_dir: Path) -> Path:
-    """Resolve the production config for WF derive/parity checks."""
+def prod_strategy_config_path(
+    strategy_dir: Path, candidate_kind: Any = None
+) -> Path:
+    """Resolve the production reference config for WF derive/parity checks.
+
+    ONE parity contract shared with ``runner.main()`` and the umbrella rollback
+    path: when ``candidate_kind`` is known (from the candidate artifact's
+    declared metadata), select the production reference whose scorer kind
+    matches it (GBDT/xgb → ``strategy_config.shadow.json``; PatchTST →
+    ``strategy_config.json``), honoring a validated ``RENQUANT_STRATEGY_CONFIG``
+    override and failing closed on an unknown/unmatched kind. When the kind is
+    not yet known (legacy callers), fall back to env/primary resolution.
+    """
+    if candidate_kind is not None:
+        return select_prod_reference_for_candidate(
+            candidate_kind,
+            strategy_dir=strategy_dir,
+            env_override=os.environ.get("RENQUANT_STRATEGY_CONFIG"),
+        )
     repo_root = strategy_dir.parent.parent
     return resolve_strategy_config_path(repo_root, strategy_dir.name)
 
@@ -112,7 +134,18 @@ class DeriveConfigTask(Task):
         if not ctx.derive_config_from_prod or ctx.strategy_dir is None:
             return True
         base_cfg_path = ctx.strategy_dir / ctx.strategy_config
-        prod_cfg_path = prod_strategy_config_path(ctx.strategy_dir)
+        candidate_kind = (ctx.artifact or {}).get("kind")
+        try:
+            prod_cfg_path = prod_strategy_config_path(
+                ctx.strategy_dir, candidate_kind=candidate_kind
+            )
+        except ValueError as exc:
+            # Fail closed: no kind-matched production reference for the candidate.
+            ctx.config_parity_result = {
+                "passed": False,
+                "reason": f"prod-reference selection failed: {exc}",
+            }
+            return True
         if not base_cfg_path.exists() or not prod_cfg_path.exists():
             return True
         prod_cfg = json.loads(prod_cfg_path.read_text())
@@ -168,7 +201,19 @@ class CheckConfigParityTask(Task):
                 "passed": True, "reason": "skipped (no strategy_dir or artifact)",
             }
             return True
-        prod_cfg = prod_strategy_config_path(ctx.strategy_dir)
+        candidate_kind = (ctx.artifact or {}).get("kind")
+        try:
+            # Same kind-matched production reference the derive task selected.
+            prod_cfg = prod_strategy_config_path(
+                ctx.strategy_dir, candidate_kind=candidate_kind
+            )
+        except ValueError as exc:
+            # Fail closed: an unknown/unmatched candidate kind is non-promotable.
+            ctx.config_parity_result = {
+                "passed": False,
+                "reason": f"prod-reference selection failed: {exc}",
+            }
+            return True
         wf_cfg = ctx.strategy_dir / ctx.strategy_config
         if not prod_cfg.exists() or not wf_cfg.exists():
             ctx.config_parity_result = {

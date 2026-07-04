@@ -21,12 +21,35 @@ Walk-forward criteria (default):
   - Pass: absolute Sharpe floor AND SPY-relative benchmark floor
   - Fail: positive absolute Sharpe that still lags SPY is benchmark-blind
 
-§5.2 sanity criteria (default):
-  - shuffled-label IC: |IC| < 0.005 (model on shuffled labels should be ~0)
-  - placebo difference test (S3): genuine_ic = real_ic − placebo_ic ≥ 0.02
-    (the 60d label has ~30d embargo overlap inflating placebo IC by ~+0.04;
-    the raw ratio test was structurally unfair — the difference test isolates
-    real predictive content from the embargo floor)
+§5.2 sanity criteria (default) — ENFORCED gate v2 (UNCHANGED real-money behavior;
+Codex 2026-07-02 review of the v3 rollout attempt below):
+  - shuffled-label IC: |IC| < 0.005 (model on shuffled labels should be ~0).
+    HARD true-leak guard, UNCHANGED.
+  - time-shift placebo IC: ratio < 0.5 × aligned real IC (placebo should not
+    capture the same signal on the same evaluable rows). This remains the
+    conservative ABSOLUTE rule and the enforced promotion criterion.
+
+§5.2 SHADOW-ONLY v3 candidate (stamped, NEVER decides pass/fail — see
+``sanity_placebo_v3_gating`` == False on every verdict): a pre-registered
+DIFFERENCE test, genuine_ic = aligned_real_ic − placebo_ic > 0.02 (margin
+frozen 2026-07-02), proposed to replace the absolute-ceiling rule because the
+daily fwd_60d label carries a measured ~+0.04 embargo-leakage /
+label-autocorrelation floor shared by aligned_real_ic and placebo_ic, making
+the absolute ceiling structurally unsatisfiable for leak-free long-horizon
+candidates. This PR's first attempt made v3 the ENFORCED rule with a margin
+selected while inspecting the specific candidate it flips — Codex correctly
+flagged that as post-outcome gate calibration, not a valid frozen threshold,
+and noted its own overlap-aware CI stayed diagnostic-only while the noisy
+point estimate alone would have decided real capital. v3 stays SHADOW-ONLY —
+computed, stamped, and evaluated against history — until a historical-corpus
+replay and a genuinely prospective held-out run validate it (see
+``doc/research/2026-07-02-wf-gate-v3-shadow-eval.md``). v2's absolute ceiling
+remains the enforced rule with NO CHANGE from before this PR.
+
+§5.2 DIAGNOSTIC-ONLY evidence (stamped, never decides pass/fail, unchanged):
+  - the positive-aligned-real-guarded decomposition payload: multi-shift placebo
+    profile, label_autocorr_ic, and the overlap-aware conservative lower
+    confidence bound on genuine_ic.
 
 References:
 - Lopez de Prado AFML §7 + §11 (walk-forward + cross-validation in finance)
@@ -67,7 +90,21 @@ def _resolve_repo_root() -> Path:
 
 
 REPO = _resolve_repo_root()
+# ENFORCED gate version — UNCHANGED at v2 pending v3 shadow validation (Codex
+# 2026-07-02 review: the v3 difference-test's margin was selected while
+# inspecting the candidate it flips, and its own CI stayed diagnostic-only
+# while a noisy point estimate alone would have decided capital — both are
+# blockers for enforcement). The placebo sub-gate still decides on the
+# conservative ABSOLUTE rule (placebo_ic < 0.5×|aligned_real_ic|). Do NOT bump
+# this until v3's shadow evaluation (historical-corpus replay + a genuinely
+# prospective held-out run) validates it — see
+# ``doc/research/2026-07-02-wf-gate-v3-shadow-eval.md``.
 GATE_VERSION = 2
+# Diagnostic schema version — bumped when the LOGGED/STAMPED diagnostics change.
+# This NEVER affects pass/fail; it only versions the diagnostic payload.
+# v2 (gate v3): legacy absolute-ceiling verdict + threshold stamped as
+# diagnostics; placebo_criterion self-documentation added to the verdict.
+GATE_DIAGNOSTIC_VERSION = 2
 STRATEGY_DIR = REPO / "backtesting" / "renquant_104"
 SCRIPTS_DIR = REPO / "scripts"
 for _p in (REPO, SCRIPTS_DIR, STRATEGY_DIR):
@@ -153,24 +190,322 @@ def _sanity_result_passed(sanity_result: dict) -> bool:
     return bool(regime_ic.get("passed"))
 
 
+SHUF_IC_MAX = 0.005  # HARD true-leak guard: |shuffled-label IC| must be below this
+
+# SHADOW-ONLY (gate v3 candidate) placebo criterion — NOT enforced pending a
+# historical-corpus replay and a prospective held-out run (Codex 2026-07-02
+# review: this margin was selected while inspecting the candidate it flips,
+# a form of post-outcome gate calibration, not a valid frozen threshold for
+# a gate that decides real capital). Proposed 0.02 against the measured
+# ~+0.04 shared embargo-leakage floor; design lineage: merged #210
+# freshness-governance Fix-3, unified 107 master plan S1–S3 row. See
+# doc/research/2026-07-02-wf-gate-v3-shadow-eval.md.
+PLACEBO_GENUINE_IC_MARGIN = 0.02
+PLACEBO_CRITERION = "genuine_ic>0.02 (shadow-only, not enforced)"
+
+
 def _placebo_ic_threshold(aligned_real_ic: float) -> float:
-    """Maximum acceptable absolute time-shift placebo IC (legacy ratio test)."""
+    """ENFORCED absolute placebo ceiling — gate v2, UNCHANGED.
+
+    placebo_ic must stay below 0.5×|aligned_real_ic| (floored at 0.005). This
+    remains the live pass/fail rule for the placebo sub-gate. A pre-registered
+    DIFFERENCE-test alternative (``_placebo_difference_pass``, gate v3
+    candidate) is investigated in SHADOW ONLY — see the module docstring and
+    ``_pooled_placebo_verdict`` — and does not change this threshold or the
+    gate verdict.
+    """
     return max(0.005, 0.5 * abs(float(aligned_real_ic)))
 
 
-# S3 placebo difference test — master plan §S3: "margin frozen pre-impl at
-# 0.02 vs the measured +0.04 embargo floor".  The 60d label has ~30d embargo
-# overlap that inflates placebo IC by ~+0.04 structurally; the DIFFERENCE
-# (genuine_ic = real_ic − placebo_ic) isolates real predictive content.
-PLACEBO_DIFF_MARGIN: float = 0.02
-
-
 def _placebo_ic_requirement_text(aligned_real_ic: float) -> str:
+    """Human-readable ENFORCED absolute-ceiling requirement (gate v2)."""
     threshold = _placebo_ic_threshold(aligned_real_ic)
     return (
         f"threshold={threshold:+.4f} "
         f"(0.5×|aligned_real_ic|, aligned_real_ic={aligned_real_ic:+.4f})"
     )
+
+
+def _placebo_genuine_ic_requirement_text() -> str:
+    """Human-readable SHADOW-ONLY difference-test requirement (gate v3 candidate)."""
+    return (
+        f"genuine_ic = aligned_real_ic − placebo_ic > "
+        f"{PLACEBO_GENUINE_IC_MARGIN:+.3f} [{PLACEBO_CRITERION}]"
+    )
+
+
+def _placebo_difference_pass(genuine_ic) -> bool:
+    """SHADOW-ONLY placebo verdict — gate v3 candidate DIFFERENCE test (S3).
+
+    NOT enforced (see module docstring and ``_pooled_placebo_verdict``) pending
+    a historical-corpus replay and a prospective held-out run. Passes iff
+    ``genuine_ic`` is a finite number strictly above
+    ``PLACEBO_GENUINE_IC_MARGIN`` (0.02). ``genuine_ic`` is
+    produced by ``_genuine_ic_value`` and is therefore ``None`` (→ FAIL,
+    fail-closed) whenever the placebo or aligned real IC is missing/NaN or the
+    aligned real IC is non-positive (positive-aligned-real guard: a model with
+    no positive real edge has nothing to certify).
+    """
+    if genuine_ic is None:
+        return False
+    try:
+        g = float(genuine_ic)
+    except (TypeError, ValueError):
+        return False
+    if g != g:  # NaN guard
+        return False
+    return g > PLACEBO_GENUINE_IC_MARGIN
+
+
+def _placebo_absolute_rule_pass(aligned_real_ic: float, placebo_ic: float) -> bool:
+    """LEGACY (gate v2) absolute-ceiling verdict — DIAGNOSTIC-ONLY since gate v3.
+
+    Verbatim gate-v2 enforced pooled rule, kept so every verdict stamps what the
+    old criterion WOULD have decided (continuity of evidence). Never deletes and
+    never decides anything.
+    """
+    return (
+        (placebo_ic == placebo_ic)
+        and (aligned_real_ic == aligned_real_ic)
+        and (
+            abs(placebo_ic) < _placebo_ic_threshold(aligned_real_ic)
+            if aligned_real_ic != 0 else
+            True
+        )
+    )
+
+
+def _pooled_placebo_verdict(placebo_aligned_real_ic: float, placebo_ic: float) -> dict:
+    """ENFORCED pooled placebo sub-gate (gate v2, UNCHANGED) + v3 SHADOW evidence.
+
+    Per Codex's 2026-07-02 review of the v3 rollout PR: the genuine_ic > 0.02
+    difference test was calibrated while inspecting the specific candidate it
+    flips (post-outcome threshold selection), and its own overlap-aware CI
+    remains diagnostic-only while the noisy point estimate alone would decide
+    real capital. v3 is therefore SHADOW-ONLY until a historical-corpus replay
+    and a prospective held-out run validate it (see
+    ``doc/research/2026-07-02-wf-gate-v3-shadow-eval.md``). The ENFORCED
+    pass/fail is v2's absolute-ceiling rule, unchanged from before this PR.
+    Every v3 field is still computed and stamped so the shadow evaluation has
+    real data to work from; none of them feed ``pass_placebo``.
+    """
+    genuine = _genuine_ic_value(placebo_aligned_real_ic, placebo_ic)
+    return {
+        # ENFORCED (gate v2, UNCHANGED) — see _placebo_absolute_rule_pass docstring.
+        "pass_placebo": _placebo_absolute_rule_pass(
+            placebo_aligned_real_ic, placebo_ic
+        ),
+        "placebo_criterion": _placebo_ic_requirement_text(placebo_aligned_real_ic),
+        "sanity_placebo_absolute_rule_pass": _placebo_absolute_rule_pass(
+            placebo_aligned_real_ic, placebo_ic
+        ),
+        "sanity_placebo_absolute_rule_threshold": (
+            _placebo_ic_threshold(placebo_aligned_real_ic)
+            if placebo_aligned_real_ic == placebo_aligned_real_ic
+            else None
+        ),
+        # SHADOW-ONLY (gate v3 candidate, NOT enforced — see module docstring):
+        "sanity_placebo_genuine_ic": genuine,
+        "sanity_placebo_genuine_ic_margin": PLACEBO_GENUINE_IC_MARGIN,
+        "sanity_placebo_v3_shadow_verdict": _placebo_difference_pass(genuine),
+        "sanity_placebo_v3_criterion": PLACEBO_CRITERION,
+        "sanity_placebo_v3_gating": False,
+    }
+
+
+# --- genuine_ic decomposition (SHADOW-ONLY gate v3 candidate, NOT enforced) ---
+#
+# The time-shift placebo at shift = 2×label_horizon carries a STRUCTURAL floor:
+# the daily-sampled fwd_60d label is itself cross-sectionally autocorrelated at
+# the gate shift (label_autocorr_ic ≈ +0.04, measured; wf-gate corpus), so
+# placebo_ic ≈ genuine_edge + autocorr_floor even for a leak-free model. The
+# leak-free quantity is the DIFFERENCE
+#     genuine_ic = aligned_real_ic − placebo_ic
+# in which the shared autocorr floor cancels (it is present in BOTH
+# aligned_real_ic and placebo_ic). This is a CANDIDATE replacement (gate v3)
+# for the enforced absolute ceiling:
+#     shadow verdict ⇔ genuine_ic > PLACEBO_GENUINE_IC_MARGIN  (0.02)
+# via ``_placebo_difference_pass``. It is SHADOW-ONLY (see module docstring and
+# ``_pooled_placebo_verdict``) — computed and stamped for the pending
+# historical-corpus replay, does NOT decide pass/fail. The positive-aligned-real
+# guard inside ``_genuine_ic_value`` is part of the shadow rule (None → shadow
+# FAIL).
+#
+# ALSO DIAGNOSTIC/SHADOW-ONLY (stamped, never decide pass/fail): the
+# overlap-aware conservative lower confidence bound, and the reference bar
+# max(0.02, 0.25×|aligned_real_ic|) below.
+#
+# SAFETY: genuine_ic is NOT a leakage exoneration — a high
+# corr(placebo_ic, label_autocorr_ic) only *supports* the confound hypothesis (see
+# repro_m6_placebo_confound: "not a standalone leakage-exoneration test"). The
+# shuffled-label control (pass_shuf, abs(shuf_ic) < SHUF_IC_MAX) is and remains the
+# HARD true-leak guard, untouched by anything here.
+GENUINE_IC_DIAG_ABS_FLOOR = 0.02   # reference (diagnostic) min genuine edge in IC pts
+GENUINE_IC_DIAG_REAL_RATIO = 0.25  # reference (diagnostic) min genuine edge fraction
+
+
+def _genuine_ic_diag_reference_bar(aligned_real_ic: float) -> float:
+    """REFERENCE (diagnostic-only) genuine-IC bar. NOT applied to the gate verdict.
+
+    Surfaced so the stamped decomposition is legible; the future enforcement PR
+    must pre-register its threshold from the A1 calibration, not from this value.
+    """
+    return max(
+        GENUINE_IC_DIAG_ABS_FLOOR,
+        GENUINE_IC_DIAG_REAL_RATIO * abs(float(aligned_real_ic)),
+    )
+
+
+def _genuine_ic_value(aligned_real_ic: float, placebo_ic: float) -> float | None:
+    """genuine_ic = aligned_real_ic − placebo_ic — SHADOW-ONLY gate v3 candidate quantity.
+
+    Returns ``None`` (not a number) when:
+      - either input is NaN / non-numeric, OR
+      - ``aligned_real_ic <= 0`` (POSITIVE-aligned-real guard).
+
+    The positive-aligned-real guard is mandatory: a "positive" genuine_ic produced
+    by a NEGATIVE aligned_real_ic minus a MORE-negative placebo_ic is meaningless
+    (the model has no real edge to certify), so we refuse to report it. Under the
+    shadow-only gate-v3 candidate difference test a ``None`` here means shadow
+    FAIL (see ``_placebo_difference_pass``); it does not affect the enforced
+    gate-v2 absolute-ceiling verdict.
+    """
+    try:
+        ar = float(aligned_real_ic)
+        pl = float(placebo_ic)
+    except (TypeError, ValueError):
+        return None
+    if ar != ar or pl != pl:  # NaN guard
+        return None
+    if ar <= 0.0:  # positive-aligned-real guard (Codex review point #4)
+        return None
+    return ar - pl
+
+
+def _genuine_ic_diagnostic(
+    aligned_real_ic: float,
+    placebo_ic: float,
+    *,
+    paired_ics: list[tuple[float, float]] | None = None,
+    label_horizon_days: int | None = None,
+    n_boot: int = 2000,
+    ci_alpha: float = 0.10,
+) -> dict:
+    """genuine_ic evidence payload (CI/reference-bar fields DIAGNOSTIC-ONLY).
+
+    Returns a dict with the point estimate, the positive-aligned-real guard outcome,
+    the legacy reference (display) bar, and — when per-date paired ICs are supplied —
+    an overlap-aware conservative lower confidence bound (a moving-block bootstrap
+    whose block length respects the overlapping 60d label).
+
+    This entire payload is SHADOW-ONLY (gate v3 candidate evidence, NOT
+    enforced — see ``_pooled_placebo_verdict``); it must stay fail-soft — an
+    exception here can never flip the verdict, because the enforced quantity
+    (the gate-v2 absolute ceiling) is computed independently and does not
+    depend on this payload at all.
+    """
+    genuine = _genuine_ic_value(aligned_real_ic, placebo_ic)
+    positive_real = None
+    try:
+        positive_real = float(aligned_real_ic) > 0.0
+    except (TypeError, ValueError):
+        positive_real = None
+    payload: dict = {
+        "genuine_ic": genuine,
+        "aligned_real_ic": (
+            float(aligned_real_ic)
+            if _is_finite(aligned_real_ic) else None
+        ),
+        "placebo_ic": float(placebo_ic) if _is_finite(placebo_ic) else None,
+        "positive_aligned_real": positive_real,
+        "reference_bar": (
+            _genuine_ic_diag_reference_bar(aligned_real_ic)
+            if _is_finite(aligned_real_ic) else None
+        ),
+        "reference_bar_meets": (
+            (genuine is not None)
+            and (genuine >= _genuine_ic_diag_reference_bar(aligned_real_ic))
+        ),
+        "ci_lower": None,
+        "ci_alpha": ci_alpha,
+        "ci_method": None,
+        "tag": (
+            "gate v3 candidate SHADOW-ONLY, NOT enforced; "
+            "genuine_ic point estimate, CI, and reference-bar fields are all "
+            "shadow evidence"
+        ),
+    }
+    if genuine is not None and paired_ics:
+        ci = _genuine_ic_block_bootstrap_lower(
+            paired_ics,
+            label_horizon_days=label_horizon_days,
+            n_boot=n_boot,
+            ci_alpha=ci_alpha,
+        )
+        if ci is not None:
+            payload["ci_lower"] = ci["ci_lower"]
+            payload["ci_method"] = ci["method"]
+            payload["ci_block_len"] = ci["block_len"]
+            payload["ci_n_dates"] = ci["n_dates"]
+    return payload
+
+
+def _is_finite(x) -> bool:
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return False
+    return xf == xf and xf not in (float("inf"), float("-inf"))
+
+
+def _genuine_ic_block_bootstrap_lower(
+    paired_ics: list[tuple[float, float]],
+    *,
+    label_horizon_days: int | None,
+    n_boot: int = 2000,
+    ci_alpha: float = 0.10,
+) -> dict | None:
+    """Overlap-aware conservative lower confidence bound on genuine_ic.
+
+    DIAGNOSTIC-ONLY. ``paired_ics`` are per-date (aligned_real_ic, placebo_ic) pairs.
+    We resample the per-date DIFFERENCES (real − placebo) with a MOVING-BLOCK
+    bootstrap whose block length ≈ the label horizon in trading days, so that the
+    serial dependence induced by the overlapping 60d labels is preserved in each
+    resample (an i.i.d. bootstrap would understate the variance and overstate
+    confidence). Returns the lower ``ci_alpha`` quantile of the bootstrap mean.
+    """
+    import numpy as _np  # noqa: PLC0415
+
+    diffs = [
+        float(ar) - float(pl)
+        for ar, pl in paired_ics
+        if _is_finite(ar) and _is_finite(pl)
+    ]
+    n = len(diffs)
+    if n < 5:
+        return None
+    arr = _np.asarray(diffs, dtype=float)
+    # Block length ~ horizon in trading days, capped to a fraction of the sample so
+    # at least a few blocks are drawn; respects the overlapping-label dependence.
+    h = int(label_horizon_days) if label_horizon_days else 60
+    block_len = max(1, min(h, n // 2 if n >= 4 else 1))
+    n_blocks = int(_np.ceil(n / block_len))
+    rng = _np.random.default_rng(20260628)
+    max_start = n - block_len
+    boot_means = _np.empty(n_boot, dtype=float)
+    for b in range(n_boot):
+        starts = rng.integers(0, max_start + 1, size=n_blocks)
+        sample = _np.concatenate([arr[s : s + block_len] for s in starts])[:n]
+        boot_means[b] = float(sample.mean())
+    return {
+        "ci_lower": float(_np.quantile(boot_means, ci_alpha)),
+        "method": (
+            f"moving-block bootstrap (block_len={block_len}≈horizon, "
+            f"n_boot={n_boot}, lower {ci_alpha:.0%} quantile); diagnostic-only"
+        ),
+        "block_len": int(block_len),
+        "n_dates": int(n),
+    }
 
 
 def _sanity_model_label_col(artifact: dict) -> str:
@@ -1853,28 +2188,14 @@ def _manifest_entry_safe_last_label_date(entry) -> pd.Timestamp:
     )
 
 
-def _score_manifest_sanity(
-    val: pd.DataFrame,
-    feat_cols: list[str],
+def _manifest_sanity_date_map(
+    eval_dates,
     manifest_path: Path,
-    candidate_artifact_path: Path,
-    candidate_artifact: dict,
-    panel_history: pd.DataFrame | None = None,
-) -> tuple["pd.Series", dict]:
-    """Score validation rows with the same point-in-time manifest contract as WF."""
-    import numpy as _np  # noqa: PLC0415
-    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
-    from renquant_pipeline.kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
+    candidate_lookahead: int,
+) -> tuple[dict[pd.Timestamp, str], list[pd.Timestamp], list[pd.Timestamp]]:
+    """Map each eval date to the point-in-time manifest artifact allowed to score it."""
     from renquant_backtesting.walk_forward.loader import WalkForwardModelLoader  # noqa: PLC0415
 
-    recipe_usage = _manifest_recipe_usage(manifest_path, candidate_artifact_path)
-    if not recipe_usage.get("recipe_validated"):
-        raise ValueError(
-            "manifest sanity recipe mismatch: "
-            f"{recipe_usage.get('reason')}"
-        )
-
-    candidate_lookahead = int(candidate_artifact.get("lookahead_days") or 0)
     loader = WalkForwardModelLoader(manifest_path)
     if not loader.has_walkforward_model():
         raise ValueError(f"manifest sanity has no retrain entries: {manifest_path}")
@@ -1882,14 +2203,14 @@ def _score_manifest_sanity(
     date_to_artifact: dict[pd.Timestamp, str] = {}
     safe_dates: list[pd.Timestamp] = []
     skipped_pre_manifest_dates: list[pd.Timestamp] = []
-    for raw_d in sorted(pd.to_datetime(val["date"].unique())):
+    for raw_d in sorted(pd.to_datetime(pd.Index(eval_dates).unique())):
         d = pd.Timestamp(raw_d)
         try:
             entry = loader.entry_as_of(d)
         except ValueError:
             skipped_pre_manifest_dates.append(d)
             continue
-        if int(entry.lookahead_days) != candidate_lookahead:
+        if int(entry.lookahead_days) != int(candidate_lookahead):
             raise ValueError(
                 "manifest sanity lookahead mismatch: "
                 f"entry cutoff={entry.cutoff_date.date()} "
@@ -1906,6 +2227,35 @@ def _score_manifest_sanity(
             )
         date_to_artifact[d] = str(_manifest_uri_to_path(manifest_path, entry.artifact_uri))
         safe_dates.append(d)
+    return date_to_artifact, safe_dates, skipped_pre_manifest_dates
+
+
+def _score_manifest_sanity(
+    val: pd.DataFrame,
+    feat_cols: list[str],
+    manifest_path: Path,
+    candidate_artifact_path: Path,
+    candidate_artifact: dict,
+    panel_history: pd.DataFrame | None = None,
+) -> tuple["pd.Series", dict]:
+    """Score validation rows with the same point-in-time manifest contract as WF."""
+    import numpy as _np  # noqa: PLC0415
+    from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
+    from renquant_pipeline.kernel.panel_pipeline.feature_transform import transform_feature_frame  # noqa: PLC0415
+
+    recipe_usage = _manifest_recipe_usage(manifest_path, candidate_artifact_path)
+    if not recipe_usage.get("recipe_validated"):
+        raise ValueError(
+            "manifest sanity recipe mismatch: "
+            f"{recipe_usage.get('reason')}"
+        )
+
+    candidate_lookahead = int(candidate_artifact.get("lookahead_days") or 0)
+    date_to_artifact, safe_dates, skipped_pre_manifest_dates = _manifest_sanity_date_map(
+        val["date"].unique(),
+        manifest_path,
+        candidate_lookahead,
+    )
     if not safe_dates:
         raise ValueError(
             "manifest sanity has no validation dates covered by manifest "
@@ -2148,10 +2498,53 @@ def run_sanity_battery(
             "sanity_label_col": LABEL,
         }
     panel = panel.dropna(subset=[LABEL])
-    distinct = sorted(panel.date.unique())
-    val_cut = distinct[int(len(distinct) * 0.8)]
-    val = panel[panel.date > val_cut].copy()
-    eval_start = pd.Timestamp(val["date"].min()) if not val.empty else None
+    manifest_scope = (
+        isinstance(artifact_usage, dict)
+        and artifact_usage.get("eval_scope") == "walkforward_manifest"
+    )
+    if manifest_scope:
+        manifest_raw = (artifact_usage or {}).get("manifest_path")
+        if not manifest_raw:
+            return {
+                "passed": False,
+                "reason": "manifest sanity missing manifest_path",
+                "sanity_method": "manifest_point_in_time_label_diagnostics",
+                "sanity_eval_scope": "walkforward_manifest",
+                "sanity_label_col": LABEL,
+            }
+        manifest_path = Path(manifest_raw)
+        try:
+            _, safe_dates, skipped_pre_manifest_dates = _manifest_sanity_date_map(
+                panel["date"].unique(),
+                manifest_path,
+                int(artifact.get("lookahead_days") or 0),
+            )
+        except Exception as exc:
+            return {
+                "passed": False,
+                "reason": f"manifest eval-date selection failed: {exc}",
+                "sanity_method": "manifest_point_in_time_label_diagnostics",
+                "sanity_eval_scope": "walkforward_manifest",
+                "sanity_label_col": LABEL,
+            }
+        if not safe_dates:
+            return {
+                "passed": False,
+                "reason": (
+                    "manifest sanity has no eval dates covered by manifest "
+                    f"{manifest_path}"
+                ),
+                "sanity_method": "manifest_point_in_time_label_diagnostics",
+                "sanity_eval_scope": "walkforward_manifest",
+                "sanity_label_col": LABEL,
+            }
+        val = panel[pd.to_datetime(panel["date"]).isin(safe_dates)].copy()
+        eval_start = min(safe_dates)
+    else:
+        distinct = sorted(panel.date.unique())
+        val_cut = distinct[int(len(distinct) * 0.8)]
+        val = panel[panel.date > val_cut].copy()
+        eval_start = pd.Timestamp(val["date"].min()) if not val.empty else None
     if eval_start is None:
         return {
             "passed": False,
@@ -2159,16 +2552,13 @@ def run_sanity_battery(
             "sanity_method": "existing_model_label_diagnostics",
             "sanity_label_col": LABEL,
         }
+    eval_dates = pd.Index(pd.to_datetime(val["date"].unique()))
 
     # Predict using the artifact's model on val
     # (For panel-LTR XGB rank, recover boosters; for QHead, predict_distribution)
     sanity_meta: dict = {}
     try:
         import xgboost as xgb  # noqa: PLC0415
-        manifest_scope = (
-            isinstance(artifact_usage, dict)
-            and artifact_usage.get("eval_scope") == "walkforward_manifest"
-        )
         if manifest_scope:
             manifest_raw = (artifact_usage or {}).get("manifest_path")
             if not manifest_raw:
@@ -2277,6 +2667,18 @@ def run_sanity_battery(
         ics = [x for x in ics if not _np.isnan(x)]
         return float(_np.mean(ics)) if ics else 0.0
 
+    def cs_ic_by_date(mu, y, dates) -> dict:
+        """Per-date cross-sectional IC, keyed by date (for the diagnostic CI)."""
+        df = _pd.DataFrame({"p": mu, "y": y, "d": dates})
+        out: dict = {}
+        for d, g in df.groupby("d"):
+            if len(g) < 5:
+                continue
+            ic = spearmanr(g["p"], g["y"])[0]
+            if not _np.isnan(ic):
+                out[d] = float(ic)
+        return out
+
     real_ic = cs_ic(mu, yva_real, val_dates)
     log.info("  real_ic = %+.4f", real_ic)
 
@@ -2304,6 +2706,9 @@ def run_sanity_battery(
     placebo_shift_diagnostics = []
     placebo_ic = float("nan")
     placebo_aligned_real_ic = float("nan")
+    # Per-date (aligned_real_ic, placebo_ic) pairs at the gate shift, captured for the
+    # DIAGNOSTIC-ONLY overlap-aware confidence bound on genuine_ic. Gate-unaffected.
+    placebo_gate_paired_ics: list[tuple[float, float]] = []
     _label_horizon = _placebo_gate_horizon(LABEL)
     _gate_shift_days = 2 * _label_horizon if _label_horizon is not None else 60
     placebo_gate_shift_days = _gate_shift_days
@@ -2314,7 +2719,7 @@ def run_sanity_battery(
     for shift_days in _shift_grid:
         col = f"__shift_{shift_days}__"
         panel_s[col] = panel_s.groupby("ticker")[LABEL].shift(-shift_days)
-        val_s = panel_s[panel_s.date > val_cut].dropna(subset=[col])
+        val_s = panel_s[panel_s["date"].isin(eval_dates)].dropna(subset=[col])
         if len(val_s) <= 100:
             placebo_shift_diagnostics.append({
                 "shift_days": shift_days,
@@ -2359,12 +2764,21 @@ def run_sanity_battery(
         if shift_days == _gate_shift_days:
             placebo_ic = ic
             placebo_aligned_real_ic = aligned_real_ic
+            # Diagnostic-only: per-date paired ICs for the genuine_ic CI.
+            _real_by_date = cs_ic_by_date(mu_aligned, yva_real_aligned, dates_aligned)
+            _plac_by_date = cs_ic_by_date(mu_aligned, yva_placebo, dates_aligned)
+            placebo_gate_paired_ics = [
+                (_real_by_date[d], _plac_by_date[d])
+                for d in _real_by_date
+                if d in _plac_by_date
+            ]
             log.info(
                 "  placebo_ic = %+.4f at gate_shift=%dd (= 2×label_horizon=%sd; "
-                "expect < %s; full_real_ic=%+.4f)",
+                "enforced: %s; legacy diagnostic ceiling: %s; full_real_ic=%+.4f)",
                 placebo_ic,
                 _gate_shift_days,
                 _label_horizon if _label_horizon is not None else "n/a",
+                _placebo_genuine_ic_requirement_text(),
                 _placebo_ic_requirement_text(placebo_aligned_real_ic),
                 real_ic,
             )
@@ -2388,29 +2802,49 @@ def run_sanity_battery(
             mu_series,
             LABEL,
             regimes_df,
-            shifts=(60,),
+            shifts=(_gate_shift_days,),
             min_names=5,
         )
-        min_dates = 30
-        min_mean_ic = 0.02
-        max_placebo_ratio = 0.5
+        min_dates = max(10, int(math.ceil(max(1, _gate_shift_days) / 6)))
+        min_mean_ic = max(0.0, 0.25 * abs(real_ic))
+        # ENFORCED per-regime placebo rule — gate v2, UNCHANGED (Codex 2026-07-02
+        # review: v3's per-regime difference test is ALSO a per-regime multiple
+        # look with no family-wise error control across regimes, on top of the
+        # pooled-leg calibration concerns — see _pooled_placebo_verdict docstring
+        # and doc/research/2026-07-02-wf-gate-v3-shadow-eval.md). When a placebo
+        # reading exists for the regime, the ABSOLUTE ceiling
+        # (≤ max(0.005, 0.5×|ref|)) decides pass/fail, exactly as before this PR.
+        # v3's per-regime genuine_ic difference test is computed and STAMPED
+        # (placebo_gate_v3_shadow_pass) as shadow-only evidence for the same
+        # replay this PR's pooled-leg shadow evaluation runs — it does NOT
+        # decide anything, and even once v3's pooled leg is validated, promoting
+        # the per-regime leg additionally requires either a family-wise
+        # correction across regimes or an explicit non-gating designation.
+        max_placebo_ratio = 0.5  # ENFORCED ceiling ratio (gate v2, unchanged)
         regimes_out = {}
         failed = []
         eligible_any = False
         for regime, stats in by_regime.items():
-            row60 = next(
+            gate_row = next(
                 (
                     r for r in by_regime_shift.get(regime, [])
-                    if r.get("shift_days") == 60
+                    if r.get("shift_days") == _gate_shift_days
                 ),
                 {},
             )
             mean_ic = stats.get("mean_ic")
-            placebo60 = row60.get("model_placebo_ic")
-            aligned_real60 = row60.get("aligned_real_ic")
+            placebo_gate_ic = gate_row.get("model_placebo_ic")
+            aligned_real_gate = gate_row.get("aligned_real_ic")
             n_dates = int(stats.get("n_dates") or 0)
             eligible = n_dates >= min_dates
             passed = False
+            # SHADOW-ONLY (gate v3 candidate) genuine_ic per regime
+            # (positive-aligned-real guarded). Computed for the replay/shadow
+            # evaluation; does not feed `passed`.
+            regime_genuine_ic = _genuine_ic_value(aligned_real_gate, placebo_gate_ic)
+            regime_v3_shadow_pass = None
+            # ENFORCED (gate v2, UNCHANGED) absolute-ceiling verdict.
+            regime_absolute_rule_pass = None
             if eligible:
                 eligible_any = True
                 try:
@@ -2418,18 +2852,25 @@ def run_sanity_battery(
                 except (TypeError, ValueError):
                     mean_ic_f = float("nan")
                 placebo_ok = True
-                if placebo60 is not None and mean_ic_f == mean_ic_f:
+                if placebo_gate_ic is not None and mean_ic_f == mean_ic_f:
+                    # ENFORCED absolute ceiling (gate v2, unchanged from before
+                    # this PR).
                     placebo_ref = mean_ic_f
                     try:
-                        aligned_real60_f = float(aligned_real60)
-                        if aligned_real60_f == aligned_real60_f:
-                            placebo_ref = aligned_real60_f
+                        aligned_real_gate_f = float(aligned_real_gate)
+                        if aligned_real_gate_f == aligned_real_gate_f:
+                            placebo_ref = aligned_real_gate_f
                     except (TypeError, ValueError):
                         placebo_ref = mean_ic_f
-                    placebo_ok = abs(float(placebo60)) <= max(
+                    regime_absolute_rule_pass = abs(float(placebo_gate_ic)) <= max(
                         0.005,
                         max_placebo_ratio * abs(placebo_ref),
                     )
+                    placebo_ok = regime_absolute_rule_pass
+                    # SHADOW-ONLY (gate v3 candidate): pre-registered difference
+                    # test, same frozen margin as the pooled leg. Computed for
+                    # the shadow replay only — does not decide `placebo_ok`.
+                    regime_v3_shadow_pass = _placebo_difference_pass(regime_genuine_ic)
                 passed = (
                     mean_ic_f == mean_ic_f
                     and mean_ic_f >= min_mean_ic
@@ -2441,9 +2882,23 @@ def run_sanity_battery(
                 **stats,
                 "eligible": bool(eligible),
                 "passed": bool(passed) if eligible else True,
-                "placebo_60_ic": placebo60,
-                "placebo_60_aligned_real_ic": aligned_real60,
-                "label_autocorr_60_ic": row60.get("label_autocorr_ic"),
+                # ENFORCED (gate v2, unchanged) — drives `passed` above.
+                "placebo_criterion": "absolute ceiling: |placebo_ic| <= max(0.005, 0.5x|ref|)",
+                "placebo_gate_shift_days": int(_gate_shift_days),
+                "placebo_gate_ic": placebo_gate_ic,
+                "placebo_gate_aligned_real_ic": aligned_real_gate,
+                # SHADOW-ONLY (gate v3 candidate) evidence, not enforced:
+                "placebo_gate_genuine_ic": regime_genuine_ic,
+                "placebo_gate_v3_shadow_pass": regime_v3_shadow_pass,
+                "placebo_gate_v3_gating": False,
+                # ENFORCED (gate v2, UNCHANGED) absolute-ceiling verdict
+                # (None when the regime was ineligible or had no placebo reading):
+                "placebo_gate_absolute_rule_pass": regime_absolute_rule_pass,
+                "label_autocorr_gate_ic": gate_row.get("label_autocorr_ic"),
+                # Legacy aliases kept so older dashboards/parsers don't break.
+                "placebo_60_ic": placebo_gate_ic,
+                "placebo_60_aligned_real_ic": aligned_real_gate,
+                "label_autocorr_60_ic": gate_row.get("label_autocorr_ic"),
             }
         sanity_regime_ic = {
             "passed": bool(eligible_any and not failed),
@@ -2454,9 +2909,20 @@ def run_sanity_battery(
                 if failed else
                 "no regime has enough OOS dates for sanity IC validation"
             ),
+            # ENFORCED (gate v2, unchanged) — drives `passed` above.
+            "placebo_criterion": "absolute ceiling: |placebo_ic| <= max(0.005, 0.5x|ref|)",
+            # SHADOW-ONLY (gate v3 candidate) — see placebo_gate_v3_shadow_pass
+            # per regime; does not drive `passed`.
+            "placebo_v3_shadow_criterion": PLACEBO_CRITERION,
+            "genuine_ic_margin": PLACEBO_GENUINE_IC_MARGIN,
+            "placebo_gate_shift_days": int(_gate_shift_days),
             "min_n_dates": min_dates,
             "min_mean_ic": min_mean_ic,
+            # LEGACY diagnostic ceiling ratio (stamped only since gate v3):
             "max_placebo_ratio": max_placebo_ratio,
+            # DIAGNOSTIC-ONLY reference constants (not applied to the verdict):
+            "genuine_ic_diag_abs_floor": GENUINE_IC_DIAG_ABS_FLOOR,
+            "genuine_ic_diag_real_ratio": GENUINE_IC_DIAG_REAL_RATIO,
             "regimes": regimes_out,
         }
     except Exception as exc:  # noqa: BLE001
@@ -2484,45 +2950,79 @@ def run_sanity_battery(
         )
         _g2 = ((model_placebo_profile or {}).get("pooled", {}).get("2x", {}) or {}).get("genuine_ic")
         log.info(
-            "  Layer-1a genuine_ic@2x (pooled) = %s",
+            "  Layer-1a genuine_ic@2x (pooled) = %s (diagnostic-only, gate unaffected)",
             f"{_g2:+.4f}" if isinstance(_g2, (int, float)) else "n/a",
         )
-    except Exception as exc:  # noqa: BLE001 — profile failure must not block the gate
-        log.warning("  Layer-1a diagnostic profiles unavailable: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — diagnostic-only; must NEVER fail the gate
+        log.warning("  Layer-1a diagnostic profiles unavailable (gate unaffected): %s", exc)
 
-    # --- S3 placebo difference test (primary) ---------------------------------
-    # genuine_ic = aligned_real_ic − placebo_ic from the Layer-1a profile at the
-    # gate shift (2×horizon).  Falls back to the legacy ratio test if the profile
-    # is unavailable (pre-Layer-1a artifacts or import failure).
-    _genuine_ic_2x = (
-        ((model_placebo_profile or {}).get("pooled", {}).get("2x", {}) or {})
-        .get("genuine_ic")
-    )
-    _has_genuine = isinstance(_genuine_ic_2x, (int, float)) and _genuine_ic_2x == _genuine_ic_2x
-
-    # Legacy ratio test (logged for comparison; used as fallback only)
-    _legacy_ratio_pass = (
-        (placebo_ic == placebo_ic)
-        and (placebo_aligned_real_ic == placebo_aligned_real_ic)
-        and (
-            abs(placebo_ic) < _placebo_ic_threshold(placebo_aligned_real_ic)
-            if placebo_aligned_real_ic != 0 else
-            True
+    # Pass criteria — ENFORCED gate v2 (UNCHANGED; the gate v3 candidate
+    # DIFFERENCE test below is SHADOW-ONLY, not enforced — see module docstring).
+    #
+    # (1) Shuffled-label control — HARD true-leak guard, UNCHANGED. A non-clean
+    #     shuffle FAILS. (SHUF_IC_MAX == 0.005, identical to the prior literal.)
+    pass_shuf = abs(shuf_ic) < SHUF_IC_MAX
+    #
+    # (2) Time-shift placebo sub-gate — SHADOW-ONLY candidate DIFFERENCE test:
+    #     genuine_ic = aligned_real_ic − placebo_ic must be available (both terms
+    #     finite, aligned_real_ic > 0 per the positive-aligned-real guard) AND
+    #     exceed PLACEBO_GENUINE_IC_MARGIN (0.02, FROZEN 2026-07-02). The measured
+    #     ~+0.04 embargo-leakage floor is shared by BOTH terms and cancels in the
+    #     difference, so the floor alone can neither fail an otherwise-good model
+    #     nor pass a no-edge one. It is SHADOW-ONLY (see _pooled_placebo_verdict
+    #     docstring) pending a historical-corpus replay and a genuinely
+    #     prospective held-out run.
+    #     The ENFORCED verdict is the ABSOLUTE-ceiling rule (gate v2, unchanged).
+    pooled_placebo_verdict = _pooled_placebo_verdict(placebo_aligned_real_ic, placebo_ic)
+    pass_placebo = bool(pooled_placebo_verdict["pass_placebo"])
+    placebo_genuine_ic = pooled_placebo_verdict["sanity_placebo_genuine_ic"]
+    # genuine_ic CI payload — SHADOW-ONLY evidence for the same v3 candidate;
+    # the overlap-aware conservative CI and legacy reference bar are all
+    # informational here. Wrapped fail-soft: an exception here can never flip
+    # the verdict (the ENFORCED absolute-ceiling rule above is computed
+    # independently by _pooled_placebo_verdict and does not depend on this).
+    genuine_ic_diagnostic: dict = {
+        "tag": (
+            "gate v3 candidate SHADOW-ONLY, NOT enforced; "
+            "genuine_ic point estimate, CI, and reference-bar fields are all "
+            "shadow evidence for the pending v3 shadow-evaluation replay"
+        ),
+    }
+    try:
+        genuine_ic_diagnostic = _genuine_ic_diagnostic(
+            placebo_aligned_real_ic,
+            placebo_ic,
+            paired_ics=placebo_gate_paired_ics,
+            label_horizon_days=placebo_label_horizon_days,
         )
-    )
+    except Exception as exc:  # noqa: BLE001 — diagnostic payload; fail-soft
+        log.warning("  genuine_ic CI diagnostic unavailable (verdict unaffected): %s", exc)
     log.info(
-        "  placebo gate: legacy_ratio_pass=%s, genuine_ic=%s, margin=%.4f",
-        _legacy_ratio_pass,
-        f"{_genuine_ic_2x:+.4f}" if _has_genuine else "n/a",
-        PLACEBO_DIFF_MARGIN,
+        "  placebo sub-gate [ENFORCED absolute ceiling, gate v2]: %s → %s "
+        "(aligned_real_ic=%s, placebo_ic=%s) "
+        "[SHADOW-ONLY gate v3 candidate, NOT enforced: genuine_ic=%s vs %s → %s; "
+        "ci_lower=%s, positive_real=%s]",
+        _placebo_ic_requirement_text(placebo_aligned_real_ic),
+        "PASS" if pass_placebo else "FAIL",
+        (
+            f"{placebo_aligned_real_ic:+.4f}"
+            if placebo_aligned_real_ic == placebo_aligned_real_ic else "n/a"
+        ),
+        f"{placebo_ic:+.4f}" if placebo_ic == placebo_ic else "n/a",
+        f"{placebo_genuine_ic:+.4f}" if placebo_genuine_ic is not None else "n/a",
+        _placebo_genuine_ic_requirement_text(),
+        (
+            "would-PASS"
+            if pooled_placebo_verdict["sanity_placebo_v3_shadow_verdict"]
+            else "would-FAIL"
+        ),
+        (
+            f"{genuine_ic_diagnostic.get('ci_lower'):+.4f}"
+            if isinstance(genuine_ic_diagnostic.get("ci_lower"), (int, float))
+            else "n/a"
+        ),
+        genuine_ic_diagnostic.get("positive_aligned_real"),
     )
-
-    # Pass criteria
-    pass_shuf = abs(shuf_ic) < 0.005
-    if _has_genuine:
-        pass_placebo = float(_genuine_ic_2x) >= PLACEBO_DIFF_MARGIN
-    else:
-        pass_placebo = _legacy_ratio_pass
     sanity_method = (
         "manifest_point_in_time_label_diagnostics"
         if sanity_meta.get("sanity_eval_scope") == "walkforward_manifest"
@@ -2530,23 +3030,32 @@ def run_sanity_battery(
     )
     pass_regime = bool(sanity_regime_ic.get("passed"))
     pass_all = pass_shuf and pass_placebo and pass_regime
-    _placebo_detail = (
-        f"genuine_ic={_genuine_ic_2x:+.4f} (need ≥{PLACEBO_DIFF_MARGIN:+.4f})"
-        if _has_genuine else
-        f"placebo_ic={placebo_ic:+.4f} (legacy ratio; need < "
-        f"{_placebo_ic_requirement_text(placebo_aligned_real_ic)})"
+    _genuine_txt = (
+        f"{placebo_genuine_ic:+.4f}" if placebo_genuine_ic is not None else "n/a"
     )
     if pass_all:
-        sanity_reason = f"PASS: shuf_ic={shuf_ic:+.4f} {_placebo_detail}"
+        sanity_reason = (
+            f"PASS: shuf_ic={shuf_ic:+.4f} placebo_ic={placebo_ic:+.4f} "
+            f"({_placebo_ic_requirement_text(placebo_aligned_real_ic)}) "
+            f"[shadow genuine_ic={_genuine_txt}, not enforced]"
+        )
     elif pass_shuf and pass_placebo and not pass_regime:
         sanity_reason = (
             "FAIL: regime sanity IC failed: "
             f"{sanity_regime_ic.get('reason', 'unknown')}"
         )
     else:
+        _aligned_txt = (
+            f"{placebo_aligned_real_ic:+.4f}"
+            if placebo_aligned_real_ic == placebo_aligned_real_ic
+            else "n/a"
+        )
+        _placebo_txt = f"{placebo_ic:+.4f}" if placebo_ic == placebo_ic else "n/a"
         sanity_reason = (
-            f"FAIL: shuf_ic={shuf_ic:+.4f} (need |·| < 0.005), "
-            f"{_placebo_detail}"
+            f"FAIL: shuf_ic={shuf_ic:+.4f} (need |·| < {SHUF_IC_MAX}), "
+            f"genuine_ic={_genuine_txt} "
+            f"(need {_placebo_genuine_ic_requirement_text()}; "
+            f"aligned_real_ic={_aligned_txt}, placebo_ic={_placebo_txt})"
         )
     return {
         "passed": pass_all,
@@ -2558,9 +3067,38 @@ def run_sanity_battery(
             if placebo_aligned_real_ic == placebo_aligned_real_ic
             else None
         ),
-        "sanity_genuine_ic": float(_genuine_ic_2x) if _has_genuine else None,
-        "sanity_placebo_diff_margin": PLACEBO_DIFF_MARGIN,
-        "sanity_placebo_test": "difference" if _has_genuine else "legacy_ratio",
+        # ENFORCED placebo criterion (gate v2, unchanged) — every verdict
+        # self-documents which rule judged it. The absolute-ceiling verdict
+        # below IS the enforced quantity; the gate v3 candidate fields are
+        # SHADOW-ONLY (see sanity_placebo_v3_gating == False).
+        "sanity_placebo_gate_mode": "absolute_ceiling_enforced_v3_shadow",
+        "placebo_criterion": pooled_placebo_verdict["placebo_criterion"],
+        "sanity_placebo_absolute_rule_pass": pooled_placebo_verdict[
+            "sanity_placebo_absolute_rule_pass"
+        ],
+        "sanity_placebo_absolute_rule_threshold": pooled_placebo_verdict[
+            "sanity_placebo_absolute_rule_threshold"
+        ],
+        # SHADOW-ONLY (gate v3 candidate), NOT enforced:
+        "sanity_placebo_genuine_ic": placebo_genuine_ic,
+        "sanity_placebo_genuine_ic_margin": pooled_placebo_verdict[
+            "sanity_placebo_genuine_ic_margin"
+        ],
+        "sanity_placebo_v3_shadow_verdict": pooled_placebo_verdict[
+            "sanity_placebo_v3_shadow_verdict"
+        ],
+        "sanity_placebo_v3_criterion": pooled_placebo_verdict[
+            "sanity_placebo_v3_criterion"
+        ],
+        "sanity_placebo_v3_gating": pooled_placebo_verdict["sanity_placebo_v3_gating"],
+        "sanity_placebo_genuine_ic_positive_real": genuine_ic_diagnostic.get(
+            "positive_aligned_real"
+        ),
+        "sanity_placebo_genuine_ic_ci_lower": genuine_ic_diagnostic.get("ci_lower"),
+        "sanity_placebo_genuine_ic_ci_method": genuine_ic_diagnostic.get("ci_method"),
+        "sanity_placebo_genuine_ic_ref_bar": genuine_ic_diagnostic.get("reference_bar"),
+        "sanity_placebo_genuine_ic_diagnostic": genuine_ic_diagnostic,
+        "gate_diagnostic_version": GATE_DIAGNOSTIC_VERSION,
         "sanity_label_col": LABEL,
         "sanity_label_horizon_days": placebo_label_horizon_days,
         "sanity_placebo_gate_shift_days": placebo_gate_shift_days,
@@ -2629,17 +3167,46 @@ def main():
     log.info("Artifact: %s  (kind=%s)", artifact_path, artifact.get("kind"))
     log.info("=" * 60)
 
-    if args.derive_config_from_prod:
-        try:
-            from .wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
-        except ImportError:
-            from wf_config_builder import build_wf_config_from_prod  # noqa: PLC0415
+    # ONE parity contract (shared with umbrella scripts/run_wf_gate.py): select
+    # the production reference whose scorer kind MATCHES the candidate's declared
+    # kind (read from artifact metadata, not a path suffix). The same selected
+    # reference is used for BOTH derivation and the parity check, so a genuine
+    # prod-vs-candidate mismatch (e.g. a GBDT candidate with no GBDT reference)
+    # STILL fails parity. Fail closed on an unknown/unmatched kind.
+    try:
+        from .wf_config_builder import (  # noqa: PLC0415
+            build_wf_config_from_prod,
+            select_prod_reference_for_candidate,
+        )
+    except ImportError:
+        from wf_config_builder import (  # noqa: PLC0415
+            build_wf_config_from_prod,
+            select_prod_reference_for_candidate,
+        )
 
+    try:
+        prod_cfg_path = select_prod_reference_for_candidate(
+            artifact.get("kind"),
+            strategy_dir=STRATEGY_DIR,
+            env_override=os.environ.get("RENQUANT_STRATEGY_CONFIG"),
+        )
+    except ValueError as exc:
+        log.error(
+            "WF config parity reference selection FAILED (fail closed): %s",
+            exc,
+        )
+        sys.exit(2)
+    log.info(
+        "Selected kind-matched production reference for candidate kind %s: %s",
+        artifact.get("kind"),
+        prod_cfg_path,
+    )
+
+    if args.derive_config_from_prod:
         base_cfg_path = STRATEGY_DIR / args.strategy_config
         if not base_cfg_path.exists():
             log.error("base strategy config not found: %s", base_cfg_path)
             sys.exit(2)
-        prod_cfg_path = _prod_strategy_config_path()
         prod_cfg = json.loads(prod_cfg_path.read_text())
         base_cfg = json.loads(base_cfg_path.read_text())
         manifest_path = ((base_cfg.get("walkforward") or {}).get("manifest_path"))
@@ -2695,7 +3262,8 @@ def main():
         {"passed": True, "reason": "skipped"}
         if args.skip_config_parity or not cfg_path.exists()
         else evaluate_wf_config_parity(
-            _prod_strategy_config_path(),
+            # Same kind-matched production reference used for derivation above.
+            prod_cfg_path,
             cfg_path,
             candidate_artifact=artifact_path,
             strategy_dir=STRATEGY_DIR,
@@ -2898,6 +3466,27 @@ def main():
         "sanity_placebo_aligned_real_ic": (
             sanity_result.get("sanity_placebo_aligned_real_ic")
         ),
+        # ENFORCED placebo criterion (gate v2, unchanged) — the verdict
+        # self-documents which rule judged it. The absolute-ceiling verdict is
+        # the enforced quantity; gate v3 candidate fields are SHADOW-ONLY.
+        "placebo_criterion":   sanity_result.get("placebo_criterion"),
+        "sanity_placebo_gate_mode": sanity_result.get("sanity_placebo_gate_mode"),
+        "sanity_placebo_absolute_rule_pass": sanity_result.get(
+            "sanity_placebo_absolute_rule_pass"
+        ),
+        "sanity_placebo_absolute_rule_threshold": sanity_result.get(
+            "sanity_placebo_absolute_rule_threshold"
+        ),
+        # SHADOW-ONLY (gate v3 candidate), NOT enforced:
+        "sanity_placebo_genuine_ic": sanity_result.get("sanity_placebo_genuine_ic"),
+        "sanity_placebo_genuine_ic_margin": sanity_result.get(
+            "sanity_placebo_genuine_ic_margin"
+        ),
+        "sanity_placebo_v3_shadow_verdict": sanity_result.get(
+            "sanity_placebo_v3_shadow_verdict"
+        ),
+        "sanity_placebo_v3_criterion": sanity_result.get("sanity_placebo_v3_criterion"),
+        "sanity_placebo_v3_gating": sanity_result.get("sanity_placebo_v3_gating"),
         "sanity_label_col":    sanity_result.get("sanity_label_col"),
         "sanity_label_horizon_days": sanity_result.get("sanity_label_horizon_days"),
         "sanity_placebo_gate_shift_days": (

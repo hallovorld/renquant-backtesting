@@ -598,9 +598,14 @@ def _check_wf_gate(staging_data: dict, staging_path: Path) -> None:
         wf_3cut_sharpe_mean:  float
         wf_3cut_sharpe_std:   float
         wf_3cut_apy_mean:     float
-        sanity_shuffled_ic:   float       # must be ≈ 0
-        sanity_placebo_ic:    float       # must be < 0.5 × same-row aligned real IC
+        sanity_shuffled_ic:   float       # must be ≈ 0 (HARD true-leak guard)
+        sanity_placebo_ic:    float       # ENFORCED: must be < 0.5×|aligned_real_ic|
         sanity_placebo_aligned_real_ic: float
+        sanity_placebo_genuine_ic: float  # DIAGNOSTIC-ONLY: aligned_real_ic −
+                                          # placebo_ic (suspected autocorr-floor
+                                          # adjusted); LOGGED/STAMPED, NOT enforced.
+                                          # Enforcement deferred to a calibrated
+                                          # later PR (see runner.py + A1 plan).
         candidate_artifact_used: bool     # True for leakage-safe static eval
         recipe_validated:      bool       # True for matching manifest eval
         run_at:               str (ISO-8601)

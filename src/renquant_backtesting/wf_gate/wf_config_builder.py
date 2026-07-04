@@ -75,6 +75,118 @@ def _set_path(obj: dict[str, Any], dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+# Scorer-kind vocabulary, kept aligned with the parity guard in
+# ``wf_config_parity.py`` (``PATCHTST_KINDS`` and ``_normalize_kind``). Used by
+# ``select_prod_reference_for_candidate`` to pick the production config whose
+# scorer kind matches the candidate, NOT to mutate any config's declared kind.
+_PATCHTST_KIND = "hf_patchtst"
+_GBDT_KIND = "xgb"
+_PATCHTST_KINDS = {"hf_patchtst", "patchtst", "patchtst_panel"}
+
+# Production reference config filenames, by scorer kind. A candidate must be
+# compared against the production semantics that actually run that scorer: a
+# GBDT/xgb candidate against the GBDT/shadow config, a PatchTST candidate
+# against the PatchTST primary. Selecting the matched reference (rather than
+# mutating ``panel_scoring.kind``) keeps a genuine prod-vs-candidate mismatch
+# failing parity, as it should.
+PROD_REFERENCE_BY_KIND: dict[str, str] = {
+    _PATCHTST_KIND: "strategy_config.json",
+    _GBDT_KIND: "strategy_config.shadow.json",
+}
+
+
+def _normalize_kind(kind: Any) -> str:
+    """Collapse a scorer kind to the parity-guard vocabulary.
+
+    Mirrors ``wf_config_parity._normalize_kind`` so ``panel_ltr_xgboost`` /
+    ``xgboost`` collapse to ``xgb`` and PatchTST aliases collapse to
+    ``hf_patchtst``. Returns ``""`` for an empty value.
+    """
+    value = str(kind or "").lower()
+    if value in _PATCHTST_KINDS:
+        return _PATCHTST_KIND
+    aliases = {
+        "panel_ltr_xgboost": _GBDT_KIND,
+        "xgboost": _GBDT_KIND,
+    }
+    return aliases.get(value, value)
+
+
+def select_prod_reference_for_candidate(
+    candidate_kind: Any,
+    *,
+    strategy_dir: Path = STRATEGY_DIR,
+    env_override: str | None = None,
+) -> Path:
+    """Select the production reference config matched to the candidate kind.
+
+    The ONE parity contract shared with the umbrella rollback path
+    (``scripts/run_wf_gate.py::_prod_config_path``): a candidate is only
+    promotable against the production semantics that actually run its scorer
+    kind. A GBDT/xgb candidate is compared against the GBDT/shadow config
+    (``strategy_config.shadow.json``, ``kind=xgb``); a PatchTST candidate
+    against the PatchTST primary (``strategy_config.json``, ``kind=hf_patchtst``).
+
+    ``candidate_kind`` MUST come from the candidate artifact's declared metadata
+    (``_load_artifact_payload(...)["kind"]``), never from a path suffix.
+
+    Selection precedence:
+      1. ``env_override`` (``RENQUANT_STRATEGY_CONFIG``) when set — but its
+         declared ``panel_scoring.kind`` is validated to match the candidate
+         kind; a mismatch FAILS CLOSED so the env cannot smuggle a wrong
+         reference past parity.
+      2. the built-in ``PROD_REFERENCE_BY_KIND`` mapping for known kinds.
+
+    Raises ``ValueError`` (fail closed) when the candidate kind is unknown/empty
+    or no matched production reference exists. The caller must treat that as a
+    non-promotable run, not silently pass.
+    """
+    kind = _normalize_kind(candidate_kind)
+    if not kind:
+        raise ValueError(
+            "cannot select a production reference: candidate artifact has no "
+            "declared scorer kind (load it from artifact metadata, not a path "
+            "suffix); fail closed."
+        )
+
+    if env_override:
+        path = Path(env_override).expanduser()
+        if not path.is_absolute():
+            path = strategy_dir / path
+        path = path.resolve()
+        if not path.exists():
+            raise ValueError(
+                f"RENQUANT_STRATEGY_CONFIG points at a missing prod config: {path}"
+            )
+        ref_kind = _normalize_kind(
+            ((json.loads(path.read_text()).get("ranking") or {})
+             .get("panel_scoring") or {}).get("kind")
+        )
+        if ref_kind != kind:
+            raise ValueError(
+                "RENQUANT_STRATEGY_CONFIG selects a production reference whose "
+                f"scorer kind ({ref_kind!r}) does not match the candidate kind "
+                f"({kind!r}); refusing to compare a candidate against a "
+                "non-matching production reference. Fail closed."
+            )
+        return path
+
+    ref_name = PROD_REFERENCE_BY_KIND.get(kind)
+    if not ref_name:
+        raise ValueError(
+            f"no production reference config is registered for candidate kind "
+            f"{kind!r}; known kinds: {sorted(PROD_REFERENCE_BY_KIND)}. "
+            "Fail closed — a candidate cannot be promoted without a "
+            "kind-matched production reference."
+        )
+    ref_path = (strategy_dir / ref_name).resolve()
+    if not ref_path.exists():
+        raise ValueError(
+            f"production reference for kind {kind!r} not found: {ref_path}"
+        )
+    return ref_path
+
+
 def _first_manifest_artifact(manifest_path: Path) -> str | None:
     if not manifest_path.exists():
         return None
@@ -133,6 +245,16 @@ def build_wf_config_from_prod(
 ) -> dict[str, Any]:
     """Return a WF eval config with production decision semantics.
 
+    The derived config inherits ``ranking.panel_scoring.kind`` UNCHANGED from
+    ``prod_config``. The builder never mutates the scorer kind to match a
+    candidate artifact — doing so would convert a genuine prod-vs-candidate
+    mismatch into a passing config and defeat the parity guard. To evaluate a
+    non-PatchTST candidate, the caller must pass the kind-matched production
+    reference (see ``select_prod_reference_for_candidate``): a GBDT/xgb
+    candidate is derived from the GBDT/shadow config, so the inherited kind is
+    already ``xgb`` and parity passes; a GBDT candidate handed the PatchTST
+    primary STILL fails parity, as it should.
+
     Allowed non-semantic differences:
       - ``walkforward`` manifest dispatch.
       - ``ranking.panel_scoring.artifact_path`` placeholder for diagnostics;
@@ -175,6 +297,10 @@ def build_wf_config_from_prod(
     manifest_abs = _resolve_strategy_path(manifest_path, strategy_dir)
     placeholder = _first_manifest_artifact(manifest_abs) if manifest_abs else None
     if placeholder:
+        # Only the diagnostic artifact_path placeholder is overwritten;
+        # ``ranking.panel_scoring.kind`` is inherited unchanged from prod_config
+        # (see docstring). Parity stays meaningful: a candidate is promotable
+        # only when derived from its kind-matched production reference.
         _set_path(cfg, "ranking.panel_scoring.artifact_path", placeholder)
 
     # Preserve point-in-time calibration artifact paths from the WF base config.
