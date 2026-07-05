@@ -25,8 +25,10 @@ from pathlib import Path
 
 import pytest
 
+from renquant_backtesting.wf_gate import wf_config_builder
 from renquant_backtesting.wf_gate.wf_config_builder import (
     build_wf_config_from_prod,
+    main as wf_config_builder_main,
     select_prod_reference_for_candidate,
 )
 from renquant_backtesting.wf_gate.wf_config_parity import evaluate_wf_config_parity
@@ -259,3 +261,82 @@ def test_gbdt_candidate_against_selected_gbdt_reference_passes(tmp_path: Path) -
         strategy_dir=tmp_path,
     )
     assert result["passed"] is True, result["issues"]
+
+
+# ── end-to-end: main() survives a swapped lineup ─────────────────────────────
+
+
+def test_main_survives_swapped_lineup_without_explicit_prod_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapped-lineup scenario, driven through the REAL CLI entrypoint.
+
+    Candidate kind=xgb, primary config kind=hf_patchtst, shadow config
+    kind=xgb. Before the fix, ``main()`` used ``--prod-config`` directly
+    (defaulting to ``strategy_config.json``, the PatchTST primary) and never
+    called ``select_prod_reference_for_candidate`` — so the parity check ran
+    against a mismatched reference regardless of the candidate's declared
+    kind. This drives ``main()`` itself (not the selector in isolation) with
+    NO ``--prod-config`` flag, proving the wiring — not just the function —
+    resolves to the kind-matched shadow config.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RENQUANT_STRATEGY_CONFIG", raising=False)
+    monkeypatch.setattr(wf_config_builder, "STRATEGY_DIR", tmp_path)
+
+    _seed_references(tmp_path)
+    # Point the shadow (xgb) reference's artifact_path at the candidate so a
+    # correctly-selected reference produces a passing (not just non-crashing)
+    # parity result — mirrors test_gbdt_candidate_against_selected_gbdt_reference_passes.
+    gbdt_artifact = _gbdt_artifact(tmp_path / "artifacts" / "sim" / "panel-ltr.json", ["a", "b"])
+    shadow_path = tmp_path / "strategy_config.shadow.json"
+    shadow_cfg = json.loads(shadow_path.read_text())
+    shadow_cfg["ranking"]["panel_scoring"]["artifact_path"] = str(gbdt_artifact)
+    _write_json(shadow_path, shadow_cfg)
+
+    manifest = tmp_path / "artifacts" / "wf" / "manifest.json"
+    _write_manifest(manifest, str(gbdt_artifact.relative_to(tmp_path)))
+    base_path = tmp_path / "base_wf_config.json"
+    _write_json(base_path, {"walkforward": {"manifest_path": str(manifest.relative_to(tmp_path))}})
+    out_path = tmp_path / "wf_config.json"
+
+    exit_code = wf_config_builder_main([
+        "--base-wf-config", str(base_path),
+        "--out", str(out_path),
+        "--candidate-artifact", str(gbdt_artifact),
+        # deliberately NO --prod-config: this is the lineup-swap-survives case
+    ])
+
+    assert exit_code == 0
+    derived = json.loads(out_path.read_text())
+    assert derived["ranking"]["panel_scoring"]["kind"] == "xgb", (
+        "main() derived from the PatchTST primary instead of the xgb shadow "
+        "reference — the selector is not wired into the CLI path"
+    )
+
+
+def test_main_explicit_prod_config_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit --prod-config that mismatches the candidate kind must
+    still fail closed, exactly like select_prod_reference_for_candidate's own
+    env_override validation — an explicit override cannot smuggle a wrong
+    reference past parity either."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RENQUANT_STRATEGY_CONFIG", raising=False)
+    _seed_references(tmp_path)
+
+    gbdt_artifact = _gbdt_artifact(tmp_path / "artifacts" / "sim" / "panel-ltr.json", ["a", "b"])
+    manifest = tmp_path / "artifacts" / "wf" / "manifest.json"
+    _write_manifest(manifest, str(gbdt_artifact.relative_to(tmp_path)))
+    base_path = tmp_path / "base_wf_config.json"
+    _write_json(base_path, {"walkforward": {"manifest_path": str(manifest.relative_to(tmp_path))}})
+    out_path = tmp_path / "wf_config.json"
+
+    with pytest.raises(SystemExit):
+        wf_config_builder_main([
+            "--base-wf-config", str(base_path),
+            "--out", str(out_path),
+            "--candidate-artifact", str(gbdt_artifact),
+            "--prod-config", str(tmp_path / "strategy_config.json"),  # PatchTST, mismatched
+        ])
