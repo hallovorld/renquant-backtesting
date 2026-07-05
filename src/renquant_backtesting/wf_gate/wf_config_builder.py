@@ -22,6 +22,11 @@ try:
 except ImportError:
     from wf_config_parity import evaluate_wf_config_parity
 
+try:
+    from .artifact_loader import load_artifact_payload
+except ImportError:
+    from artifact_loader import load_artifact_payload
+
 
 def _resolve_repo_root() -> Path:
     env_root = os.environ.get("RENQUANT_REPO_ROOT")
@@ -83,16 +88,33 @@ _PATCHTST_KIND = "hf_patchtst"
 _GBDT_KIND = "xgb"
 _PATCHTST_KINDS = {"hf_patchtst", "patchtst", "patchtst_panel"}
 
-# Production reference config filenames, by scorer kind. A candidate must be
-# compared against the production semantics that actually run that scorer: a
-# GBDT/xgb candidate against the GBDT/shadow config, a PatchTST candidate
-# against the PatchTST primary. Selecting the matched reference (rather than
-# mutating ``panel_scoring.kind``) keeps a genuine prod-vs-candidate mismatch
-# failing parity, as it should.
-PROD_REFERENCE_BY_KIND: dict[str, str] = {
-    _PATCHTST_KIND: "strategy_config.json",
-    _GBDT_KIND: "strategy_config.shadow.json",
-}
+_PROD_CONFIG_NAMES = ("strategy_config.json", "strategy_config.shadow.json")
+
+
+def _resolve_prod_reference_by_kind(
+    strategy_dir: Path = STRATEGY_DIR,
+) -> dict[str, str]:
+    """Scan production configs and map scorer kind → config filename.
+
+    Survives primary/shadow lineup swaps without code changes: the mapping is
+    derived from each config's declared ``ranking.panel_scoring.kind``, not
+    from a hardcoded filename assumption.
+    """
+    mapping: dict[str, str] = {}
+    for name in _PROD_CONFIG_NAMES:
+        path = strategy_dir / name
+        if not path.exists():
+            continue
+        try:
+            cfg = json.loads(path.read_text())
+            kind = _normalize_kind(
+                ((cfg.get("ranking") or {}).get("panel_scoring") or {}).get("kind")
+            )
+            if kind and kind not in mapping:
+                mapping[kind] = name
+        except Exception:
+            continue
+    return mapping
 
 
 def _normalize_kind(kind: Any) -> str:
@@ -135,7 +157,7 @@ def select_prod_reference_for_candidate(
          declared ``panel_scoring.kind`` is validated to match the candidate
          kind; a mismatch FAILS CLOSED so the env cannot smuggle a wrong
          reference past parity.
-      2. the built-in ``PROD_REFERENCE_BY_KIND`` mapping for known kinds.
+      2. ``_resolve_prod_reference_by_kind`` scans both configs by declared kind.
 
     Raises ``ValueError`` (fail closed) when the candidate kind is unknown/empty
     or no matched production reference exists. The caller must treat that as a
@@ -171,11 +193,12 @@ def select_prod_reference_for_candidate(
             )
         return path
 
-    ref_name = PROD_REFERENCE_BY_KIND.get(kind)
+    by_kind = _resolve_prod_reference_by_kind(strategy_dir)
+    ref_name = by_kind.get(kind)
     if not ref_name:
         raise ValueError(
             f"no production reference config is registered for candidate kind "
-            f"{kind!r}; known kinds: {sorted(PROD_REFERENCE_BY_KIND)}. "
+            f"{kind!r}; scanned configs declared kinds: {by_kind}. "
             "Fail closed — a candidate cannot be promoted without a "
             "kind-matched production reference."
         )
@@ -360,9 +383,16 @@ def build_wf_config_from_prod(
     return cfg
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prod-config", default=str(STRATEGY_DIR / "strategy_config.json"))
+    parser.add_argument(
+        "--prod-config", default=None,
+        help="Explicit production reference override. If omitted and "
+             "--candidate-artifact is given, the kind-matched reference is "
+             "selected automatically via select_prod_reference_for_candidate "
+             "(the same contract runner.main() and pipelines.py use) — this "
+             "is what lets the builder survive a primary/shadow lineup swap. "
+             "If omitted with no candidate, defaults to strategy_config.json.")
     parser.add_argument("--base-wf-config", required=True,
                         help="Existing WF config to borrow manifest/calibrator paths from.")
     parser.add_argument("--out", required=True,
@@ -374,11 +404,41 @@ def main() -> int:
                              "overrides from the base WF config. This is for "
                              "A/B exploration and will normally fail prod/WF "
                              "parity until production config matches.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    prod_path = Path(args.prod_config)
-    if not prod_path.is_absolute():
-        prod_path = STRATEGY_DIR / prod_path
+    candidate = Path(args.candidate_artifact) if args.candidate_artifact else None
+    candidate_kind = load_artifact_payload(candidate).get("kind") if candidate else None
+
+    if args.prod_config is not None:
+        prod_path = Path(args.prod_config)
+        if not prod_path.is_absolute():
+            prod_path = STRATEGY_DIR / prod_path
+        if candidate_kind:
+            # Explicit override still must not smuggle a mismatched reference
+            # past parity — same fail-closed validation
+            # select_prod_reference_for_candidate applies to its own
+            # RENQUANT_STRATEGY_CONFIG env_override.
+            ref_kind = _normalize_kind(
+                ((json.loads(prod_path.read_text()).get("ranking") or {})
+                 .get("panel_scoring") or {}).get("kind")
+            )
+            if ref_kind != _normalize_kind(candidate_kind):
+                raise SystemExit(
+                    "--prod-config explicitly selects a reference whose "
+                    f"scorer kind ({ref_kind!r}) does not match the candidate "
+                    f"kind ({candidate_kind!r}); refusing to compare a "
+                    "candidate against a non-matching production reference. "
+                    "Fail closed."
+                )
+    elif candidate_kind:
+        prod_path = select_prod_reference_for_candidate(
+            candidate_kind,
+            strategy_dir=STRATEGY_DIR,
+            env_override=os.environ.get("RENQUANT_STRATEGY_CONFIG"),
+        )
+    else:
+        prod_path = STRATEGY_DIR / "strategy_config.json"
+
     base_path = Path(args.base_wf_config)
     if not base_path.is_absolute():
         base_path = STRATEGY_DIR / base_path
@@ -402,7 +462,6 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n")
 
-    candidate = Path(args.candidate_artifact) if args.candidate_artifact else None
     result = evaluate_wf_config_parity(
         prod_path,
         out_path,
