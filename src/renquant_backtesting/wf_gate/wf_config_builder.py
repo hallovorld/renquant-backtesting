@@ -83,16 +83,33 @@ _PATCHTST_KIND = "hf_patchtst"
 _GBDT_KIND = "xgb"
 _PATCHTST_KINDS = {"hf_patchtst", "patchtst", "patchtst_panel"}
 
-# Production reference config filenames, by scorer kind. A candidate must be
-# compared against the production semantics that actually run that scorer: a
-# GBDT/xgb candidate against the GBDT/shadow config, a PatchTST candidate
-# against the PatchTST primary. Selecting the matched reference (rather than
-# mutating ``panel_scoring.kind``) keeps a genuine prod-vs-candidate mismatch
-# failing parity, as it should.
-PROD_REFERENCE_BY_KIND: dict[str, str] = {
-    _PATCHTST_KIND: "strategy_config.json",
-    _GBDT_KIND: "strategy_config.shadow.json",
-}
+_PROD_CONFIG_NAMES = ("strategy_config.json", "strategy_config.shadow.json")
+
+
+def _resolve_prod_reference_by_kind(
+    strategy_dir: Path = STRATEGY_DIR,
+) -> dict[str, str]:
+    """Scan production configs and map scorer kind → config filename.
+
+    Survives primary/shadow lineup swaps without code changes: the mapping is
+    derived from each config's declared ``ranking.panel_scoring.kind``, not
+    from a hardcoded filename assumption.
+    """
+    mapping: dict[str, str] = {}
+    for name in _PROD_CONFIG_NAMES:
+        path = strategy_dir / name
+        if not path.exists():
+            continue
+        try:
+            cfg = json.loads(path.read_text())
+            kind = _normalize_kind(
+                ((cfg.get("ranking") or {}).get("panel_scoring") or {}).get("kind")
+            )
+            if kind and kind not in mapping:
+                mapping[kind] = name
+        except Exception:
+            continue
+    return mapping
 
 
 def _normalize_kind(kind: Any) -> str:
@@ -135,7 +152,7 @@ def select_prod_reference_for_candidate(
          declared ``panel_scoring.kind`` is validated to match the candidate
          kind; a mismatch FAILS CLOSED so the env cannot smuggle a wrong
          reference past parity.
-      2. the built-in ``PROD_REFERENCE_BY_KIND`` mapping for known kinds.
+      2. ``_resolve_prod_reference_by_kind`` scans both configs by declared kind.
 
     Raises ``ValueError`` (fail closed) when the candidate kind is unknown/empty
     or no matched production reference exists. The caller must treat that as a
@@ -171,11 +188,12 @@ def select_prod_reference_for_candidate(
             )
         return path
 
-    ref_name = PROD_REFERENCE_BY_KIND.get(kind)
+    by_kind = _resolve_prod_reference_by_kind(strategy_dir)
+    ref_name = by_kind.get(kind)
     if not ref_name:
         raise ValueError(
             f"no production reference config is registered for candidate kind "
-            f"{kind!r}; known kinds: {sorted(PROD_REFERENCE_BY_KIND)}. "
+            f"{kind!r}; scanned configs declared kinds: {by_kind}. "
             "Fail closed — a candidate cannot be promoted without a "
             "kind-matched production reference."
         )
