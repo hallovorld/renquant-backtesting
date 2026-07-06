@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **PR:** #70
-**Status:** Design RFC — round 2, addressing Codex review
+**Status:** Design RFC — round 3, addressing Codex review
 
 ## What
 
@@ -71,3 +71,39 @@ EVIDENCE:
 NEXT: implement `_check_incumbent_regression()` per the revised design,
 add `wf_3cut_apy_std` computation, add the unit/integration/gate-parity
 tests listed in the revised Test Plan.
+
+## Round 3 (codex review)
+
+STATUS: fixed (RFC revised)
+WHAT: codex confirmed round 2's paired per-cut framing and admissible-
+incumbent policy address most of round-1's gaps, but elevated the round-1
+"known limitation" (mutable `wf_gate_metadata` on the active artifact) to an
+actual blocker: comparing against a record that a later diagnostic run can
+silently overwrite is a governance bug, not an observability gap, and
+cannot stay a deferred follow-up if the gate is to be implemented.
+WHY-DIR: the hard gate's entire trustworthiness depends on its comparator
+source being stable — a mutable source means the gate could compare against
+evidence that was never the incumbent's actual promotion-time evidence.
+EVIDENCE: added "Phase 0" to the RFC — a concrete append-only acceptance-log
+design (`_acceptance_log/promotions.jsonl`, written only by `promote()`
+after `_check_wf_gate()` validates the staging artifact, read by
+`_load_incumbent_wf_meta()` instead of the mutable active file). Verified
+the root cause directly in code: `runner.py::main()` (line ~3512) writes
+`wf_gate_metadata` to whatever `--artifact` path is given with no
+distinction between staging and active paths, while `model_acceptance.py
+::promote()` (line 798) is the one function called exactly once per genuine
+promotion — the correct, existing hook point. Also found and documented (via
+`assert_artifact_gated()`'s own docstring, referencing a real 2026-06-05
+PatchTST incident) a real scope boundary: a `strategy_config.json` direct-
+edit promotion bypasses `promote()` entirely and would not seed a log entry
+either — noted as an explicit known gap (falls back safely to
+not-admissible, not silently trusted), not silently ignored. Added explicit
+sequencing language: the hard incumbent-regression gate must not activate
+until Phase 0 has landed AND at least one genuine `promote()` has occurred
+after it lands. Updated the Test Plan with Phase-0-specific tests, including
+one that directly proves a diagnostic `runner.py main()` run against
+`--artifact <active_path>` leaves `promotions.jsonl` untouched.
+NEXT: implement Phase 0 (`promote()` write path,
+`_load_incumbent_wf_meta()` read path) before implementing
+`_check_incumbent_regression()` itself — Phase 0 is now a hard prerequisite,
+not a parallel or follow-up task.

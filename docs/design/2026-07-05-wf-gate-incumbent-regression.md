@@ -1,10 +1,14 @@
 # WF Gate v2.1: Incumbent Regression Check Replaces SPY Benchmark Gate
 
 **Date:** 2026-07-05
-**Status:** RFC (revised — round 2, addressing Codex review)
+**Status:** RFC (revised — round 3, addressing Codex review). **The hard
+incumbent-regression gate MUST NOT activate until Phase 0 below has landed
+and produced at least one genuine acceptance-log entry** — see "Phase 0" and
+"Sequencing" below.
 **Author:** Claude (operator-directed)
 **Repo:** renquant-backtesting
-**Module:** `src/renquant_backtesting/wf_gate/runner.py`
+**Module:** `src/renquant_backtesting/wf_gate/runner.py`,
+`src/renquant_backtesting/forensics/model_acceptance.py`
 
 ## Problem
 
@@ -44,9 +48,27 @@ currently has (within-run cut dispersion) while being explicit that this is
 n=1 and provisional, with a concrete validation trigger; (c) replaces the
 mean-only incumbent comparison with a **paired per-cut** check using the
 fixed `CUTS` calendar windows, so a candidate that wins on average but loses
-badly on one cut is caught. It also surfaces a genuine, previously
+badly on one cut is caught. It also surfaced a genuine, previously
 unaddressed data-integrity gap in the proposed mechanism (see "Known
 limitations" below) discovered while investigating (b).
+
+## Round-3 revision summary
+
+Codex's round-2 review confirmed the paired per-cut framing and admissible-
+incumbent policy address most of round-1's gaps, but elevated the round-1
+"known limitation" — the active artifact's `wf_gate_metadata` being mutable
+and silently overwritable by a later diagnostic gate run — from a limitation
+to an **actual blocker**: comparing against a mutable record is a governance
+bug, not just an observability gap, because the hard gate could be comparing
+against evidence that was never the incumbent's actual promotion-time
+evidence.
+
+This revision adds **Phase 0** below: a concrete, append-only acceptance-log
+design that stabilizes the comparator source at its one genuine write point
+(`promote()`), so no later diagnostic run can ever affect what the hard gate
+reads. The incumbent-regression gate (Phases 1+, i.e. everything already
+designed above) is unchanged in its own logic, but **explicitly cannot
+activate as a hard gate until Phase 0 has landed** — see "Sequencing" below.
 
 ## Design
 
@@ -120,19 +142,20 @@ model is promoted, it becomes the first admissible incumbent and the
 paired-cut regression check activates against it.
 
 **Current state, verified directly against the live active artifact** (read
-2026-07-05; see "Known limitations" for why this can't be taken as a
-permanent historical record): `artifacts/prod/panel-ltr.alpha158_fund.json`
-currently shows `wf_gate_metadata.diagnostic_only = False`,
-`skipped_required_gates = []`, but `passed = False` (it fails on
-`benchmark_ok`, not on a skipped gate) and its `wf_3cut_sharpe_mean = 0.776`
-— i.e. these are the **fresh retrain's own numbers**, not the original
-2026-06-21 promotion's. This is direct evidence of the data-integrity gap
-below: the file's stamped metadata does not reliably reflect what justified
-its own promotion, because at least one later diagnostic gate run has
-already overwritten it in place. Under the policy above, whether today's
-incumbent is admissible cannot be verified from this file alone right now —
-treat it as **not admissible** until a `promote()`-time acceptance-history
-record exists (see below), and rely on `absolute_ok` alone in the interim.
+2026-07-05; see "Phase 0" below for why this can't be taken as a permanent
+historical record): `artifacts/prod/panel-ltr.alpha158_fund.json` currently
+shows `wf_gate_metadata.diagnostic_only = False`, `skipped_required_gates =
+[]`, but `passed = False` (it fails on `benchmark_ok`, not on a skipped gate)
+and its `wf_3cut_sharpe_mean = 0.776` — i.e. these are the **fresh retrain's
+own numbers**, not the original 2026-06-21 promotion's. This is direct
+evidence of the exact governance bug Phase 0 exists to close: the file's
+stamped metadata does not reliably reflect what justified its own promotion,
+because at least one later diagnostic gate run has already overwritten it in
+place. This is not a hypothetical risk — it already happened to the artifact
+currently in production. Per Phase 0's design, today's incumbent has no
+`promotions.jsonl` entry and is therefore **not admissible**; the gate relies
+on `absolute_ok` alone until this artifact (or its successor) is next
+genuinely promoted through `promote()`.
 
 ### Regime protection replacement (Codex points 1 and 4): paired per-cut check
 
@@ -234,14 +257,15 @@ a specific promote decision can see the values were not yet evidence-backed.
 
 ### Loading the incumbent
 
-The incumbent is the **current active production artifact**:
-`STRATEGY_DIR / "artifacts/prod/panel-ltr.alpha158_fund.json"`
-
-This path is already known in `runner.py` (line 918 fallback). The function
-reads `wf_gate_metadata` (`diagnostic_only`, `passed`, `cuts`) from the
-active artifact. If the file doesn't exist, or fails the admissibility
-policy above, the check falls back to `absolute_ok` alone (see policy
-section — not a silent unconditional auto-pass).
+**Superseded by Phase 0 below.** The incumbent's evidence is loaded from the
+append-only acceptance log (`_load_incumbent_wf_meta()` reads the latest
+`active_path`-matching entry from `_acceptance_log/promotions.jsonl`), **not**
+from `wf_gate_metadata` on the mutable active artifact file directly. If no
+acceptance-log entry exists for the current active artifact (e.g. it was
+promoted before Phase 0 landed, or promoted via a `strategy_config.json`
+bypass — see Phase 0's scope note), the incumbent is treated as **not
+admissible**, exactly like a missing/unreadable file, and the check falls
+back to `absolute_ok` alone.
 
 ### Changes to `main()` (line ~3290)
 
@@ -306,27 +330,129 @@ Keep `GATE_VERSION = 2` (the structural gate didn't change; threshold semantics
 did). Add a `gate_policy_version` field = `"v2.1-incumbent"` to the stamped
 metadata for forensic traceability.
 
+## Phase 0: stabilize the incumbent comparator source (REQUIRED prerequisite)
+
+Codex round 2: comparing against a mutable record is a **governance bug**,
+not an observability gap, so this cannot stay a documented limitation — it
+must be closed before the hard gate can read from the active artifact at all.
+
+### Root cause, verified directly in code
+
+`runner.py::main()` (line ~3512-3518) unconditionally does:
+
+```python
+md = artifact.get("metadata") or {}
+md["wf_gate_metadata"] = wf_meta
+artifact["metadata"] = md
+written = _write_artifact_payload(artifact_path, artifact)
+```
+
+for **whatever path `--artifact` points to** — there is no distinction
+between "this is a staging artifact about to be gated for promotion" and
+"this is the live active artifact being diagnostically re-checked." Every
+invocation of the umbrella's `scripts/run_wf_gate.py --artifact <active_path>`
+(a valid, supported diagnostic use — re-checking the currently-active model,
+e.g. after a data refresh) overwrites the active file's `wf_gate_metadata` in
+place, including the fields (`wf_3cut_sharpe_mean`, per-cut arrays, `passed`)
+that a hard incumbent-regression gate would need to trust as "what actually
+justified this model's promotion." This is exactly what happened to the
+current active artifact between its 2026-06-21 promotion and 2026-07-05: a
+diagnostic run replaced the promotion-time evidence with the fresh retrain's
+numbers, in the same file.
+
+By contrast, `model_acceptance.py::promote()` (line 798) is called **exactly
+once per genuine promotion** — the staging→active atomic swap — and already
+validates `_check_wf_gate(data, staging_path)` (requiring `passed=True`) as
+a precondition. This is the one clean, existing hook point where a durable
+record can be captured.
+
+### Design: append-only acceptance log
+
+Add one file, written only by `promote()`:
+
+- **Path:** `active_path.parent / "_acceptance_log" / "promotions.jsonl"` —
+  this directory already exists as a convention in this file (`reject()`
+  archives rejected artifacts to `active_path.parent / "_acceptance_log"`,
+  line 890); `promotions.jsonl` is a new sibling file in the same directory,
+  not a new convention.
+- **Write path (`promote()`, after the atomic active-swap succeeds, before
+  returning):** append one JSON line:
+  ```python
+  {
+      "promoted_at": <UTC ISO-8601 timestamp of this promote() call>,
+      "active_path": str(active_path),
+      "staging_source": str(staging_path),
+      "wf_gate_metadata": <the exact dict from `data["metadata"]["wf_gate_metadata"]`
+                            that `_check_wf_gate` just validated — i.e. the
+                            staging artifact's metadata AS VALIDATED, not a
+                            re-read of the post-swap active file>,
+  }
+  ```
+  Append-only (`open(path, "a")`), never rewritten or truncated. This makes
+  the record structurally immune to a later diagnostic `runner.py main()`
+  invocation, because that code path never calls `promote()` and never
+  touches this file.
+- **Read path (`_load_incumbent_wf_meta()` in `runner.py`):** read
+  `promotions.jsonl` line-by-line (or tail it — the file is expected to stay
+  small, one promotion at a time, at most a handful of KB per entry), filter
+  to entries whose `active_path` matches the current active-artifact path,
+  and take the **last matching entry** as the incumbent's `wf_gate_metadata`.
+  If the file doesn't exist, or has no entry matching the current
+  `active_path`, the incumbent is **not admissible** (same as today's
+  missing-file case) — the gate does **not** fall back to reading the
+  mutable active-file metadata directly, since that's precisely the
+  unstable source this design replaces.
+- **Migration for the current active artifact:** the artifact currently in
+  production was promoted (2026-06-21) before this log exists, so it has no
+  entry and will correctly be treated as not-admissible until it is next
+  genuinely re-promoted (which writes the first entry) or until an
+  operator-run one-time backfill script seeds a single entry from the
+  `.previous.json` rotation history if that's still on disk with credible
+  metadata (a fast-follow, not required to land Phase 0 itself — the
+  `absolute_ok`-only fallback already covers this gap safely).
+
+### Known scope boundary (not fully closed by Phase 0 alone)
+
+`assert_artifact_gated()`'s own docstring documents a real prior incident:
+the 2026-06-05 PatchTST promotion reached production via a **direct
+`strategy_config.json` scorer-pointer edit**, bypassing `promote()` entirely.
+An artifact activated that way would never get a `promotions.jsonl` entry
+either — Phase 0 closes the specific bug Codex flagged (diagnostic-run
+overwrite of an artifact that WAS promoted via `promote()`), but does not by
+itself retroactively cover a `promote()`-bypass activation. Recommended
+fast-follow (out of scope for Phase 0): wherever `assert_artifact_gated()` is
+already invoked as a pre-write guard at the config-write boundary, also
+append a `promotions.jsonl` entry there, so both promotion paths are
+captured. Until that lands, an artifact activated via the bypass path is
+correctly treated as not-admissible by the same "no matching log entry"
+rule above — safe by default, not silently trusted.
+
+### Sequencing
+
+The hard incumbent-regression gate (everything under "Design" above)
+**must not activate** — i.e. `_compute_overall_pass()` must not gate on
+`incumbent_result["passed"]` in a way that can fail a promote — until:
+
+1. Phase 0 (the append-only log + read/write wiring) has landed and its
+   own tests (see Test Plan) pass, AND
+2. at least one genuine `promote()` call has occurred after Phase 0 landed,
+   seeding a real `promotions.jsonl` entry for the then-current active
+   artifact.
+
+Until both hold, `_check_incumbent_regression()` always finds no admissible
+incumbent (no log, or no matching entry) and the effective behavior is
+identical to `absolute_ok` alone — i.e. deploying the code in this RFC is
+safe immediately (it can't be stricter or more permissive than today until
+Phase 0 has actually produced history to compare against), but the
+regression-catching value of Phases 1+ only exists after Phase 0 has run
+at least once.
+
 ## Known limitations
 
-1. **Acceptance-record mutability (discovered during this revision).** The
-   active artifact's `wf_gate_metadata` is not a stable historical record of
-   *its own promotion decision* — any later invocation of
-   `run_wf_gate.py --artifact <active_path>` (e.g. a diagnostic or
-   validation run, as appears to have happened here on 2026-07-05) silently
-   overwrites it with that run's results. `promote()` itself copies the
-   whole staging file (including its metadata) into `active_path`, so the
-   metadata is correct *at promotion time*, but nothing prevents a
-   subsequent read-only-intent gate run from clobbering it afterward. This
-   is why "current state" above could not be verified as the *original*
-   2026-06-21 promotion's evidence. **Recommended follow-up (out of scope
-   for this RFC):** either (a) `run_wf_gate.py` should warn or refuse when
-   `--artifact` points directly at a known active/prod path outside of the
-   staging→promote flow, or (b) `promote()` should additionally append the
-   accepted `wf_gate_metadata` to a separate, append-only acceptance-history
-   log (e.g. a JSONL file or a `decision_ledger`-style table) that the
-   incumbent-regression check reads from instead of the mutable active file.
-   Until one of these lands, the admissibility check above is a best-effort
-   read of current file state, not a guaranteed audit trail.
+1. **Acceptance-record mutability — RESOLVED by Phase 0 above** (was:
+   round-1 limitation, elevated to blocker in round-2 review). See "Phase 0"
+   for the append-only-log design that replaces the mutable active-file
+   read.
 2. **Tolerances are provisional (n=1 anchor).** See "Tolerance justification"
    above — `apy_tolerance` in particular has no empirical anchor at all yet.
 3. **Cut-window alignment is a precondition, not a guarantee.** If `CUTS` is
@@ -334,6 +460,12 @@ metadata for forensic traceability.
    paired against a candidate evaluated under new ones; the check must
    detect and fall back (see `_check_incumbent_regression` docstring above),
    not silently compare mismatched windows.
+4. **Promote()-bypass activation paths are not covered by Phase 0 alone.**
+   See "Known scope boundary" under Phase 0 — a `strategy_config.json`
+   direct-edit promotion (as happened 2026-06-05) would not seed a log
+   entry either; correctly falls back to not-admissible, not silently
+   trusted, but the fast-follow (wiring `assert_artifact_gated()`'s call
+   site to also append) is not yet in scope.
 
 ## Backward Compatibility
 
@@ -345,17 +477,35 @@ metadata for forensic traceability.
 
 ## Test Plan
 
+### Phase 0 (must land and pass first — see "Sequencing")
+
+0. `promote()` appends exactly one well-formed JSON line to
+   `_acceptance_log/promotions.jsonl` per call, containing the staging
+   artifact's validated `wf_gate_metadata` (not a re-read of the post-swap
+   active file). Two consecutive promotions append two lines; the file is
+   never rewritten or truncated. A `runner.py main()` invocation with
+   `--artifact <active_path>` (the diagnostic-overwrite scenario Codex
+   flagged) must leave `promotions.jsonl` byte-for-byte unchanged — this is
+   the regression test that directly proves the governance bug is closed.
+   `_load_incumbent_wf_meta()` reads the last `active_path`-matching entry
+   and returns "not admissible" when the file is absent or has no matching
+   entry (covering both the pre-Phase-0 and the promote()-bypass cases from
+   "Known scope boundary").
+
+### Phases 1+ (the incumbent-regression gate itself — unchanged from round 2)
+
 1. Unit: `_check_incumbent_regression()` — no incumbent, incumbent not
    admissible (`diagnostic_only=True`) falls back to `absolute_ok` (not
    auto-pass), incumbent admissible + all 3 cuts better, incumbent
    admissible + exactly 2/3 cuts within tolerance (passes), incumbent
    admissible + only 1/3 cuts within tolerance (fails, catches the
    one-cut-blowup-hidden-by-mean case), cut-window mismatch (falls back).
-2. Integration: mock the active artifact path to inject a known incumbent
-   with per-cut data, both admissible and non-admissible cases.
+2. Integration: mock `promotions.jsonl` to inject a known incumbent entry
+   with per-cut data, both admissible and non-admissible cases — NOT the
+   active artifact's own metadata directly (that's the source Phase 0
+   replaces).
 3. Gate parity: replay the 2026-07-05 WF gate run and verify the same model
-   now PASSES *only if* the incumbent it's compared against is itself
-   admissible under the new policy — if not (current live state, per "Known
-   limitations"), verify it PASSES via the `absolute_ok`-only fallback
-   (mean Sharpe 0.776 >= 0.40, 3/3 cuts positive), not via a suspect
-   incumbent comparison.
+   now PASSES via the `absolute_ok`-only fallback (mean Sharpe 0.776 >= 0.40,
+   3/3 cuts positive) — since, per "Sequencing," no genuine `promotions.jsonl`
+   entry exists yet for the current incumbent, the paired-cut comparison
+   cannot activate and must not be exercised as if it had.
