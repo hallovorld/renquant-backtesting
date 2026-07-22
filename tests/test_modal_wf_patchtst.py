@@ -235,8 +235,49 @@ def test_build_plan_full_and_staged():
 
 
 # ── Dispatch + collection + manifest + provenance (end to end, mocked) ───────
-def _canned_fold_result(cutoff, trained, effective):
+def _canned_sidecar(cutoff, trained, effective, *, sidecar_cutoff=None):
+    """A metadata sidecar faithful to the renquant-model hf_trainer contract:
+    ``training_contract`` carries the requested cutoff (``train_cutoff_date``),
+    ``trained_date`` + ``effective_train_cutoff_date``, plus provenance/recipe
+    (``dataset`` + ``hyperparameters``)."""
+    return json.dumps({"training_contract": {
+        "contract_version": 1,
+        "trained_date": trained,
+        "effective_train_cutoff_date": effective,
+        "train_cutoff_date": sidecar_cutoff if sidecar_cutoff is not None else cutoff,
+        "dataset": "data/transformer_v4_wl200_clean.parquet",
+        "hyperparameters": {"seq_len": 32, "epochs": 5, "lr": 3e-4},
+    }})
+
+
+def _canned_fold_result(cutoff, trained, effective, *, with_model=True,
+                        with_sidecar=True, with_calibrator=True,
+                        sidecar_cutoff=None):
+    """A worker ``ok`` result. Flags drop individual payloads / corrupt the
+    sidecar cutoff so tests can exercise the fail-closed promotion gate."""
     pt_bytes = b"PYTORCH-FAKE-STATE-DICT"
+    entry = {
+        "cutoff_date": cutoff,
+        "trained_date": trained,
+        "artifact_uri": f"/data/backtesting/renquant_104/artifacts/"
+                        f"walkforward_patchtst/{cutoff}/"
+                        f"hf_patchtst_all_seed44_model.pt",
+        "lookahead_days": 60,
+        "effective_train_cutoff_date": effective,
+    }
+    if with_calibrator:
+        entry["calibrator_uri"] = \
+            f"/data/.../{cutoff}/hf_patchtst-calibration.json"
+    artifacts = {}
+    if with_model:
+        artifacts["model_pt_b64gz"] = base64.b64encode(
+            gzip.compress(pt_bytes)).decode()
+    if with_sidecar:
+        artifacts["sidecar_json"] = _canned_sidecar(
+            cutoff, trained, effective, sidecar_cutoff=sidecar_cutoff)
+    if with_calibrator:
+        artifacts["calibrator_json"] = json.dumps(
+            {"method": "platt", "a": 1.0, "b": 0.0})
     return json.dumps({
         "ok": True,
         "cutoff_date": cutoff,
@@ -246,23 +287,8 @@ def _canned_fold_result(cutoff, trained, effective):
         "device": "cuda",
         "elapsed_seconds": 42.0,
         "result_checksum": "sha256:abc123",
-        "entry": {
-            "cutoff_date": cutoff,
-            "trained_date": trained,
-            "artifact_uri": f"/data/backtesting/renquant_104/artifacts/"
-                            f"walkforward_patchtst/{cutoff}/"
-                            f"hf_patchtst_all_seed44_model.pt",
-            "lookahead_days": 60,
-            "calibrator_uri": f"/data/.../{cutoff}/hf_patchtst-calibration.json",
-            "effective_train_cutoff_date": effective,
-        },
-        "artifacts": {
-            "model_pt_b64gz": base64.b64encode(gzip.compress(pt_bytes)).decode(),
-            "sidecar_json": json.dumps({"training_contract": {
-                "trained_date": trained,
-                "effective_train_cutoff_date": effective}}),
-            "calibrator_json": json.dumps({"method": "platt", "a": 1.0, "b": 0.0}),
-        },
+        "entry": entry,
+        "artifacts": artifacts,
     })
 
 
@@ -361,6 +387,132 @@ def test_dispatch_map_exception_is_captured(monkeypatch, tmp_path):
     got = ex.dispatch_folds(plan, timeout_s=60, retries=0, volume_commit_id=None)
     assert len(got) == 1 and got[0]["ok"] is False
     assert "pod OOM" in got[0]["error"]
+
+
+# ── Fail-closed promotion gate (codex #76 CR) ────────────────────────────────
+def _collect_single(monkeypatch, tmp_path, *canned, skip_calibrators=False):
+    """Dispatch the given canned fold(s) and collect them under ``tmp_path``.
+
+    Returns the ``collect_and_write`` output dict (carries provenance_obj).
+    """
+    _install_fake_modal(monkeypatch, map_results=list(canned))
+    plan = ex.build_plan(_default_args(staged=len(canned),
+                                       skip_calibrators=skip_calibrators))
+    got = ex.dispatch_folds(plan, timeout_s=60, retries=0, volume_commit_id=None)
+    return ex.collect_and_write(
+        plan, got, repo_root=tmp_path, code_heads={},
+        staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None})
+
+
+def test_all_payloads_valid_is_promotion_ready(monkeypatch, tmp_path):
+    # Happy path: every requested fold has a non-empty model + valid sidecar
+    # (cutoff agrees, provenance/recipe present) + a valid calibrator.
+    out = _collect_single(
+        monkeypatch, tmp_path,
+        _canned_fold_result("2026-02-09", "2026-04-10", "2026-01-12"),
+        _canned_fold_result("2026-03-02", "2026-05-01", "2026-02-02"))
+    prov = out["provenance_obj"]
+    assert out["promotion_ready"] is True
+    assert prov["promotion_ready"] is True
+    assert prov["quarantined"] is False
+    assert prov["n_folds_promotable"] == 2
+    assert prov["promotion_gate"]["quarantine_reasons"] == []
+    assert all(f["promotable"] for f in prov["folds"])
+
+
+def test_missing_model_pt_is_quarantined(monkeypatch, tmp_path):
+    # Worker reports ok but omits the model .pt blob → nothing materialises.
+    out = _collect_single(
+        monkeypatch, tmp_path,
+        _canned_fold_result("2026-03-02", "2026-05-01", "2026-02-02",
+                            with_model=False))
+    prov = out["provenance_obj"]
+    assert out["promotion_ready"] is False
+    assert prov["promotion_ready"] is False
+    assert prov["quarantined"] is True
+    assert prov["n_folds_promotable"] == 0
+    assert "model_pt_missing" in prov["promotion_gate"]["quarantine_reasons"]
+    # No phantom .pt referenced in a manifest.
+    assert out["n_folds"] == 0
+
+
+def test_missing_sidecar_is_quarantined(monkeypatch, tmp_path):
+    out = _collect_single(
+        monkeypatch, tmp_path,
+        _canned_fold_result("2026-03-02", "2026-05-01", "2026-02-02",
+                            with_sidecar=False))
+    prov = out["provenance_obj"]
+    assert out["promotion_ready"] is False
+    assert prov["quarantined"] is True
+    assert "sidecar_missing" in prov["promotion_gate"]["quarantine_reasons"]
+    # Model still materialised (quarantined) → manifest still written.
+    assert out["n_folds"] == 1
+
+
+def test_wrong_cutoff_sidecar_is_quarantined(monkeypatch, tmp_path):
+    # Sidecar's train_cutoff_date does NOT agree with the requested fold.
+    out = _collect_single(
+        monkeypatch, tmp_path,
+        _canned_fold_result("2026-03-02", "2026-05-01", "2026-02-02",
+                            sidecar_cutoff="2020-01-01"))
+    prov = out["provenance_obj"]
+    assert out["promotion_ready"] is False
+    assert prov["quarantined"] is True
+    reasons = prov["promotion_gate"]["quarantine_reasons"]
+    assert any(r.startswith("sidecar_cutoff_mismatch") for r in reasons)
+    assert out["n_folds"] == 1  # model materialised, manifest still written
+
+
+def test_missing_calibrator_is_quarantined(monkeypatch, tmp_path):
+    out = _collect_single(
+        monkeypatch, tmp_path,
+        _canned_fold_result("2026-03-02", "2026-05-01", "2026-02-02",
+                            with_calibrator=False))
+    prov = out["provenance_obj"]
+    assert out["promotion_ready"] is False
+    assert prov["quarantined"] is True
+    assert "calibrator_missing" in prov["promotion_gate"]["quarantine_reasons"]
+    assert out["n_folds"] == 1  # model materialised, manifest still written
+
+
+def test_skip_calibrators_never_promotable(monkeypatch, tmp_path):
+    # All models materialise, but a --skip-calibrators run is diagnostic by
+    # definition → ALWAYS quarantined, never promotion_ready.
+    out = _collect_single(
+        monkeypatch, tmp_path,
+        _canned_fold_result("2026-02-09", "2026-04-10", "2026-01-12",
+                            with_calibrator=False),
+        _canned_fold_result("2026-03-02", "2026-05-01", "2026-02-02",
+                            with_calibrator=False),
+        skip_calibrators=True)
+    prov = out["provenance_obj"]
+    assert out["promotion_ready"] is False
+    assert prov["promotion_ready"] is False
+    assert prov["quarantined"] is True
+    assert prov["promotion_gate"]["skip_calibrators"] is True
+    assert "skip_calibrators_diagnostic" in \
+        prov["promotion_gate"]["quarantine_reasons"]
+    # Models + manifest still written (quarantined), just not promotable.
+    assert out["n_folds"] == 2
+    assert ex.RUN_NAMESPACE_ROOT in out["manifest"]
+
+
+def test_validate_fold_promotable_unit(tmp_path):
+    # Direct unit coverage of the gate helper against on-disk artifacts.
+    model = tmp_path / "hf_patchtst_all_seed44_model.pt"
+    model.write_bytes(b"MODEL")
+    (tmp_path / (model.name + ".metadata.json")).write_text(
+        _canned_sidecar("2026-03-02", "2026-05-01", "2026-02-02"))
+    cal = tmp_path / "hf_patchtst-calibration.json"
+    cal.write_text(json.dumps({"method": "platt", "a": 1.0}))
+    entry = {"cutoff_date": "2026-03-02", "artifact_uri": str(model),
+             "calibrator_uri": str(cal)}
+    ok, reasons = ex.validate_fold_promotable(entry, skip_calibrators=False)
+    assert ok is True and reasons == []
+    # Empty model file → not promotable.
+    model.write_bytes(b"")
+    ok, reasons = ex.validate_fold_promotable(entry, skip_calibrators=False)
+    assert ok is False and "model_pt_empty" in reasons
 
 
 # ── Fresh-driver staleness guard ─────────────────────────────────────────────

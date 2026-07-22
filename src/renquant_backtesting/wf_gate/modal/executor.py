@@ -587,6 +587,13 @@ def collect_fold_artifacts(result: dict[str, Any], strategy_artifacts: Path,
     """Materialise one pod's returned artifacts under the local strategy tree.
 
     Returns the manifest-entry dict (already carrying effective_train_cutoff_date).
+
+    Tolerant of an incomplete pod payload (a worker can report ``ok`` yet omit a
+    model/sidecar/calibrator blob): whatever IS present is written, whatever is
+    missing is simply not materialised — the promotion gate
+    (:func:`validate_fold_promotable`) decides eligibility from what actually
+    landed on disk, so a partial fold cannot KeyError the collector nor slip
+    through as promotion-ready.
     """
     cutoff = result["cutoff_date"]
     out_dir = strategy_artifacts / artifact_root / cutoff
@@ -596,17 +603,118 @@ def collect_fold_artifacts(result: dict[str, Any], strategy_artifacts: Path,
     # the local strategy artifacts tree by filename so we stay independent of the
     # container's paths.
     model_path = out_dir / Path(model_rel).name
-    _write_bytes_b64gz(arts["model_pt_b64gz"], model_path)
+    if arts.get("model_pt_b64gz"):
+        _write_bytes_b64gz(arts["model_pt_b64gz"], model_path)
     if arts.get("sidecar_json"):
+        out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / (model_path.name + ".metadata.json")).write_text(
             arts["sidecar_json"])
     entry = dict(result["entry"])
     entry["artifact_uri"] = str(model_path)
     if arts.get("calibrator_json"):
         cal_path = model_path.with_name("hf_patchtst-calibration.json")
+        cal_path.parent.mkdir(parents=True, exist_ok=True)
         cal_path.write_text(arts["calibrator_json"])
         entry["calibrator_uri"] = str(cal_path)
     return entry
+
+
+def _norm_date(value: Any) -> str | None:
+    """ISO-date prefix (``YYYY-MM-DD``) of a date/timestamp/string, else None."""
+    if value in (None, ""):
+        return None
+    return str(value).strip()[:10]
+
+
+def _sidecar_path_for_model(model_path: Path) -> Path:
+    return model_path.with_name(model_path.name + ".metadata.json")
+
+
+def validate_fold_promotable(entry: dict[str, Any], *,
+                             skip_calibrators: bool) -> tuple[bool, list[str]]:
+    """Fail-closed check that ONE collected fold is fit to promote to serving.
+
+    A fold is promotable only when ALL of the following hold on disk:
+
+    1. the model ``.pt`` is present AND non-empty;
+    2. a metadata sidecar exists, parses, and its ``training_contract``
+       (a) names a ``train_cutoff_date`` that AGREES with the requested fold,
+       (b) carries ``trained_date`` + ``effective_train_cutoff_date``, and
+       (c) carries provenance/recipe (``dataset`` + non-empty ``hyperparameters``);
+    3. a calibrator payload is present, parses, and is non-empty — UNLESS this is
+       a ``--skip-calibrators`` diagnostic run, in which case the fold is never
+       promotable regardless (the caller also enforces this at run level).
+
+    Returns ``(promotable, reasons)``; ``reasons`` lists every gap for the
+    provenance audit trail. This validates ONLY what materialised — it never
+    changes the worker/training contract.
+    """
+    reasons: list[str] = []
+    cutoff = entry.get("cutoff_date")
+
+    # (1) model artifact present + non-empty
+    model_uri = entry.get("artifact_uri")
+    model_path = Path(model_uri) if model_uri else None
+    if not model_path or not model_path.exists():
+        reasons.append("model_pt_missing")
+    elif model_path.stat().st_size == 0:
+        reasons.append("model_pt_empty")
+
+    # (2) validated metadata sidecar (cutoff agrees + provenance/recipe present)
+    if model_path is None:
+        reasons.append("sidecar_unreachable_no_model")
+    else:
+        sidecar_path = _sidecar_path_for_model(model_path)
+        if not sidecar_path.exists():
+            reasons.append("sidecar_missing")
+        else:
+            sidecar: dict[str, Any] | None
+            try:
+                sidecar = json.loads(sidecar_path.read_text())
+            except (ValueError, OSError):
+                sidecar = None
+                reasons.append("sidecar_unparseable")
+            if isinstance(sidecar, dict):
+                contract = sidecar.get("training_contract") or {}
+                if not contract:
+                    reasons.append("sidecar_no_training_contract")
+                else:
+                    sc_cutoff = _norm_date(contract.get("train_cutoff_date"))
+                    req_cutoff = _norm_date(cutoff)
+                    if sc_cutoff is None:
+                        reasons.append("sidecar_no_train_cutoff_date")
+                    elif sc_cutoff != req_cutoff:
+                        reasons.append(
+                            f"sidecar_cutoff_mismatch({sc_cutoff}!={req_cutoff})")
+                    if not contract.get("trained_date"):
+                        reasons.append("sidecar_no_trained_date")
+                    if not contract.get("effective_train_cutoff_date"):
+                        reasons.append("sidecar_no_effective_train_cutoff_date")
+                    if not contract.get("dataset"):
+                        reasons.append("sidecar_no_provenance_dataset")
+                    if not contract.get("hyperparameters"):
+                        reasons.append("sidecar_no_recipe_hyperparameters")
+
+    # (3) calibrator payload — a --skip-calibrators run is diagnostic-only.
+    if skip_calibrators:
+        reasons.append("skip_calibrators_diagnostic")
+    else:
+        cal_uri = entry.get("calibrator_uri")
+        cal_path = Path(cal_uri) if cal_uri else None
+        if not cal_path or not cal_path.exists():
+            reasons.append("calibrator_missing")
+        elif cal_path.stat().st_size == 0:
+            reasons.append("calibrator_empty")
+        else:
+            try:
+                payload = json.loads(cal_path.read_text())
+            except (ValueError, OSError):
+                payload = None
+                reasons.append("calibrator_unparseable")
+            if payload is not None and not payload:
+                reasons.append("calibrator_empty_payload")
+
+    return (not reasons, reasons)
 
 
 def assemble_manifest(entries: list[dict[str, Any]], cadence_days: int,
@@ -639,16 +747,30 @@ def assemble_manifest(entries: list[dict[str, Any]], cadence_days: int,
 
 def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
                      entries: list[dict[str, Any]], *, code_heads: dict[str, str],
-                     staging: dict[str, Any], manifest_path: str) -> dict[str, Any]:
-    """The FRESH-corpus provenance sidecar (GOAL-2 AC2/AC3 stamps)."""
+                     staging: dict[str, Any], manifest_path: str,
+                     fold_validation: dict[str, dict[str, Any]] | None = None
+                     ) -> dict[str, Any]:
+    """The FRESH-corpus provenance sidecar (GOAL-2 AC2/AC3 stamps).
+
+    ``fold_validation`` maps each collected cutoff → the
+    :func:`validate_fold_promotable` verdict (``{"promotable": bool,
+    "reasons": [...]}``). Promotion eligibility FAILS CLOSED: the run is
+    ``promotion_ready`` only when EVERY requested fold is promotable AND this is
+    not a diagnostic ``--skip-calibrators`` run; anything else stays quarantined
+    (codex #76). ``fold_validation`` defaults to empty → nothing promotable.
+    """
+    fold_validation = fold_validation or {}
     fold_prov = []
     for e in entries:
+        verdict = fold_validation.get(e["cutoff_date"], {})
         fold_prov.append({
             "cutoff_date": e["cutoff_date"],
             "trained_date": e["trained_date"],
             "effective_train_cutoff_date": e.get("effective_train_cutoff_date"),
             "artifact_uri": e["artifact_uri"],
             "calibrator_uri": e.get("calibrator_uri"),
+            "promotable": bool(verdict.get("promotable")),
+            "quarantine_reasons": list(verdict.get("reasons") or []),
         })
     # Per-pod Modal facts, keyed by cutoff.
     pod_facts = {r.get("cutoff_date"): {
@@ -668,6 +790,24 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
     })
     n_requested = len(plan.cutoffs)
     n_succeeded = len(entries)
+    promotable_cutoffs = sorted(
+        c for c, v in fold_validation.items() if v.get("promotable"))
+    n_promotable = len(promotable_cutoffs)
+    # FAIL CLOSED (codex #76): a run is promotion_ready ONLY when every requested
+    # fold has a materialised+non-empty model, a validated metadata sidecar whose
+    # cutoff/provenance/recipe agree, AND a valid calibrator — and never for a
+    # diagnostic --skip-calibrators run. Fold counts alone are NOT sufficient:
+    # a missing/invalid sidecar or calibrator keeps the run quarantined even at
+    # n_succeeded == n_requested.
+    promotion_ready = bool(
+        n_requested > 0
+        and not plan.skip_calibrators
+        and n_promotable == n_requested
+    )
+    quarantine_reasons = sorted({
+        r for v in fold_validation.values() for r in (v.get("reasons") or [])})
+    if plan.skip_calibrators and "skip_calibrators_diagnostic" not in quarantine_reasons:
+        quarantine_reasons.append("skip_calibrators_diagnostic")
     return {
         "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
         "recipe_id": plan.recipe_id,
@@ -679,10 +819,23 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
         "manifest": manifest_path,
         "n_folds_requested": n_requested,
         "n_folds_succeeded": n_succeeded,
-        # A run is promotable ONLY when every requested fold succeeded; a partial
-        # corpus is quarantined and must not be promoted to the serving manifest.
-        "promotion_ready": bool(n_requested > 0 and n_succeeded == n_requested),
-        "quarantined": bool(n_succeeded != n_requested),
+        "n_folds_promotable": n_promotable,
+        "promotion_ready": promotion_ready,
+        "quarantined": not promotion_ready,
+        "promotion_gate": {
+            "requires": [
+                "every requested fold has a non-empty model .pt",
+                "every requested fold has a validated metadata sidecar "
+                "(cutoff agrees; provenance + recipe present)",
+                "every requested fold has a valid calibrator",
+                "run is not --skip-calibrators (diagnostic)",
+            ],
+            "skip_calibrators": bool(plan.skip_calibrators),
+            "n_folds_requested": n_requested,
+            "n_folds_promotable": n_promotable,
+            "promotable_cutoffs": promotable_cutoffs,
+            "quarantine_reasons": quarantine_reasons,
+        },
         "modal": {
             "app_name": APP_NAME,
             "gpu": plan.gpu,
@@ -730,11 +883,21 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
     strategy_artifacts = repo_root / "backtesting" / plan.strategy / "artifacts"
     run_dir = strategy_artifacts / RUN_NAMESPACE_ROOT / plan.run_id
     entries = []
+    fold_validation: dict[str, dict[str, Any]] = {}
     for r in results:
         if not r.get("ok"):
             continue
-        entries.append(collect_fold_artifacts(r, strategy_artifacts,
-                                               plan.artifact_root))
+        entry = collect_fold_artifacts(r, strategy_artifacts, plan.artifact_root)
+        promotable, reasons = validate_fold_promotable(
+            entry, skip_calibrators=plan.skip_calibrators)
+        fold_validation[entry["cutoff_date"]] = {
+            "promotable": promotable, "reasons": reasons}
+        # Only a materialised (present + non-empty) model belongs in the manifest;
+        # an ``ok`` fold that returned no model blob is recorded (quarantined) but
+        # never referenced as a serving artifact.
+        model_path = Path(entry["artifact_uri"]) if entry.get("artifact_uri") else None
+        if model_path and model_path.exists() and model_path.stat().st_size > 0:
+            entries.append(entry)
     manifest_output = (Path(plan.manifest_output) if plan.manifest_output
                        else run_dir / CANONICAL_SERVING_MANIFEST)
     _assert_not_canonical_manifest(manifest_output, strategy_artifacts)
@@ -744,7 +907,7 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
             entries, plan.recipe["cadence_days"], manifest_output))
     provenance = build_provenance(
         plan, results, entries, code_heads=code_heads, staging=staging,
-        manifest_path=manifest_path)
+        manifest_path=manifest_path, fold_validation=fold_validation)
     prov_path = Path(str(manifest_output) + ".provenance.json")
     prov_path.parent.mkdir(parents=True, exist_ok=True)
     prov_path.write_text(json.dumps(provenance, indent=2, sort_keys=True))
@@ -888,13 +1051,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  manifest   : {out['manifest']}  [QUARANTINED run namespace]")
     print(f"  provenance : {out['provenance']}")
     if out["promotion_ready"]:
-        print("  status     : all folds succeeded — eligible for a SEPARATE "
-              "reviewed promotion to the serving manifest.")
+        print("  status     : all folds materialised a valid model + sidecar + "
+              "calibrator — eligible for a SEPARATE reviewed promotion to the "
+              "serving manifest.")
         return 0
-    # A partial corpus is quarantined, NOT valid evidence: exit nonzero so no
-    # caller mistakes it for a complete, promotable run.
-    print(f"  status     : PARTIAL ({out['n_folds']}/{len(plan.cutoffs)}) — "
-          "QUARANTINED, not promotable. Re-run the missing folds.")
+    # A run that is not promotion_ready is quarantined, NOT valid evidence: exit
+    # nonzero so no caller mistakes it for a complete, promotable run. Missing
+    # folds AND materialised-but-invalid payloads (bad/missing sidecar or
+    # calibrator, or a diagnostic --skip-calibrators run) both land here.
+    gate = out["provenance_obj"].get("promotion_gate", {})
+    print(f"  status     : QUARANTINED — not promotable "
+          f"({gate.get('n_folds_promotable', 0)}/{len(plan.cutoffs)} folds "
+          f"passed the fail-closed gate).")
+    reasons = gate.get("quarantine_reasons") or []
+    if reasons:
+        print(f"  reasons    : {', '.join(reasons)}")
     return 1
 
 
