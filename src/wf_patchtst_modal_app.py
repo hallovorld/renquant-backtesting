@@ -1,13 +1,25 @@
 """Modal app definition for the walk-forward PatchTST re-score worker.
 
 The ``@app.function``-decorated worker lives here at module scope so Modal can
-reference it by name instead of pickling it. This module imports ``modal`` at
-import time and re-declares the image literals that
-:data:`renquant_backtesting.wf_gate.modal.executor.IMAGE_SPEC` records as the
-single source of truth (a unit test asserts they stay in lockstep). Everything
-else — the driver, torch, the model repo — is imported at RUNTIME inside the
-container from the Volume-staged code bundle, so this module's import surface is
-just ``os + modal`` (matching the orchestrator ``cloud/modal_app.py`` pattern).
+reference it by name instead of pickling it.
+
+**Why this is a STANDALONE top-level module (not under ``renquant_backtesting``):**
+Modal's container entrypoint imports the worker's *defining module* to locate the
+function (``importlib.import_module(function_def.module_name)``) BEFORE any
+function body runs. If the worker lived under the ``renquant_backtesting``
+package, that import would run ``renquant_backtesting/__init__.py`` →
+``from .simulation import …`` → ``from renquant_common import …`` at container-load
+time — and the pinned sibling assembly is only on the Volume (put on ``sys.path``
+*inside* the function body), so the load fails with ``ModuleNotFoundError:
+renquant_common`` before the body ever executes. Homing the app in a top-level
+module whose import surface is exactly ``os + modal`` avoids that (same invariant
+the orchestrator ``cloud/modal_app.py`` relies on — its package ``__init__`` is
+light). Everything heavy — the driver, torch, the model repo — is imported at
+RUNTIME inside the container from the Volume-staged pinned bundle.
+
+The image literals below re-declare
+:data:`renquant_backtesting.wf_gate.modal.executor.IMAGE_SPEC` (the single source
+of truth; a unit test asserts they stay in lockstep).
 
 Repo boundary: the per-fold unit of work is the reviewed local driver
 ``renquant_backtesting.wf_gate.train_walkforward_patchtst.train_one_cutoff``

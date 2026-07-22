@@ -16,23 +16,26 @@ Repo-boundary rationale (see ``docs/progress/2026-07-21-modal-wf-patchtst-rescor
 * **The Modal orchestration lives in renquant-backtesting**, next to the rest of
   the WF-gate infrastructure (``wf_gate/``), because the walk-forward gate is
   backtesting's subject. It is NOT homed in renquant-orchestrator — orchestrator
-  consumes backtesting, not the other way round. The two-file split
-  (:mod:`.executor` = modal-free staging/dispatch/provenance;
-  :mod:`.app` = module-scope Modal app that imports ``modal``) mirrors the proven
-  orchestrator ``cloud/`` sweep pattern without importing it.
+  consumes backtesting, not the other way round.
+
+The pieces:
+
+* :mod:`.executor` (here) — the modal-free driver side: staging, dispatch,
+  provenance, manifest assembly, and the CLI. ``modal`` is imported lazily.
+* ``wf_patchtst_modal_app`` — a **standalone top-level module** (deliberately NOT
+  under the ``renquant_backtesting`` package) holding the module-scope
+  ``modal.App`` + the ``@app.function`` GPU worker. Modal's container entrypoint
+  imports the worker's defining module at load time, so it must import with only
+  ``os + modal``; a submodule of ``renquant_backtesting`` would drag the heavy
+  package ``__init__`` (→ ``renquant_common``) and fail to load in-container. See
+  that module's docstring. This two-part split mirrors the proven orchestrator
+  ``cloud/`` sweep pattern without importing it.
 
 Importing this package does NOT import ``modal`` — the Modal SDK is only imported
-lazily by :mod:`.executor` at dispatch time, and eagerly by :mod:`.app` (which is
-only imported when a real/fake Modal is present). This keeps the provenance /
-recipe helpers unit-testable with no cloud dependency.
-
-Import the pieces directly:
+lazily by :mod:`.executor` at dispatch time. This keeps the provenance / recipe
+helpers unit-testable with no cloud dependency.
 
     from renquant_backtesting.wf_gate.modal import executor   # driver side
-    from renquant_backtesting.wf_gate.modal import app        # the Modal app
-
-The submodules are intentionally NOT re-exported here so that
-``python -m renquant_backtesting.wf_gate.modal.executor`` does not trip the
-"module found in sys.modules after import of its package" runpy warning.
+    import wf_patchtst_modal_app                              # the Modal app
 """
 from __future__ import annotations

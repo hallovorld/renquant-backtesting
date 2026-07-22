@@ -24,7 +24,10 @@ import pytest
 
 from renquant_backtesting.wf_gate.modal import executor as ex
 
-APP_MODULE = "renquant_backtesting.wf_gate.modal.app"
+# The Modal worker is a STANDALONE top-level module (not under the
+# renquant_backtesting package) so the container entrypoint can import it with
+# only os + modal — see wf_patchtst_modal_app's docstring.
+APP_MODULE = "wf_patchtst_modal_app"
 ENV_VARS = (
     "RENQUANT_WF_MODAL_GPU",
     "RENQUANT_WF_MODAL_TIMEOUT_SECONDS",

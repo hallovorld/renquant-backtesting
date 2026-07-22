@@ -372,8 +372,13 @@ def _import_app_with_env(gpu: str, timeout_s: int, retries: int):
     Modal bakes gpu/timeout/retries into ``@app.function`` at import time, so
     they must be in the environment BEFORE the app module is first imported
     (identical constraint + guard to the orchestrator cloud executor).
+
+    The app is a STANDALONE top-level module (``wf_patchtst_modal_app``), NOT
+    under ``renquant_backtesting`` — see that module's docstring for why (Modal
+    imports the worker's defining module at container load, before the pinned
+    Volume bundle is on ``sys.path``, so it must import with only ``os + modal``).
     """
-    module_name = "renquant_backtesting.wf_gate.modal.app"
+    module_name = "wf_patchtst_modal_app"
     desired = (str(gpu), int(timeout_s), int(retries))
     if module_name in sys.modules:
         existing = sys.modules[module_name]
