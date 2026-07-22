@@ -125,3 +125,77 @@ reusing the now-cached image. See the PR thread for the landed fold count.
   `RENQUANT_SUBREPO_ROOT` to the Volume-staged bundle so all training imports are
   pinned to that single assembly.
 - No branch-protection bypass; PR carries this progress doc; not self-merged.
+
+---
+
+## Round 2 — 2026-07-22: codex PR #76 review fixes + cost sizing
+
+Codex requested changes on #76 (three blockers). All addressed in `executor.py`
++ tests; no model/pipeline internals touched (still a pure wrapper of the #74
+driver). Blockers, each with the fix:
+
+1. **Arbitrary-checkout contamination (was reintroduced).** `bundle_code` used a
+   list of `code_roots` and *silently skipped* missing repos, and `main()` fell
+   back to `~/git/github` — so an incomplete reviewed assembly leaked in an
+   ambient checkout per-repo (the exact thing #74's `resolve_subrepo_root`
+   removed). Fix: `bundle_code(bundle_dir, code_root, *, assembly_lock=None)` now
+   takes ONE explicit pinned root; **fails closed** if any `BUNDLE_REPOS` src is
+   missing, if any staged repo has no resolvable git HEAD (unpinned), or (when an
+   `--assembly-lock` JSON is given) if any staged commit drifts from the reviewed
+   lock. `main()` uses only `_EXECUTOR_CHECKOUT_ROOT.parent` (or `--code-root`) —
+   no home fallback.
+2. **Weak `volume_commit_id` provenance.** It hashed remote filenames + local
+   file *sizes*, so same-size code/data shared a provenance id. Fix: the commit
+   id is now a digest of every staged file's **content** (streamed SHA-256), and
+   the two leakage-relevant DATA panels get explicit per-file content digests in
+   `provenance.modal.data_digests`. The resolved, immutable Modal image ids the
+   pods actually ran are recorded in `provenance.modal.resolved_image_ids` (a
+   stronger dep lock than the spec fingerprint).
+3. **Partial/unverified corpus was promotable.** `collect_and_write` wrote the
+   canonical serving name `walkforward_patchtst_manifest.json` for ANY nonzero
+   fold count and `main` exited 0. Fix: every run is **quarantined** under
+   `artifacts/walkforward_patchtst_runs/<run_id>/` (auto `--run-id`
+   `wf-pt-<recipe8>-<utc>`); the executor **refuses** to write the canonical
+   serving manifest (`_assert_not_canonical_manifest`); provenance carries
+   `promotion_ready` (True only when every requested fold succeeded) +
+   `quarantined`; a partial run **exits nonzero**. Promotion to the serving
+   manifest is a separate reviewed step.
+
+Also fixed a latent run-killer (found while wrapping): the trainer's
+`build_config_contract()` reads `renquant-strategy-104/configs/strategy_config.json`
+at the END of a fit, but only `<repo>/src` was bundled → every fold would die
+with `FileNotFoundError` AFTER a full train. `EXTRA_BUNDLE_SUBDIRS` now bundles
+that `configs/` dir and `_assert_strategy_config` fails closed pre-dispatch. The
+container path lines up: trainer's `GITHUB_ROOT` = `/data/app/repos`, so it
+resolves `/data/app/repos/renquant-strategy-104/configs/strategy_config.json`.
+
+Tests: `tests/test_modal_wf_patchtst.py` grew 14 → **28** (fail-closed bundling,
+missing-repo, unpinned, lock-drift/lock-match, strategy-config assert, content-vs
+-size digest, run-namespace quarantine, canonical-manifest refusal,
+promotion-ready). All 28 pass; the #74 driver regression suite still green.
+
+### Cost sizing (T4, decision input) — [VERIFIED prices / GUESS wall-time]
+
+GPU requested = **T4** (app default + `DEFAULT_GPU`). Modal published rate
+(modal.com/pricing, 2026-07): **T4 $0.000164/s** (~$0.59/hr); A10 $0.000306/s;
+A100-40GB $0.000583/s. Billing is per-GPU-second summed over pods, so the `.map`
+fan-out cuts wall-clock but NOT total $.
+
+Per-fold wall-time on T4 [GUESS]: baseline ~34 min train on local MPS. The model
+is tiny (d_model=64, 2 layers, seq_len 32, 5 epochs) so it is overhead-/data-bound,
+not FLOP-bound → T4 ≈ MPS (adjustment ~1.0×, plausible 0.7–1.2×). Add the
+default calibrator leg (~6 min) + container/torch/Volume overhead (~3 min) →
+**~43 min/fold ≈ 2,580 s** base case. GPU $/fold = 2,580 × $0.000164 = **$0.42**;
++~12% CPU/mem ≈ **$0.48/fold**.
+
+| Run | Folds | GPU-hours | Base $ (T4) | Range (0.7–1.2×) |
+|-----|------:|----------:|------------:|------------------|
+| **Staged** (2025-11-01→2026-03-28) | 8 | ~5.7 | **~$3.8** | ~$3–$5 |
+| **Full**   (2023-10-02→2026-03-02) | 43 | ~30.8 | **~$20** | ~$14–$24 |
+
+Image build is one-time CPU-builder work (~$0.05–0.20, then cached). **Staged-8
+on T4 is well under $10.** **Full-43 on T4 is ~$18–20 — OVER $10** (even the
+optimistic 0.7× case ≈ $12–14 stays ≥ $10). A10G is *more* expensive here (~1.87×
+rate, only ~1.3× faster for this small model), so T4 is cost-optimal. Recommend:
+run staged-8 first for a directional read; full-43 needs a separate >$10 sign-off.
+Launch remains gated by the "no Modal until clear plan" rule + operator decision.

@@ -94,6 +94,25 @@ BUNDLE_REPOS = [
     "renquant-strategy-104",
 ]
 
+# Non-``src`` subdirs a repo must ALSO contribute to the bundle because the
+# trainer reads them at runtime. ``renquant-strategy-104/configs`` holds
+# ``strategy_config.json``, which ``hf_trainer.build_config_contract()`` loads
+# from ``<assembly>/renquant-strategy-104/configs/`` at the END of a fit — a
+# bundle without it wastes a full training run then dies with FileNotFoundError.
+EXTRA_BUNDLE_SUBDIRS: dict[str, tuple[str, ...]] = {
+    "renquant-strategy-104": ("configs",),
+}
+
+# ── Run namespacing (quarantine; codex #76 blocker 3) ────────────────────────
+# The executor NEVER writes the canonical serving manifest. Every run lands under
+# an isolated, run-id'd namespace so a partial/unverified corpus cannot be picked
+# up as a serving artifact; promotion to the canonical name is a separate,
+# reviewed step that must validate every requested fold first.
+RUN_NAMESPACE_ROOT = "walkforward_patchtst_runs"
+#: The canonical serving manifest the WF gate consumes — this executor refuses to
+#: write it (guarded in ``collect_and_write``).
+CANONICAL_SERVING_MANIFEST = "walkforward_patchtst_manifest.json"
+
 # The container mounts the Volume at ``/data``; the code bundle lands at
 # ``/data/app/repos/<repo>/src`` so the driver file's ``parents[3].parent``
 # resolves to ``/data/app/repos`` and every sibling ``src`` is discovered.
@@ -189,6 +208,7 @@ class WfRescorePlan:
     recipe: dict[str, Any]
     recipe_id: str
     gpu: str
+    run_id: str
     dataset: str = DEFAULT_DATASET
     raw_label_panel: str = DEFAULT_RAW_LABEL_PANEL
     strategy: str = DEFAULT_STRATEGY
@@ -238,23 +258,35 @@ def build_fold_request(cutoff: str, recipe: dict[str, Any], recipe_id: str,
     }
 
 
+def _default_run_id(recipe_id: str) -> str:
+    """Isolated run namespace: ``wf-pt-<recipe8>-<utcstamp>`` (never canonical)."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    short = recipe_id.split(":")[-1][:8]
+    return f"wf-pt-{short}-{stamp}"
+
+
 def build_plan(args: argparse.Namespace) -> WfRescorePlan:
     recipe = build_recipe(args)
     recipe_id = compute_recipe_id(recipe)
+    run_id = getattr(args, "run_id", None) or _default_run_id(recipe_id)
     all_cutoffs = compute_retrain_cutoffs(
         args.start_date, args.end_date, int(args.cadence_days)
     )
     cutoffs = select_staged_cutoffs(all_cutoffs, getattr(args, "staged", None))
     image_sha = image_spec_fingerprint()
+    # Quarantine: artifacts + manifest always land under a run-id'd namespace,
+    # never the canonical serving tree (codex #76 blocker 3).
     plan = WfRescorePlan(
         cutoffs=cutoffs,
         recipe=recipe,
         recipe_id=recipe_id,
         gpu=args.gpu,
+        run_id=run_id,
         dataset=args.dataset,
         raw_label_panel=args.raw_label_panel,
         strategy=args.strategy,
-        artifact_root=args.artifact_root or DEFAULT_ARTIFACT_ROOT,
+        artifact_root=f"{RUN_NAMESPACE_ROOT}/{run_id}",
         skip_calibrators=bool(args.skip_calibrators),
         manifest_output=args.manifest_output,
     )
@@ -296,49 +328,111 @@ def modal_readiness() -> dict[str, Any]:
 
 
 # ── Code bundle + Volume staging ─────────────────────────────────────────────
-def _sibling_src(repo: str, code_roots: list[Path]) -> Path | None:
-    for root in code_roots:
-        p = root / repo / "src"
-        if p.exists():
-            return p
-    return None
+def bundle_code(bundle_dir: Path, code_root: Path, *,
+                assembly_lock: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy each REQUIRED repo's ``src`` from ONE pinned assembly into the bundle.
 
+    ``code_root`` is a single, explicit pinned-assembly root holding
+    ``<repo>/src`` for every :data:`BUNDLE_REPOS`. There is deliberately NO
+    ``~/git/github`` fallback and NO per-repo root search — the same
+    single-pinned-assembly invariant the #74 driver's ``resolve_subrepo_root``
+    enforces, so a WF corpus cannot be silently sourced from an arbitrary/ambient
+    checkout (codex #76 blocker 1).
 
-def bundle_code(bundle_dir: Path, code_roots: list[Path]) -> dict[str, str]:
-    """Copy each sibling repo's ``src`` into ``bundle_dir/<repo>/src``.
+    FAIL CLOSED:
+      * any required repo missing under ``code_root`` → refuse;
+      * any staged repo with no resolvable git HEAD (unpinned checkout) → refuse
+        (every fold's provenance must name the exact commit it was built from);
+      * ``assembly_lock`` given and any staged HEAD drifts from it → refuse
+        (verify every staged commit against the reviewed candidate lock before
+        dispatch).
 
-    Returns ``{repo: git_head}`` for provenance. Missing repos are skipped and
-    reported to the caller (a missing bundle repo is a fatal staging error).
+    Returns ``{repo: git_head}`` for provenance.
     """
     import subprocess  # noqa: PLC0415
 
+    _ignore = shutil.ignore_patterns(
+        "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info")
     heads: dict[str, str] = {}
+    missing: list[str] = []
+    unpinned: list[str] = []
     bundle_dir.mkdir(parents=True, exist_ok=True)
     for repo in BUNDLE_REPOS:
-        src = _sibling_src(repo, code_roots)
-        if src is None:
+        src = code_root / repo / "src"
+        if not src.is_dir():
+            missing.append(repo)
             continue
+        checkout = src.parent
         dst = bundle_dir / repo / "src"
         if dst.exists():
             shutil.rmtree(dst)
-        shutil.copytree(src, dst, ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info"))
-        try:
-            head = subprocess.run(
-                ["git", "-C", str(src.parent), "rev-parse", "HEAD"],
-                capture_output=True, text=True, check=False,
-            ).stdout.strip()
-        except Exception:  # noqa: BLE001
-            head = "unknown"
+        shutil.copytree(src, dst, ignore=_ignore)
+        # Bundle the non-src subdirs the trainer reads at runtime (strategy
+        # config), else training dies AFTER a full fit with FileNotFoundError.
+        for extra in EXTRA_BUNDLE_SUBDIRS.get(repo, ()):
+            esrc = checkout / extra
+            if esrc.exists():
+                edst = bundle_dir / repo / extra
+                if edst.exists():
+                    shutil.rmtree(edst)
+                shutil.copytree(esrc, edst, ignore=_ignore)
+        head = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if not head:
+            unpinned.append(repo)
         heads[repo] = head or "unknown"
+
+    if missing:
+        raise RuntimeError(
+            f"bundle_code: pinned assembly at {code_root} is missing required "
+            f"repo src trees {missing}. Point --code-root at the assembly whose "
+            "<repo>/src hold the pinned checkouts — refusing a partial assembly "
+            "so a WF corpus cannot be sourced from an ambient/arbitrary checkout."
+        )
+    if unpinned:
+        raise RuntimeError(
+            f"bundle_code: staged repos {unpinned} have no resolvable git HEAD "
+            f"under {code_root} — refusing an unpinned assembly (every fold's "
+            "provenance must name the exact commit it was built from)."
+        )
+    if assembly_lock:
+        drift = {r: {"staged": heads.get(r), "lock": assembly_lock.get(r)}
+                 for r in assembly_lock if heads.get(r) != assembly_lock.get(r)}
+        if drift:
+            raise RuntimeError(
+                f"bundle_code: staged commit(s) drifted from the candidate lock: "
+                f"{drift}. Refusing to dispatch a corpus whose code does not match "
+                "the reviewed lock."
+            )
     _assert_fresh_driver(bundle_dir)
+    _assert_strategy_config(bundle_dir)
     return heads
+
+
+def _assert_strategy_config(bundle_dir: Path) -> None:
+    """Fail closed if the strategy config the trainer needs isn't bundled.
+
+    ``hf_trainer.build_config_contract()`` reads
+    ``<assembly>/renquant-strategy-104/configs/strategy_config.json`` at the END
+    of a fit; a bundle without it wastes a full training run then dies with
+    FileNotFoundError. Stage it (or a shadow) or refuse to dispatch.
+    """
+    cfg_dir = bundle_dir / "renquant-strategy-104" / "configs"
+    wanted = ("strategy_config.json", "strategy_config.shadow.json")
+    if not any((cfg_dir / w).exists() for w in wanted):
+        raise RuntimeError(
+            "bundle is missing renquant-strategy-104/configs/strategy_config.json"
+            " — hf_trainer.build_config_contract() needs it and would fail AFTER "
+            "a full fit. Refusing to dispatch."
+        )
 
 
 def _assert_fresh_driver(bundle_dir: Path) -> None:
     """Fail closed if the bundled WF driver is a pre-#74 (script-path) copy.
 
-    A stale ``renquant-backtesting`` checkout on ``code_roots`` would bundle a
+    A stale ``renquant-backtesting`` checkout at ``code_root`` would bundle a
     driver that shells out to the removed ``scripts/patchtst_hf.py`` instead of
     ``python -m renquant_model_patchtst.hf_trainer`` — producing an all-failed
     corpus (or, worse, a silently wrong one). Refuse to stage it.
@@ -357,6 +451,15 @@ def _assert_fresh_driver(bundle_dir: Path) -> None:
         )
 
 
+def _file_sha256(path: Path) -> str:
+    """Streaming SHA-256 of a file's CONTENT (chunked for large parquet panels)."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def stage_inputs_to_volume(plan: WfRescorePlan, *, bundle_dir: Path,
                            dataset_path: Path, raw_label_path: Path,
                            volume_name: str = VOLUME_NAME) -> dict[str, Any]:
@@ -368,7 +471,12 @@ def stage_inputs_to_volume(plan: WfRescorePlan, *, bundle_dir: Path,
         driver's ``--dataset data/...`` resolves against ``--repo-root /data``)
       * ``/data/<rawlabel>.parquet`` — calibrator raw-label panel
 
-    ``modal`` is imported here (lazily). Returns a content-addressed commit id.
+    ``modal`` is imported here (lazily).
+
+    Provenance (codex #76 blocker 2): ``volume_commit_id`` is a digest of every
+    staged file's CONTENT (SHA-256), not its size — so same-size code/data changes
+    can no longer share a provenance id. The two leakage-relevant DATA panels also
+    get explicit per-file content digests in the return under ``data_digests``.
     """
     import modal  # noqa: PLC0415
 
@@ -378,21 +486,27 @@ def stage_inputs_to_volume(plan: WfRescorePlan, *, bundle_dir: Path,
         if repo_src.is_file():
             rel = repo_src.relative_to(bundle_dir)
             uploaded.append((str(repo_src), f"/app/repos/{rel.as_posix()}"))
-    uploaded.append((str(dataset_path), f"/data/{Path(plan.dataset).name}"))
-    uploaded.append((str(raw_label_path),
-                     f"/data/{Path(plan.raw_label_panel).name}"))
+    dataset_remote = f"/data/{Path(plan.dataset).name}"
+    rawlabel_remote = f"/data/{Path(plan.raw_label_panel).name}"
+    uploaded.append((str(dataset_path), dataset_remote))
+    uploaded.append((str(raw_label_path), rawlabel_remote))
 
     hasher = hashlib.sha256()
+    data_digests: dict[str, str] = {}
     with vol.batch_upload(force=True) as batch:
         for local, remote in uploaded:
             batch.put_file(local, remote)
+            content_sha = _file_sha256(Path(local))
             hasher.update(remote.encode())
-            hasher.update(str(Path(local).stat().st_size).encode())
+            hasher.update(b"\0")
+            hasher.update(content_sha.encode())
+            if remote in (dataset_remote, rawlabel_remote):
+                data_digests[remote] = "sha256:" + content_sha
     commit_id = "sha256:" + hasher.hexdigest()[:16]
-    log.info("staged %d files to Volume %s (commit=%s)",
+    log.info("staged %d files to Volume %s (content-commit=%s)",
              len(uploaded), volume_name, commit_id)
     return {"volume_name": volume_name, "volume_commit_id": commit_id,
-            "n_files": len(uploaded)}
+            "n_files": len(uploaded), "data_digests": data_digests}
 
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
@@ -546,22 +660,37 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
     } for r in results if r.get("ok")}
     failed = [{"cutoff_date": r.get("cutoff_date"), "error": r.get("error")}
               for r in results if not r.get("ok")]
+    # The distinct Modal-built image ids the pods actually ran (the RESOLVED,
+    # immutable image snapshot — a stronger dep lock than the spec fingerprint).
+    resolved_image_ids = sorted({
+        r.get("code_image_id") for r in results
+        if r.get("ok") and r.get("code_image_id") not in (None, "unknown")
+    })
+    n_requested = len(plan.cutoffs)
+    n_succeeded = len(entries)
     return {
         "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
         "recipe_id": plan.recipe_id,
         "recipe": plan.recipe,
+        "run_id": plan.run_id,
         "built_by": "renquant_backtesting.wf_gate.modal.executor",
         "expert_role": "patchtst_fresh_2nd_expert",
         "goal": "GOAL-2 AC2/AC3 (fresh PatchTST 2nd expert for GOAL-4 ensemble)",
         "manifest": manifest_path,
-        "n_folds_requested": len(plan.cutoffs),
-        "n_folds_succeeded": len(entries),
+        "n_folds_requested": n_requested,
+        "n_folds_succeeded": n_succeeded,
+        # A run is promotable ONLY when every requested fold succeeded; a partial
+        # corpus is quarantined and must not be promoted to the serving manifest.
+        "promotion_ready": bool(n_requested > 0 and n_succeeded == n_requested),
+        "quarantined": bool(n_succeeded != n_requested),
         "modal": {
             "app_name": APP_NAME,
             "gpu": plan.gpu,
             "image_spec_sha256": image_spec_fingerprint(),
+            "resolved_image_ids": resolved_image_ids,
             "volume_name": staging.get("volume_name"),
             "volume_commit_id": staging.get("volume_commit_id"),
+            "data_digests": staging.get("data_digests") or {},
             "code_git_heads": code_heads,
         },
         "folds": fold_prov,
@@ -570,19 +699,45 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
     }
 
 
+def _assert_not_canonical_manifest(manifest_output: Path,
+                                   strategy_artifacts: Path) -> None:
+    """Refuse to let the executor write the canonical serving manifest.
+
+    Promotion to ``walkforward_patchtst_manifest.json`` (the name the WF gate
+    consumes) is a SEPARATE reviewed step that must validate every requested fold
+    first; this executor only ever writes into a quarantined run namespace
+    (codex #76 blocker 3).
+    """
+    canonical = (strategy_artifacts / CANONICAL_SERVING_MANIFEST).resolve()
+    if manifest_output.resolve() == canonical:
+        raise RuntimeError(
+            "refusing to write the canonical serving manifest "
+            f"{canonical} from the WF re-score executor. It writes a quarantined "
+            f"run-namespaced manifest under {RUN_NAMESPACE_ROOT}/<run_id>/; "
+            "promotion to the serving name is a separate reviewed step."
+        )
+
+
 def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
                       repo_root: Path, code_heads: dict[str, str],
                       staging: dict[str, Any]) -> dict[str, Any]:
-    """Materialise artifacts, write the manifest + provenance sidecar locally."""
+    """Materialise artifacts, write the manifest + provenance sidecar locally.
+
+    All outputs land under a quarantined run namespace
+    (``.../artifacts/walkforward_patchtst_runs/<run_id>/``); the canonical serving
+    manifest is never written here.
+    """
     strategy_artifacts = repo_root / "backtesting" / plan.strategy / "artifacts"
+    run_dir = strategy_artifacts / RUN_NAMESPACE_ROOT / plan.run_id
     entries = []
     for r in results:
         if not r.get("ok"):
             continue
         entries.append(collect_fold_artifacts(r, strategy_artifacts,
                                                plan.artifact_root))
-    manifest_output = Path(plan.manifest_output) if plan.manifest_output else (
-        strategy_artifacts / "walkforward_patchtst_manifest.json")
+    manifest_output = (Path(plan.manifest_output) if plan.manifest_output
+                       else run_dir / CANONICAL_SERVING_MANIFEST)
+    _assert_not_canonical_manifest(manifest_output, strategy_artifacts)
     manifest_path = ""
     if entries:
         manifest_path = str(assemble_manifest(
@@ -593,10 +748,13 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
     prov_path = Path(str(manifest_output) + ".provenance.json")
     prov_path.parent.mkdir(parents=True, exist_ok=True)
     prov_path.write_text(json.dumps(provenance, indent=2, sort_keys=True))
-    log.info("wrote %d/%d folds; manifest=%s provenance=%s",
-             len(entries), len(plan.cutoffs), manifest_path, prov_path)
+    log.info("wrote %d/%d folds (run_id=%s promotion_ready=%s); "
+             "manifest=%s provenance=%s",
+             len(entries), len(plan.cutoffs), plan.run_id,
+             provenance["promotion_ready"], manifest_path, prov_path)
     return {"manifest": manifest_path, "provenance": str(prov_path),
-            "n_folds": len(entries), "provenance_obj": provenance}
+            "n_folds": len(entries), "provenance_obj": provenance,
+            "promotion_ready": provenance["promotion_ready"]}
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -640,6 +798,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--calibrator-batch-size", type=int, default=512)
     p.add_argument("--artifact-root", default=None)
     p.add_argument("--manifest-output", default=None)
+    p.add_argument("--run-id", default=None,
+                   help="Isolated run namespace for artifacts + manifest "
+                        "(default: wf-pt-<recipe8>-<utc>). NEVER the canonical "
+                        "serving tree; promotion is a separate reviewed step.")
+    p.add_argument("--code-root", default=None,
+                   help="SINGLE pinned-assembly root holding <repo>/src for every "
+                        "bundled repo (default: the assembly THIS executor runs "
+                        "from). No ~/git/github fallback — fail closed if any repo "
+                        "is missing.")
+    p.add_argument("--assembly-lock", default=None,
+                   help="Optional JSON file {repo: git_sha} the staged bundle "
+                        "commits must match exactly (fail closed on drift).")
     p.add_argument("--timeout-seconds", type=int, default=3600)
     p.add_argument("--retries", type=int, default=1)
     p.add_argument("--dry-run", action="store_true",
@@ -660,6 +830,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"WF PatchTST Modal re-score plan")
     print(f"  recipe_id     : {plan.recipe_id}")
+    print(f"  run_id        : {plan.run_id}")
     print(f"  image_spec    : {image_spec_fingerprint()}")
     print(f"  gpu           : {plan.gpu}")
     print(f"  folds         : {len(plan.cutoffs)} "
@@ -689,14 +860,20 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     import tempfile  # noqa: PLC0415
-    # Bundle from the assembly this executor lives in (the reviewed checkout),
-    # NOT repo_root.parent — repo_root is often a scratch dir whose sibling could
-    # be a stale checkout (that footgun bundled a pre-#74 driver once). Fall back
-    # to ~/git/github only if a repo is missing from the primary assembly.
-    code_roots = [_EXECUTOR_CHECKOUT_ROOT.parent, Path.home() / "git" / "github"]
+    # ONE explicit pinned assembly (codex #76 blocker 1): the reviewed checkout
+    # this executor runs from, or an explicit --code-root. NO ~/git/github
+    # fallback and NO per-repo search — bundle_code fails closed if the single
+    # root is missing any required repo, so a corpus can't be sourced from an
+    # ambient/arbitrary checkout.
+    code_root = (Path(args.code_root).expanduser().resolve()
+                 if args.code_root else _EXECUTOR_CHECKOUT_ROOT.parent)
+    assembly_lock = None
+    if args.assembly_lock:
+        assembly_lock = json.loads(Path(args.assembly_lock).read_text())
     with tempfile.TemporaryDirectory(prefix="wf-pt-bundle-") as td:
         bundle_dir = Path(td)
-        code_heads = bundle_code(bundle_dir, code_roots)
+        code_heads = bundle_code(bundle_dir, code_root,
+                                 assembly_lock=assembly_lock)
         staging = stage_inputs_to_volume(
             plan, bundle_dir=bundle_dir, dataset_path=dataset_path,
             raw_label_path=raw_label_path)
@@ -706,10 +883,19 @@ def main(argv: list[str] | None = None) -> int:
     out = collect_and_write(
         plan, results, repo_root=repo_root, code_heads=code_heads,
         staging=staging)
-    print(f"\nDONE: {out['n_folds']}/{len(plan.cutoffs)} folds")
-    print(f"  manifest   : {out['manifest']}")
+    print(f"\nDONE: {out['n_folds']}/{len(plan.cutoffs)} folds "
+          f"(run_id={plan.run_id})")
+    print(f"  manifest   : {out['manifest']}  [QUARANTINED run namespace]")
     print(f"  provenance : {out['provenance']}")
-    return 0 if out["n_folds"] > 0 else 1
+    if out["promotion_ready"]:
+        print("  status     : all folds succeeded — eligible for a SEPARATE "
+              "reviewed promotion to the serving manifest.")
+        return 0
+    # A partial corpus is quarantined, NOT valid evidence: exit nonzero so no
+    # caller mistakes it for a complete, promotable run.
+    print(f"  status     : PARTIAL ({out['n_folds']}/{len(plan.cutoffs)}) — "
+          "QUARANTINED, not promotable. Re-run the missing folds.")
+    return 1
 
 
 if __name__ == "__main__":

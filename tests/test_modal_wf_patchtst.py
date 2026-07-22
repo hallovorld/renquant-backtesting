@@ -289,18 +289,23 @@ def test_dispatch_fans_out_and_collects(monkeypatch, tmp_path):
         plan, got, repo_root=repo_root,
         code_heads={"renquant-model": "abc123"},
         staging={"volume_name": ex.VOLUME_NAME,
-                 "volume_commit_id": "sha256:vol01"})
+                 "volume_commit_id": "sha256:vol01",
+                 "data_digests": {"/data/panel.parquet": "sha256:d00d"}})
     assert out["n_folds"] == 2
 
-    # Artifacts materialised on disk.
-    art = (repo_root / "backtesting" / "renquant_104" / "artifacts"
-           / "walkforward_patchtst")
-    pts = list(art.rglob("*.pt"))
+    # Artifacts materialised on disk — under the quarantined run namespace.
+    art_root = repo_root / "backtesting" / "renquant_104" / "artifacts"
+    pts = list(art_root.rglob("*.pt"))
     assert len(pts) == 2
     assert pts[0].read_bytes() == b"PYTORCH-FAKE-STATE-DICT"
-    assert list(art.rglob("*-calibration.json"))
+    assert list(art_root.rglob("*-calibration.json"))
+    # Nothing lands at the canonical serving location.
+    assert not (art_root / ex.CANONICAL_SERVING_MANIFEST).exists()
+    assert all(ex.RUN_NAMESPACE_ROOT in str(p) for p in pts)
 
-    # Manifest via the reviewed writer.
+    # Manifest via the reviewed writer, in the run namespace.
+    assert ex.RUN_NAMESPACE_ROOT in out["manifest"]
+    assert plan.run_id in out["manifest"]
     manifest = json.loads(Path(out["manifest"]).read_text())
     assert len(manifest["retrains"]) == 2
     assert all("effective_train_cutoff_date" in r for r in manifest["retrains"])
@@ -309,10 +314,17 @@ def test_dispatch_fans_out_and_collects(monkeypatch, tmp_path):
     prov = out["provenance_obj"]
     assert prov["provenance_schema_version"] == ex.PROVENANCE_SCHEMA_VERSION
     assert prov["recipe_id"] == plan.recipe_id
+    assert prov["run_id"] == plan.run_id
     assert prov["modal"]["image_spec_sha256"] == ex.image_spec_fingerprint()
     assert prov["modal"]["gpu"] == plan.gpu
     assert prov["modal"]["volume_commit_id"] == "sha256:vol01"
+    assert prov["modal"]["data_digests"] == {"/data/panel.parquet": "sha256:d00d"}
+    assert prov["modal"]["resolved_image_ids"] == ["im-123"]
     assert prov["n_folds_succeeded"] == 2
+    # All requested folds succeeded → promotable (still a separate reviewed step).
+    assert prov["promotion_ready"] is True
+    assert prov["quarantined"] is False
+    assert out["promotion_ready"] is True
     for f in prov["folds"]:
         assert f["effective_train_cutoff_date"]
         assert f["cutoff_date"] in ("2026-02-09", "2026-03-02")
@@ -336,6 +348,10 @@ def test_dispatch_handles_partial_failure(monkeypatch, tmp_path):
     assert prov["n_folds_succeeded"] == 1
     assert len(prov["failed_folds"]) == 1
     assert prov["failed_folds"][0]["cutoff_date"] == "2026-02-09"
+    # A partial corpus is quarantined, NOT promotable (codex #76 blocker 3).
+    assert prov["promotion_ready"] is False
+    assert prov["quarantined"] is True
+    assert out["promotion_ready"] is False
 
 
 def test_dispatch_map_exception_is_captured(monkeypatch, tmp_path):
@@ -372,6 +388,162 @@ def test_assert_fresh_driver_rejects_stale_script_driver(tmp_path):
 def test_assert_fresh_driver_rejects_missing_driver(tmp_path):
     with pytest.raises(RuntimeError, match="missing WF driver"):
         ex._assert_fresh_driver(tmp_path)
+
+
+# ── Single-pinned-assembly bundling (codex #76 blocker 1 + strategy config) ──
+import subprocess as _sp  # noqa: E402
+
+
+def _git(*args, cwd):
+    _sp.run(["git", *args], cwd=str(cwd), check=True,
+            capture_output=True, text=True)
+
+
+def _make_assembly(root, *, repos=None, with_config=True, fresh_driver=True):
+    """Build a fake pinned assembly of git checkouts; return {repo: head_sha}."""
+    repos = list(repos if repos is not None else ex.BUNDLE_REPOS)
+    heads = {}
+    for repo in repos:
+        checkout = root / repo
+        src = checkout / "src"
+        src.mkdir(parents=True)
+        (src / "__init__.py").write_text("")
+        if repo == "renquant-backtesting":
+            drv = (src / "renquant_backtesting" / "wf_gate"
+                   / "train_walkforward_patchtst.py")
+            drv.parent.mkdir(parents=True)
+            drv.write_text(
+                'TRAIN_MODULE = "renquant_model_patchtst.hf_trainer"\n'
+                if fresh_driver else
+                'TRAIN_SCRIPT = REPO_ROOT / "scripts" / "patchtst_hf.py"\n')
+        if repo == "renquant-strategy-104" and with_config:
+            cfg = checkout / "configs" / "strategy_config.json"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text("{}")
+        _git("init", "-q", cwd=checkout)
+        _git("config", "user.email", "t@t", cwd=checkout)
+        _git("config", "user.name", "t", cwd=checkout)
+        _git("add", "-A", cwd=checkout)
+        _git("commit", "-qm", "init", cwd=checkout)
+        heads[repo] = _sp.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            capture_output=True, text=True).stdout.strip()
+    return heads
+
+
+def test_bundle_code_stages_all_and_returns_heads(tmp_path):
+    root = tmp_path / "assembly"
+    expected = _make_assembly(root)
+    bundle = tmp_path / "bundle"
+    heads = ex.bundle_code(bundle, root)
+    assert heads == expected
+    # Every required repo's src is staged...
+    for repo in ex.BUNDLE_REPOS:
+        assert (bundle / repo / "src" / "__init__.py").exists()
+    # ...and the trainer's strategy config rides along (EXTRA_BUNDLE_SUBDIRS).
+    assert (bundle / "renquant-strategy-104" / "configs"
+            / "strategy_config.json").exists()
+
+
+def test_bundle_code_fails_closed_on_missing_repo(tmp_path):
+    root = tmp_path / "assembly"
+    _make_assembly(root, repos=[r for r in ex.BUNDLE_REPOS
+                                if r != "renquant-pipeline"])
+    with pytest.raises(RuntimeError, match="missing required"):
+        ex.bundle_code(tmp_path / "bundle", root)
+
+
+def test_bundle_code_no_home_fallback_signature():
+    # A single explicit root only — no list of candidate roots (which is how the
+    # ~/git/github fallback used to sneak an arbitrary checkout in).
+    import inspect
+    params = inspect.signature(ex.bundle_code).parameters
+    assert "code_root" in params and "code_roots" not in params
+
+
+def test_bundle_code_rejects_lock_drift(tmp_path):
+    root = tmp_path / "assembly"
+    heads = _make_assembly(root)
+    lock = dict(heads)
+    lock["renquant-model"] = "0" * 40  # a stale/wrong pin
+    with pytest.raises(RuntimeError, match="drift"):
+        ex.bundle_code(tmp_path / "bundle", root, assembly_lock=lock)
+
+
+def test_bundle_code_accepts_matching_lock(tmp_path):
+    root = tmp_path / "assembly"
+    heads = _make_assembly(root)
+    # Exact match → no raise.
+    ex.bundle_code(tmp_path / "bundle", root, assembly_lock=dict(heads))
+
+
+def test_bundle_code_missing_strategy_config_fails_closed(tmp_path):
+    root = tmp_path / "assembly"
+    _make_assembly(root, with_config=False)
+    with pytest.raises(RuntimeError, match="strategy_config.json"):
+        ex.bundle_code(tmp_path / "bundle", root)
+
+
+def test_assert_strategy_config_passes_when_present(tmp_path):
+    cfg = tmp_path / "renquant-strategy-104" / "configs" / "strategy_config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("{}")
+    ex._assert_strategy_config(tmp_path)  # must not raise
+
+
+def test_assert_strategy_config_rejects_missing(tmp_path):
+    with pytest.raises(RuntimeError, match="strategy_config.json"):
+        ex._assert_strategy_config(tmp_path)
+
+
+# ── Content-addressed Volume digest (codex #76 blocker 2) ────────────────────
+def _stage_two_files(monkeypatch, tmp_path, dataset_bytes, rawlabel_bytes):
+    _install_fake_modal(monkeypatch)  # fake Volume batch_upload
+    bundle = tmp_path / "bundle"
+    (bundle / "renquant-backtesting" / "src").mkdir(parents=True)
+    (bundle / "renquant-backtesting" / "src" / "x.py").write_bytes(b"CODE")
+    ds = tmp_path / "ds.parquet"
+    rl = tmp_path / "rl.parquet"
+    ds.write_bytes(dataset_bytes)
+    rl.write_bytes(rawlabel_bytes)
+    plan = ex.build_plan(_default_args(staged=1, dataset="data/ds.parquet",
+                                       raw_label_panel="data/rl.parquet"))
+    return ex.stage_inputs_to_volume(
+        plan, bundle_dir=bundle, dataset_path=ds, raw_label_path=rl)
+
+
+def test_volume_commit_hashes_content_not_size(monkeypatch, tmp_path):
+    a = _stage_two_files(monkeypatch, tmp_path / "a", b"AAAA", b"BBBB")
+    # Same SIZES, different CONTENT → the commit id (and data digests) must differ.
+    b = _stage_two_files(monkeypatch, tmp_path / "b", b"XXXX", b"YYYY")
+    assert a["volume_commit_id"] != b["volume_commit_id"]
+    assert a["data_digests"]["/data/ds.parquet"] != \
+        b["data_digests"]["/data/ds.parquet"]
+    # Both leakage-relevant panels get an explicit content digest.
+    assert set(a["data_digests"]) == {"/data/ds.parquet", "/data/rl.parquet"}
+    assert all(v.startswith("sha256:") for v in a["data_digests"].values())
+
+
+# ── Run namespace + canonical-manifest refusal (codex #76 blocker 3) ─────────
+def test_build_plan_quarantines_under_run_namespace():
+    plan = ex.build_plan(_default_args(staged=2))
+    assert plan.run_id.startswith("wf-pt-")
+    assert plan.artifact_root.startswith(ex.RUN_NAMESPACE_ROOT + "/")
+    assert plan.run_id in plan.artifact_root
+    fixed = ex.build_plan(_default_args(staged=2, run_id="my-run"))
+    assert fixed.run_id == "my-run"
+    assert fixed.artifact_root == f"{ex.RUN_NAMESPACE_ROOT}/my-run"
+
+
+def test_collect_refuses_canonical_serving_manifest(tmp_path):
+    plan = ex.build_plan(_default_args(staged=1))
+    canonical = (tmp_path / "backtesting" / "renquant_104" / "artifacts"
+                 / ex.CANONICAL_SERVING_MANIFEST)
+    plan.manifest_output = str(canonical)
+    with pytest.raises(RuntimeError, match="canonical serving manifest"):
+        ex.collect_and_write(
+            plan, [], repo_root=tmp_path, code_heads={},
+            staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None})
 
 
 # ── CLI plan-only path ───────────────────────────────────────────────────────
