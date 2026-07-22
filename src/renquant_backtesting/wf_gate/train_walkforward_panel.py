@@ -63,8 +63,14 @@ STRATEGY_DIR = REPO_ROOT / "backtesting" / "renquant_104"
 TRAIN_PROD_SCRIPT = REPO_ROOT / "scripts" / "train_production_model.py"
 CALIBRATOR_SCRIPT = REPO_ROOT / "scripts" / "fit_calibrator_alpha158_fund.py"
 WF_V2_SUBDIR = "walkforward_v2"
+# The XGB training panel the umbrella train_production_model.py reads (169-feat
+# alpha158 + 5-fund, fwd_60d_excess label). The freshness gate below loads its
+# date coverage; it does NOT change what the training subprocess reads.
+DEFAULT_DATASET = "data/alpha158_291_fundamental_dataset.parquet"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(STRATEGY_DIR))
+
+from renquant_backtesting.repo_root import resolve_repo_root  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,6 +106,97 @@ def infer_label_lookahead_days(label: str | None) -> int:
     import re
     m = re.search(r"fwd_(\d+)d", str(label or "fwd_60d_excess"))
     return int(m.group(1)) if m else 60
+
+
+# ── AC7 training-panel freshness/coverage gate (GOAL-5) ─────────────────────
+# Sibling of the PatchTST driver's gate (train_walkforward_patchtst.py). The
+# per-fold path only rejects an EMPTY post-cutoff slice; a stale-but-nonempty
+# panel that stops short of a fold's ``data_end`` (each fold trains on rows
+# strictly before ``cutoff − label_horizon`` business days — see
+# fit_calibrator_for_cutoff / train_production_model.py) silently trains on a
+# truncated window. Before dispatching ANY cutoff we assert the ONE canonical
+# renquant-common freshness contract over the union window ``max(data_end)`` —
+# fail-closed, never a silent proceed. The GBDT recipe's label is
+# ``fwd_60d_excess`` (horizon 60), matching PatchTST, so the same defaults hold.
+def data_end_for_cutoff(cutoff: pd.Timestamp, label: str | None) -> str:
+    """Latest training-row date a fold at ``cutoff`` uses: cutoff − horizon BDays.
+
+    Mirrors the embargo the training subprocess applies (rows strictly before
+    ``cutoff − label_lookahead`` business days) so the freshness gate checks the
+    exact window the folds train on.
+    """
+    lookahead = infer_label_lookahead_days(label)
+    return (cutoff - pd.offsets.BDay(lookahead)).date().isoformat()
+
+
+def required_through_date(dates: list[pd.Timestamp],
+                          label: str | None) -> pd.Timestamp:
+    """Latest ``data_end`` any fold needs: ``max(data_end_for_cutoff(c))``.
+
+    A panel that stops short of this date silently truncates the most-recent
+    folds, so it is the load-bearing input to the pre-dispatch freshness gate.
+    """
+    if not dates:
+        raise ValueError("required_through_date: no retrain dates")
+    return max(pd.Timestamp(data_end_for_cutoff(c, label)) for c in dates)
+
+
+def resolve_dataset_path(args: argparse.Namespace) -> Path:
+    """Absolute path to the XGB training panel. ``--dataset`` is relative to the
+    umbrella repo root (matching how the training subprocess, run with
+    ``cwd=<repo-root>``, resolves it)."""
+    ds = Path(args.dataset)
+    if ds.is_absolute():
+        return ds
+    return resolve_repo_root(getattr(args, "repo_root", None)) / ds
+
+
+def assert_training_panel_fresh(args: argparse.Namespace,
+                                dates: list[pd.Timestamp]) -> None:
+    """Fail-closed AC7 gate: verify the training panel COVERS the window every
+    fold needs (+ density floors) BEFORE dispatching any cutoff. Raises with the
+    contract's reasons rather than let a silently-truncated/thin panel train.
+    """
+    from renquant_common.training_freshness import (  # noqa: PLC0415
+        assess_training_panel_freshness,
+    )
+    required = required_through_date(dates, args.label)
+    dataset_path = resolve_dataset_path(args)
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            "train_walkforward_panel: training panel not found at "
+            f"{dataset_path} (--dataset={args.dataset}); cannot verify "
+            "freshness/coverage before dispatch"
+        )
+    max_gap = int(args.max_gap_days)
+    verdict = assess_training_panel_freshness(
+        dataset_path,
+        required_through_date=required,
+        min_tickers_per_day=int(args.min_tickers_per_day),
+        min_rows=int(args.min_rows),
+        max_gap_days=(None if max_gap <= 0 else max_gap),
+        max_staleness_days=(int(args.max_staleness_days)
+                            if args.max_staleness_days is not None else None),
+    )
+    if not verdict.ok:
+        panel_max = verdict.max_date.date() if verdict.max_date else None
+        raise RuntimeError(
+            "train_walkforward_panel: FAIL-CLOSED — training panel "
+            f"{dataset_path} does not satisfy the AC7 freshness/coverage gate "
+            f"(required_through_date={required.date()}, panel_max_date="
+            f"{panel_max}, n_rows={verdict.n_rows}). Reasons: "
+            + "; ".join(verdict.reasons)
+            + ". Refuse to train on a silently-truncated/thin panel — refresh "
+            "the panel, or for a deliberately historical run lower --end-date "
+            "so the required window matches the panel (or relax the floors)."
+        )
+    log.info(
+        "AC7 freshness gate PASS: panel=%s covers required_through_date=%s "
+        "(max_date=%s, n_days=%d, n_rows=%d, min_tickers/day=%s, max_gap=%s)",
+        dataset_path, required.date(), verdict.max_date.date(),
+        verdict.n_days, verdict.n_rows, verdict.min_tickers_per_day_observed,
+        verdict.max_gap_days_observed,
+    )
 
 
 def configure_panel_cutoff(cfg: dict, cutoff: pd.Timestamp,
@@ -287,7 +384,7 @@ def read_effective_train_cutoff_date(artifact_path: Path) -> pd.Timestamp | None
 
 # ── CLI driver ──────────────────────────────────────────────────────────
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--start-date", required=True,
                    help="First retrain cutoff (YYYY-MM-DD).")
@@ -295,6 +392,14 @@ def parse_args() -> argparse.Namespace:
                    help="Last retrain cutoff (YYYY-MM-DD).")
     p.add_argument("--cadence-days", type=int, default=21,
                    help="Days between retrain cutoffs (default: 21).")
+    p.add_argument("--repo-root", default=None,
+                   help="Umbrella RenQuant root holding data/ (default: "
+                        "$RENQUANT_REPO_ROOT or cwd). Used to resolve the "
+                        "training panel for the AC7 freshness gate.")
+    p.add_argument("--dataset", default=DEFAULT_DATASET,
+                   help="XGB training panel parquet the AC7 freshness gate "
+                        "inspects (relative to --repo-root; default: "
+                        f"{DEFAULT_DATASET}).")
     p.add_argument("--manifest-output",
                    default=str(STRATEGY_DIR / "artifacts" / "walkforward_manifest_v2.json"),
                    help="Where to write the merged manifest JSON (v2 default).")
@@ -324,7 +429,25 @@ def parse_args() -> argparse.Namespace:
         help="Research-only escape hatch. By default any failed cutoff aborts "
              "before writing a partial WF manifest.",
     )
-    return p.parse_args()
+    # ── AC7 training-panel freshness/coverage gate (GOAL-5) ──────────────────
+    # Same flags/defaults as train_walkforward_patchtst.py so both WF trainers
+    # apply identical discipline.
+    p.add_argument("--min-tickers-per-day", type=int, default=20,
+                   help="AC7 gate: min distinct tickers required on every "
+                        "training-window day (0 disables). Thin days train on "
+                        "a degenerate cross-section.")
+    p.add_argument("--min-rows", type=int, default=0,
+                   help="AC7 gate: min total rows in the panel (0 disables).")
+    p.add_argument("--max-gap-days", type=int, default=5,
+                   help="AC7 gate: max calendar-day gap between consecutive "
+                        "training dates (0 disables; weekends are ≤4d so 5 "
+                        "flags a real hole).")
+    p.add_argument("--max-staleness-days", type=int, default=None,
+                   help="AC7 gate (OFF by default): if set, require the panel "
+                        "to reach within N days of today. WF corpora train on "
+                        "historical windows, so COVERAGE — not calendar "
+                        "recency — is the load-bearing check.")
+    return p.parse_args(argv)
 
 
 def train_cutoffs(retrain_dates: list[pd.Timestamp],
@@ -422,6 +545,10 @@ def main() -> None:
         print(f"Artifact root: {STRATEGY_DIR / 'artifacts' / WF_V2_SUBDIR}/")
         print(f"Manifest output: {args.manifest_output}")
         return
+
+    # AC7 fail-closed gate: never dispatch cutoffs against a panel that would
+    # silently truncate the training window (or is too thin/gappy to train).
+    assert_training_panel_fresh(args, retrain_dates)
 
     # Lazy imports — only when actually training.
     from renquant_backtesting.walk_forward.manifest import WalkForwardManifest, write_manifest  # noqa: PLC0415

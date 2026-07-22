@@ -167,6 +167,82 @@ def compute_retrain_dates(start: pd.Timestamp, end: pd.Timestamp,
     return list(pd.date_range(start, end, freq=f"{cadence_days}D"))
 
 
+# ── AC7 training-panel freshness/coverage gate (GOAL-5) ─────────────────────
+# The per-fold trainer only rejects an EMPTY post-cutoff slice; a stale but
+# nonempty parquet that stops short of a fold's ``data_end`` silently trains on
+# a truncated window (each fold slices ``date < data_end``). Before dispatching
+# ANY fold we assert the ONE canonical renquant-common freshness contract over
+# the union window ``max(data_end)`` — fail-closed, never a silent proceed.
+def required_through_date(dates: list[pd.Timestamp],
+                          label: str | None) -> pd.Timestamp:
+    """Latest ``data_end`` any fold needs: ``max(data_end_for_cutoff(c))``.
+
+    A panel that stops short of this date silently truncates the most-recent
+    folds, so it is the load-bearing input to the pre-dispatch freshness gate.
+    """
+    if not dates:
+        raise ValueError("required_through_date: no retrain dates")
+    return max(pd.Timestamp(data_end_for_cutoff(c, label)) for c in dates)
+
+
+def resolve_dataset_path(args: argparse.Namespace) -> Path:
+    """Absolute path to the training panel. ``--dataset`` is relative to the
+    umbrella repo root (matching how the training subprocess, run with
+    ``cwd=repo_root``, resolves it)."""
+    ds = Path(args.dataset)
+    if ds.is_absolute():
+        return ds
+    return resolve_repo_root(getattr(args, "repo_root", None)) / ds
+
+
+def assert_training_panel_fresh(args: argparse.Namespace,
+                                dates: list[pd.Timestamp]) -> None:
+    """Fail-closed AC7 gate: verify the training panel COVERS the window every
+    fold needs (+ density floors) BEFORE dispatching any fold. Raises with the
+    contract's reasons rather than let a silently-truncated/thin panel train.
+    """
+    from renquant_common.training_freshness import (  # noqa: PLC0415
+        assess_training_panel_freshness,
+    )
+    required = required_through_date(dates, args.label)
+    dataset_path = resolve_dataset_path(args)
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            "train_walkforward_patchtst: training panel not found at "
+            f"{dataset_path} (--dataset={args.dataset}); cannot verify "
+            "freshness/coverage before dispatch"
+        )
+    max_gap = int(args.max_gap_days)
+    verdict = assess_training_panel_freshness(
+        dataset_path,
+        required_through_date=required,
+        min_tickers_per_day=int(args.min_tickers_per_day),
+        min_rows=int(args.min_rows),
+        max_gap_days=(None if max_gap <= 0 else max_gap),
+        max_staleness_days=(int(args.max_staleness_days)
+                            if args.max_staleness_days is not None else None),
+    )
+    if not verdict.ok:
+        panel_max = verdict.max_date.date() if verdict.max_date else None
+        raise RuntimeError(
+            "train_walkforward_patchtst: FAIL-CLOSED — training panel "
+            f"{dataset_path} does not satisfy the AC7 freshness/coverage gate "
+            f"(required_through_date={required.date()}, panel_max_date="
+            f"{panel_max}, n_rows={verdict.n_rows}). Reasons: "
+            + "; ".join(verdict.reasons)
+            + ". Refuse to train on a silently-truncated/thin panel — refresh "
+            "the panel, or for a deliberately historical run lower --end-date "
+            "so the required window matches the panel (or relax the floors)."
+        )
+    log.info(
+        "AC7 freshness gate PASS: panel=%s covers required_through_date=%s "
+        "(max_date=%s, n_days=%d, n_rows=%d, min_tickers/day=%s, max_gap=%s)",
+        dataset_path, required.date(), verdict.max_date.date(),
+        verdict.n_days, verdict.n_rows, verdict.min_tickers_per_day_observed,
+        verdict.max_gap_days_observed,
+    )
+
+
 def strategy_dir_for(args: argparse.Namespace) -> Path:
     """Resolve the umbrella strategy dir (holds ``artifacts/`` and configs)."""
     repo_root = resolve_repo_root(getattr(args, "repo_root", None))
@@ -410,6 +486,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Reuse existing model sidecar/calibrator artifacts for "
                         "a cutoff instead of rerunning completed subprocesses.")
     p.add_argument("--allow-partial-manifest", action="store_true")
+    # ── AC7 training-panel freshness/coverage gate (GOAL-5) ──────────────────
+    p.add_argument("--min-tickers-per-day", type=int, default=20,
+                   help="AC7 gate: min distinct tickers required on every "
+                        "training-window day (0 disables). PerDayDataset "
+                        "silently drops <5-ticker days.")
+    p.add_argument("--min-rows", type=int, default=0,
+                   help="AC7 gate: min total rows in the panel (0 disables).")
+    p.add_argument("--max-gap-days", type=int, default=5,
+                   help="AC7 gate: max calendar-day gap between consecutive "
+                        "training dates (0 disables; weekends are ≤4d so 5 "
+                        "flags a real hole).")
+    p.add_argument("--max-staleness-days", type=int, default=None,
+                   help="AC7 gate (OFF by default): if set, require the panel "
+                        "to reach within N days of today. WF corpora train on "
+                        "historical windows, so COVERAGE — not calendar "
+                        "recency — is the load-bearing check.")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args(argv)
 
@@ -430,6 +522,10 @@ def main() -> None:
                   f"model={model_path_for(out_dir, int(args.seed))}")
         print(f"Manifest output: {args.manifest_output}")
         return
+
+    # AC7 fail-closed gate: never dispatch folds against a panel that would
+    # silently truncate the training window (or is too thin/gappy to train).
+    assert_training_panel_fresh(args, dates)
 
     from renquant_backtesting.walk_forward.manifest import WalkForwardManifest, write_manifest  # noqa: PLC0415
     entries, failed = train_cutoffs(args, dates)
