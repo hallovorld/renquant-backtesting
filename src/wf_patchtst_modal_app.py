@@ -149,12 +149,21 @@ def train_fold_remote(request_json: str) -> str:
     except Exception as exc:  # noqa: BLE001
         return _fail("import_driver", repr(exc))
 
+    # stage_inputs_to_volume uploads each panel to Volume path ``/data/<basename>``;
+    # the Volume mounts with its root at the container repo_root (``/data``), so the
+    # panels land at ``<repo_root>/data/<basename>`` (the bundle's ``/app/repos/..``
+    # → ``<repo_root>/app/repos/..`` mapping confirms the root-at-/data mount). The
+    # recipe carries the SUBMIT-side path, which does not exist in the pod — resolve
+    # both panels to their actual on-Volume container location, else the trainer's
+    # pd.read_parquet raises FileNotFoundError.
+    dataset_container = f"{repo_root}/data/{Path(recipe['dataset']).name}"
+    rawlabel_container = f"{repo_root}/data/{Path(recipe['raw_label_panel']).name}"
     args = argparse.Namespace(
         repo_root=repo_root,
         strategy=recipe.get("strategy", "renquant_104"),
         artifact_root=recipe.get("artifact_root", "walkforward_patchtst"),
-        dataset=recipe["dataset"],
-        raw_label_panel=recipe["raw_label_panel"],
+        dataset=dataset_container,
+        raw_label_panel=rawlabel_container,
         label=recipe["label"],
         seed=int(recipe["seed"]),
         epochs=int(recipe["epochs"]),
