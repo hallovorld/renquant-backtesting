@@ -347,6 +347,33 @@ def test_dispatch_map_exception_is_captured(monkeypatch, tmp_path):
     assert "pod OOM" in got[0]["error"]
 
 
+# ── Fresh-driver staleness guard ─────────────────────────────────────────────
+def _write_driver(bundle_dir, body):
+    drv = (bundle_dir / "renquant-backtesting" / "src" / "renquant_backtesting"
+           / "wf_gate" / "train_walkforward_patchtst.py")
+    drv.parent.mkdir(parents=True, exist_ok=True)
+    drv.write_text(body)
+    return drv
+
+
+def test_assert_fresh_driver_passes_on_module_invocation(tmp_path):
+    _write_driver(tmp_path,
+                  'TRAIN_MODULE = "renquant_model_patchtst.hf_trainer"\n')
+    ex._assert_fresh_driver(tmp_path)  # must not raise
+
+
+def test_assert_fresh_driver_rejects_stale_script_driver(tmp_path):
+    _write_driver(tmp_path,
+                  'TRAIN_SCRIPT = REPO_ROOT / "scripts" / "patchtst_hf.py"\n')
+    with pytest.raises(RuntimeError, match="STALE"):
+        ex._assert_fresh_driver(tmp_path)
+
+
+def test_assert_fresh_driver_rejects_missing_driver(tmp_path):
+    with pytest.raises(RuntimeError, match="missing WF driver"):
+        ex._assert_fresh_driver(tmp_path)
+
+
 # ── CLI plan-only path ───────────────────────────────────────────────────────
 def test_cli_dry_run_makes_no_cloud_calls(monkeypatch, capsys):
     # No fake modal installed: a dry run must not import modal at all.

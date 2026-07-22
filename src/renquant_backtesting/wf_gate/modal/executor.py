@@ -57,6 +57,13 @@ _SRC_DIR = Path(__file__).resolve().parents[3]
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+# ``parents[4]`` is the renquant-backtesting checkout THIS executor runs from;
+# its parent is the code-assembly root that holds every ``<repo>/src``. Bundling
+# from here (NOT from an arbitrary ``repo_root.parent``) is what keeps the staged
+# code identical to the reviewed checkout — the same anti-contamination invariant
+# the #74 driver enforces for its own subprocess (``resolve_subrepo_root``).
+_EXECUTOR_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -324,7 +331,30 @@ def bundle_code(bundle_dir: Path, code_roots: list[Path]) -> dict[str, str]:
         except Exception:  # noqa: BLE001
             head = "unknown"
         heads[repo] = head or "unknown"
+    _assert_fresh_driver(bundle_dir)
     return heads
+
+
+def _assert_fresh_driver(bundle_dir: Path) -> None:
+    """Fail closed if the bundled WF driver is a pre-#74 (script-path) copy.
+
+    A stale ``renquant-backtesting`` checkout on ``code_roots`` would bundle a
+    driver that shells out to the removed ``scripts/patchtst_hf.py`` instead of
+    ``python -m renquant_model_patchtst.hf_trainer`` — producing an all-failed
+    corpus (or, worse, a silently wrong one). Refuse to stage it.
+    """
+    drv = (bundle_dir / "renquant-backtesting" / "src" / "renquant_backtesting"
+           / "wf_gate" / "train_walkforward_patchtst.py")
+    if not drv.exists():
+        raise RuntimeError(f"bundle missing WF driver: {drv}")
+    text = drv.read_text()
+    if "renquant_model_patchtst.hf_trainer" not in text or (
+            "scripts/patchtst_hf.py" in text and "TRAIN_SCRIPT" in text):
+        raise RuntimeError(
+            "bundle_code staged a STALE (pre-#74) WF driver that invokes "
+            "scripts/patchtst_hf.py — refusing. Point the bundle at the reviewed "
+            "checkout (the assembly this executor runs from)."
+        )
 
 
 def stage_inputs_to_volume(plan: WfRescorePlan, *, bundle_dir: Path,
@@ -657,7 +687,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     import tempfile  # noqa: PLC0415
-    code_roots = [repo_root.parent, Path.home() / "git" / "github"]
+    # Bundle from the assembly this executor lives in (the reviewed checkout),
+    # NOT repo_root.parent — repo_root is often a scratch dir whose sibling could
+    # be a stale checkout (that footgun bundled a pre-#74 driver once). Fall back
+    # to ~/git/github only if a repo is missing from the primary assembly.
+    code_roots = [_EXECUTOR_CHECKOUT_ROOT.parent, Path.home() / "git" / "github"]
     with tempfile.TemporaryDirectory(prefix="wf-pt-bundle-") as td:
         bundle_dir = Path(td)
         code_heads = bundle_code(bundle_dir, code_roots)
