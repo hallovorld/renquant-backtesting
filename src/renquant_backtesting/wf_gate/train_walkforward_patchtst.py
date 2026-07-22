@@ -3,8 +3,38 @@
 
 This is the sequence-model companion to ``train_walkforward_panel.py``. It
 does not train inside this file. Each cutoff is a subprocess call to the
-canonical HF Trainer script, followed by a causal per-fold calibrator fit and a
-standard ``kernel.walk_forward`` manifest entry.
+renquant-model HF Trainer module (``renquant_model_patchtst.hf_trainer``),
+followed by a causal per-fold calibrator fit from the same model repo
+(``renquant_model_patchtst.fit_calibrator``) and a standard
+``renquant_backtesting.walk_forward`` manifest entry.
+
+Repo boundary: model-training internals live in **renquant-model**; this
+orchestrator only sequences per-cutoff subprocesses and assembles the
+manifest. It therefore invokes the model repo *as a module* (``python -m
+renquant_model_patchtst.hf_trainer``) rather than shelling out to a
+co-located ``scripts/patchtst_hf.py`` — that script only ever lived in the
+umbrella working tree and is not part of the renquant-backtesting checkout,
+so the old script-path invocation raised ``No such file or directory`` for
+every fold when run from a clean/pinned checkout.
+
+Data & artifact root: ``data/*.parquet`` and ``backtesting/<strategy>/``
+live in the umbrella RenQuant checkout, not next to this package. The root
+is resolved explicitly via ``renquant_backtesting.repo_root.resolve_repo_root``
+(``--repo-root`` / ``$RENQUANT_REPO_ROOT`` / cwd), matching the other
+package CLIs (e.g. ``wf_gate.check_active_scorer``).
+
+Usage::
+
+    # Dry-run: print the retrain dates without training
+    python -m renquant_backtesting.wf_gate.train_walkforward_patchtst \\
+        --start-date 2024-01-01 --end-date 2024-03-01 \\
+        --cadence-days 21 --repo-root /path/to/RenQuant --dry-run
+
+    # Real walk-forward training (run from / point --repo-root at the
+    # umbrella checkout that holds data/ and backtesting/renquant_104/)
+    python -m renquant_backtesting.wf_gate.train_walkforward_patchtst \\
+        --start-date 2024-01-01 --end-date 2026-03-26 --cadence-days 21 \\
+        --device cpu --epochs 5
 """
 from __future__ import annotations
 
@@ -18,19 +48,99 @@ import sys
 import time
 from pathlib import Path
 
-import pandas as pd
+# Make the renquant_backtesting package importable when this driver is run as
+# a bare script path (``python .../train_walkforward_patchtst.py``) as well as
+# via ``python -m``. ``parents[2]`` is ``<checkout>/src``.
+_SRC_DIR = Path(__file__).resolve().parents[2]
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+import pandas as pd  # noqa: E402
+
+from renquant_backtesting.repo_root import (  # noqa: E402
+    resolve_repo_root,
+    strategy_dir,
+)
 
 for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ.setdefault(_var, "6")
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-STRATEGY_DIR = REPO_ROOT / "backtesting" / "renquant_104"
-TRAIN_SCRIPT = REPO_ROOT / "scripts" / "patchtst_hf.py"
-CALIBRATOR_SCRIPT = REPO_ROOT / "scripts" / "fit_hf_patchtst_calibrator.py"
-DEFAULT_ROOT = "walkforward_patchtst"
+# ── Pinned subrepo assembly ─────────────────────────────────────────────────
+# The per-cutoff training/calibration subprocess imports ``renquant_model_
+# patchtst`` (+ deps) and this outer driver imports ``renquant_pipeline``
+# transitively via ``renquant_backtesting.walk_forward``. Those MUST resolve
+# from the SAME pinned subrepo assembly this driver was loaded from — never an
+# arbitrary developer checkout — so a full WF run cannot silently derive
+# artifacts from branches outside the pinned assembly. ``parents[3]`` is the
+# renquant-backtesting checkout root; its parent is the assembly root that holds
+# every ``<repo>/src`` (``.subrepo_runtime/repos`` in the pinned runtime).
+_BACKTESTING_REPO_ROOT = Path(__file__).resolve().parents[3]
 
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(STRATEGY_DIR))
+# Repos whose ``<repo>/src`` the subprocess (and this driver) require.
+# renquant-model ships both renquant_model_patchtst and renquant_model_common.
+REQUIRED_SUBREPOS = (
+    "renquant-model",
+    "renquant-common",
+    "renquant-base-data",
+    "renquant-artifacts",
+    "renquant-pipeline",
+)
+
+
+def resolve_subrepo_root() -> Path:
+    """Root of the pinned subrepo assembly (the dir holding ``<repo>/src`` for
+    each pinned repo).
+
+    Precedence: ``$RENQUANT_SUBREPO_ROOT`` (the standard injection point) →
+    otherwise the assembly THIS driver was loaded from (the parent of the
+    renquant-backtesting checkout, i.e. ``.subrepo_runtime/repos`` in the pinned
+    runtime). There is deliberately NO ``~/git/github`` fallback and NO sibling
+    globbing: the single root is either explicitly injected or the driver's own
+    pinned assembly, so imports cannot leak in from ad-hoc dev checkouts.
+    """
+    env = os.environ.get("RENQUANT_SUBREPO_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    return _BACKTESTING_REPO_ROOT.parent
+
+
+def required_subrepo_src_paths(root: Path | None = None) -> list[Path]:
+    """``<repo>/src`` trees the subprocess must import from the pinned assembly.
+
+    FAIL CLOSED: raise if the assembly is missing any required repo rather than
+    let the import silently fall through to some other checkout — a full WF
+    re-score must derive artifacts only from the pinned assembly.
+    """
+    root = root if root is not None else resolve_subrepo_root()
+    srcs: list[Path] = []
+    missing: list[Path] = []
+    for repo in REQUIRED_SUBREPOS:
+        src = root / repo / "src"
+        (srcs if src.is_dir() else missing).append(src)
+    if missing:
+        raise RuntimeError(
+            "train_walkforward_patchtst: pinned subrepo assembly at "
+            f"{root} is missing required repo src trees "
+            f"{[str(p) for p in missing]}. Point $RENQUANT_SUBREPO_ROOT at the "
+            "assembly whose <repo>/src hold the pinned checkouts — refusing an "
+            "ambiguous/partial assembly to keep WF artifacts pinned."
+        )
+    return srcs
+
+
+# Put the pinned assembly's src trees on the OUTER interpreter path so a
+# standalone ``python -m ...`` in the runtime can import renquant_pipeline (the
+# manifest/loader). Single-root only (see resolve_subrepo_root); tolerant here
+# so lightweight imports don't need the full assembly — the STRICT fail-closed
+# check runs in ``subprocess_env`` right before any artifact is produced.
+for _src_path in reversed([resolve_subrepo_root() / r / "src" for r in REQUIRED_SUBREPOS]):
+    if _src_path.is_dir() and str(_src_path) not in sys.path:
+        sys.path.insert(0, str(_src_path))
+
+TRAIN_MODULE = "renquant_model_patchtst.hf_trainer"
+CALIBRATOR_MODULE = "renquant_model_patchtst.fit_calibrator"
+DEFAULT_ROOT = "walkforward_patchtst"
+DEFAULT_STRATEGY = "renquant_104"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,9 +167,20 @@ def compute_retrain_dates(start: pd.Timestamp, end: pd.Timestamp,
     return list(pd.date_range(start, end, freq=f"{cadence_days}D"))
 
 
+def strategy_dir_for(args: argparse.Namespace) -> Path:
+    """Resolve the umbrella strategy dir (holds ``artifacts/`` and configs)."""
+    repo_root = resolve_repo_root(getattr(args, "repo_root", None))
+    return strategy_dir(repo_root, getattr(args, "strategy", DEFAULT_STRATEGY))
+
+
+def default_manifest_output(args: argparse.Namespace) -> str:
+    return str(strategy_dir_for(args) / "artifacts"
+               / "walkforward_patchtst_manifest.json")
+
+
 def artifact_dir(args: argparse.Namespace, cutoff: pd.Timestamp) -> Path:
     root = args.artifact_root or DEFAULT_ROOT
-    return STRATEGY_DIR / "artifacts" / root / cutoff.date().isoformat()
+    return strategy_dir_for(args) / "artifacts" / root / cutoff.date().isoformat()
 
 
 def model_path_for(out_dir: Path, seed: int) -> Path:
@@ -77,7 +198,7 @@ def sidecar_path_for(model_path: Path) -> Path:
 def train_cmd(args: argparse.Namespace, cutoff: pd.Timestamp,
               out_dir: Path) -> list[str]:
     cmd = [
-        sys.executable, str(TRAIN_SCRIPT),
+        sys.executable, "-m", TRAIN_MODULE,
         "--dataset", args.dataset,
         "--cut", "all",
         "--train-cutoff", cutoff.date().isoformat(),
@@ -107,12 +228,16 @@ def train_cmd(args: argparse.Namespace, cutoff: pd.Timestamp,
 def calibrator_cmd(args: argparse.Namespace, cutoff: pd.Timestamp,
                    model_path: Path, cal_path: Path) -> list[str]:
     return [
-        sys.executable, str(CALIBRATOR_SCRIPT),
+        sys.executable, "-m", CALIBRATOR_MODULE,
         "--scorer-artifact", str(model_path),
         "--out", str(cal_path),
+        "--panel", args.dataset,
+        "--raw-label-panel", args.raw_label_panel,
+        "--label-col", args.label,
         "--data-end", data_end_for_cutoff(cutoff, args.label),
         "--batch-size", str(args.calibrator_batch_size),
         "--method", args.calibrator_method,
+        "--min-rows", str(args.calibrator_min_rows),
     ]
 
 
@@ -143,12 +268,28 @@ def build_entry(cutoff: pd.Timestamp, model_path: Path,
     )
 
 
-def run_subprocess(cmd: list[str], label: str) -> tuple[bool, str]:
+def subprocess_env() -> dict[str, str]:
+    """Env for the training/calibration subprocess: pin ``PYTHONPATH`` to the
+    required ``<repo>/src`` trees of the resolved subrepo assembly so
+    ``renquant_model_patchtst`` (and its deps) import ONLY from the pinned
+    checkouts regardless of cwd. FAIL CLOSED via ``required_subrepo_src_paths``
+    if the assembly is incomplete — an artifact must never be derived from an
+    unpinned checkout."""
+    env = os.environ.copy()
+    src_paths = [str(p) for p in required_subrepo_src_paths()]
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        src_paths + ([existing] if existing else [])
+    )
+    return env
+
+
+def run_subprocess(cmd: list[str], label: str, cwd: Path) -> tuple[bool, str]:
     log.info("%s start: %s", label, " ".join(cmd))
     t0 = time.monotonic()
     proc = subprocess.run(
-        cmd, cwd=str(REPO_ROOT), check=False,
-        capture_output=True, text=True,
+        cmd, cwd=str(cwd), check=False,
+        capture_output=True, text=True, env=subprocess_env(),
     )
     elapsed = time.monotonic() - t0
     if proc.returncode != 0:
@@ -158,6 +299,7 @@ def run_subprocess(cmd: list[str], label: str) -> tuple[bool, str]:
 
 
 def train_one_cutoff(args: argparse.Namespace, cutoff: pd.Timestamp):
+    cwd = resolve_repo_root(getattr(args, "repo_root", None))
     out_dir = artifact_dir(args, cutoff)
     out_dir.mkdir(parents=True, exist_ok=True)
     model_path = model_path_for(out_dir, int(args.seed))
@@ -166,7 +308,7 @@ def train_one_cutoff(args: argparse.Namespace, cutoff: pd.Timestamp):
                  cutoff.date(), model_path)
     else:
         ok, err = run_subprocess(train_cmd(args, cutoff, out_dir),
-                                 f"train cutoff={cutoff.date()}")
+                                 f"train cutoff={cutoff.date()}", cwd)
         if not ok:
             return cutoff, None, err
     cal_path = None
@@ -177,7 +319,7 @@ def train_one_cutoff(args: argparse.Namespace, cutoff: pd.Timestamp):
                      cutoff.date(), cal_path)
         else:
             ok, err = run_subprocess(calibrator_cmd(args, cutoff, model_path, cal_path),
-                                     f"calibrate cutoff={cutoff.date()}")
+                                     f"calibrate cutoff={cutoff.date()}", cwd)
             if not ok:
                 return cutoff, None, err
     return cutoff, build_entry(cutoff, model_path, cal_path, args.label), ""
@@ -227,15 +369,23 @@ def train_cutoffs(args: argparse.Namespace, dates: list[pd.Timestamp]):
     return entries, failed
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--start-date", required=True)
     p.add_argument("--end-date", required=True)
     p.add_argument("--cadence-days", type=int, default=21)
-    p.add_argument("--manifest-output",
-                   default=str(STRATEGY_DIR / "artifacts" / "walkforward_patchtst_manifest.json"))
+    p.add_argument("--repo-root", default=None,
+                   help="umbrella RenQuant root holding data/ and "
+                        "backtesting/<strategy>/ (default: $RENQUANT_REPO_ROOT "
+                        "or cwd)")
+    p.add_argument("--strategy", default=DEFAULT_STRATEGY)
+    p.add_argument("--manifest-output", default=None,
+                   help="default: <repo-root>/backtesting/<strategy>/artifacts/"
+                        "walkforward_patchtst_manifest.json")
     p.add_argument("--artifact-root", default=None)
     p.add_argument("--dataset", default="data/transformer_v4_wl200_clean.parquet")
+    p.add_argument("--raw-label-panel",
+                   default="data/alpha158_291_fundamental_dataset_rawlabel.parquet")
     p.add_argument("--label", default="fwd_60d_excess")
     p.add_argument("--seed", type=int, default=44)
     p.add_argument("--epochs", type=int, default=5)
@@ -255,12 +405,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--calibrator-batch-size", type=int, default=512)
     p.add_argument("--calibrator-method", default="platt",
                    choices=["platt", "isotonic"])
+    p.add_argument("--calibrator-min-rows", type=int, default=1000)
     p.add_argument("--reuse-existing", action="store_true",
                    help="Reuse existing model sidecar/calibrator artifacts for "
                         "a cutoff instead of rerunning completed subprocesses.")
     p.add_argument("--allow-partial-manifest", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main() -> None:
@@ -269,6 +420,8 @@ def main() -> None:
         pd.Timestamp(args.start_date), pd.Timestamp(args.end_date),
         int(args.cadence_days),
     )
+    if args.manifest_output is None:
+        args.manifest_output = default_manifest_output(args)
     if args.dry_run:
         for i, cutoff in enumerate(dates):
             out_dir = artifact_dir(args, cutoff)
