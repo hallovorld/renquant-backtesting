@@ -94,13 +94,28 @@ Modal infrastructure was validated with bounded smoke tests:
 - **GPU grant: CONFIRMED.** A `gpu="T4"` pod returned `Tesla T4, 15360 MiB` from
   `nvidia-smi`.
 
-A real staged single-fold run (`--staged 1 --gpu T4 --execute`) against an
-isolated scratch repo-root (data symlinked read-only; artifacts written to
-scratch, never the live umbrella or a committed corpus) exercises the full path
-(bundle → Volume upload of the two panels → GPU image build → fold train +
-calibrate → collect → manifest + provenance). See the PR body for the observed
-outcome of that run. The full 43-fold corpus is a follow-up dispatch (heavier:
-~1.2 GB panel upload + 43 GPU pods) once the staged read is reviewed.
+Real staged single-fold runs (`--staged 1 --gpu T4 --execute`) against an
+isolated scratch repo-root (data symlinked read-only; artifacts to scratch,
+never the live umbrella or a committed corpus) surfaced two container-side bugs
+that only appear on a real dispatch — both now fixed:
+
+1. **Container-load `ModuleNotFoundError: renquant_common`.** Modal imports the
+   worker's *defining module* before any function body runs; a module under the
+   `renquant_backtesting` package dragged its heavy `__init__` at load time. Fix:
+   the worker is a standalone top-level module `wf_patchtst_modal_app`
+   (`os + modal` import surface only); the pinned bundle is put on `sys.path`
+   inside the body.
+2. **Stale bundled driver.** `bundle_code` searched `repo_root.parent` first, and
+   the scratch root's sibling was an old pre-#74 checkout, so the pod trained
+   against the removed `scripts/patchtst_hf.py` path. Fix: bundle from the
+   reviewed checkout this executor runs from (`_EXECUTOR_CHECKOUT_ROOT.parent`) +
+   a fail-closed `_assert_fresh_driver()` staleness guard.
+
+After both fixes the pod loads cleanly and runs the correct command
+(`python -m renquant_model_patchtst.hf_trainer … --device cuda --save-model`) —
+real GPU training. The full/larger multi-fold corpus is a `.map` fan-out over the
+recent 8–12 folds first (real universe, calibrator leg on), then the full 43,
+reusing the now-cached image. See the PR thread for the landed fold count.
 
 ## Guardrails honored
 
