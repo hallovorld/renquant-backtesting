@@ -921,6 +921,58 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
+def _assert_panel_fresh_or_report(plan: WfRescorePlan,
+                                  args: argparse.Namespace,
+                                  dataset_path: Path) -> int:
+    """AC7 fail-closed freshness/coverage gate (GOAL-5). Returns 0 on pass,
+    2 (fail-closed, matching this CLI's input-error code) on breach, printing
+    the contract's reasons. Uses the same canonical renquant-common contract
+    and the #74 driver's ``data_end_for_cutoff`` so the union-window logic is
+    shared, not re-implemented."""
+    import pandas as pd  # noqa: PLC0415
+
+    from renquant_backtesting.wf_gate.train_walkforward_patchtst import (  # noqa: PLC0415
+        data_end_for_cutoff,
+    )
+    from renquant_common.training_freshness import (  # noqa: PLC0415
+        assess_training_panel_freshness,
+    )
+
+    if not plan.cutoffs:
+        print("\nAC7 freshness gate: no folds planned — nothing to check.")
+        return 0
+    required = max(
+        pd.Timestamp(data_end_for_cutoff(pd.Timestamp(c), args.label))
+        for c in plan.cutoffs
+    )
+    max_gap = int(args.max_gap_days)
+    verdict = assess_training_panel_freshness(
+        dataset_path,
+        required_through_date=required,
+        min_tickers_per_day=int(args.min_tickers_per_day),
+        min_rows=int(args.min_rows),
+        max_gap_days=(None if max_gap <= 0 else max_gap),
+        max_staleness_days=(int(args.max_staleness_days)
+                            if args.max_staleness_days is not None else None),
+    )
+    if not verdict.ok:
+        panel_max = verdict.max_date.date() if verdict.max_date else None
+        print("\nAC7 FRESHNESS GATE FAILED — refusing to stage/dispatch a "
+              "stale/truncated panel:")
+        print(f"  panel            : {dataset_path}")
+        print(f"  required_through : {required.date()}")
+        print(f"  panel_max_date   : {panel_max}")
+        for r in verdict.reasons:
+            print(f"  - {r}")
+        return 2
+    log.info(
+        "AC7 freshness gate PASS: panel=%s covers required_through_date=%s "
+        "(max_date=%s, n_rows=%d)", dataset_path, required.date(),
+        verdict.max_date.date(), verdict.n_rows,
+    )
+    return 0
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--start-date", default="2023-10-02")
@@ -973,6 +1025,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--assembly-lock", default=None,
                    help="Optional JSON file {repo: git_sha} the staged bundle "
                         "commits must match exactly (fail closed on drift).")
+    # ── AC7 training-panel freshness/coverage gate (GOAL-5) ──────────────────
+    p.add_argument("--min-tickers-per-day", type=int, default=20,
+                   help="AC7 gate: min distinct tickers required on every "
+                        "training-window day (0 disables). PerDayDataset "
+                        "silently drops <5-ticker days.")
+    p.add_argument("--min-rows", type=int, default=0,
+                   help="AC7 gate: min total rows in the panel (0 disables).")
+    p.add_argument("--max-gap-days", type=int, default=5,
+                   help="AC7 gate: max calendar-day gap between consecutive "
+                        "training dates (0 disables; weekends are ≤4d so 5 "
+                        "flags a real hole).")
+    p.add_argument("--max-staleness-days", type=int, default=None,
+                   help="AC7 gate (OFF by default): if set, require the panel "
+                        "to reach within N days of today. WF corpora train on "
+                        "historical windows, so COVERAGE is the load-bearing "
+                        "check, not calendar recency.")
     p.add_argument("--timeout-seconds", type=int, default=3600)
     p.add_argument("--retries", type=int, default=1)
     p.add_argument("--dry-run", action="store_true",
@@ -1021,6 +1089,16 @@ def main(argv: list[str] | None = None) -> int:
         if not pth.exists():
             print(f"\nMissing required input panel: {pth}")
             return 2
+
+    # AC7 fail-closed freshness/coverage gate (GOAL-5) — the SAME canonical
+    # renquant-common contract the #74 driver runs, applied to the LOCAL panel
+    # BEFORE staging it to the Volume. A Modal corpus runs each fold's
+    # train_one_cutoff directly (never the driver's main()), so without this
+    # pre-dispatch check a stale/truncated panel would silently short-train
+    # every pod.
+    rc = _assert_panel_fresh_or_report(plan, args, dataset_path)
+    if rc != 0:
+        return rc
 
     import tempfile  # noqa: PLC0415
     # ONE explicit pinned assembly (codex #76 blocker 1): the reviewed checkout
