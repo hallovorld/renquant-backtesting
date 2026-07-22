@@ -444,7 +444,9 @@ def dispatch_folds(plan: WfRescorePlan, *, timeout_s: int, retries: int,
         payloads.append(json.dumps(r))
 
     results: list[dict[str, Any]] = []
-    with mod.app.run():
+    with mod.app.run() as running_app:
+        log.info("Modal app dispatched: app_id=%s folds=%d gpu=%s",
+                 getattr(running_app, "app_id", "?"), len(payloads), plan.gpu)
         # wrap_returned_exceptions=False → a failed pod yields its underlying
         # exception directly (opt into the post-2025-06-27 Modal behavior;
         # otherwise it leaks a modal.exceptions.UserCodeException wrapper).
