@@ -38,10 +38,8 @@ Training internals stay in renquant-model; this driver only *orchestrates*.
   renquant_model_patchtst.hf_trainer` / `... .fit_calibrator` (mirrors the
   umbrella's evolved driver and `wf_gate/runner.py`'s `-m sim_driver`
   pattern). No `scripts/*.py` path, nothing hacked into the runtime.
-- Wire the subprocess `PYTHONPATH` (and the outer `sys.path`) to every
-  existing sibling-repo `src` tree, discovered relative to the checkout
-  (`.subrepo_runtime/repos/<repo>` in the pinned runtime, `~/git/github/<repo>`
-  in a dev checkout) so `renquant_model_patchtst` imports regardless of cwd.
+- Pin the subprocess `PYTHONPATH` to the required `<repo>/src` trees of a
+  SINGLE subrepo assembly (see Round 2 for the fail-closed hardening).
 - Resolve the umbrella data/artifact root explicitly via
   `renquant_backtesting.repo_root.resolve_repo_root` (`--repo-root` /
   `$RENQUANT_REPO_ROOT` / cwd), matching `wf_gate/check_active_scorer.py`.
@@ -86,5 +84,37 @@ repo-root — no umbrella/production path touched.
 
 Regression guard: `tests/wf_gate/test_train_walkforward_patchtst_command.py`
 asserts the module invocation (and that `scripts/patchtst_hf.py` never comes
-back), the calibrator panel args, the sibling-`src` PYTHONPATH wiring, and
-repo-root-driven artifact/manifest paths.
+back), the calibrator panel args, and repo-root-driven artifact/manifest paths.
+
+## Round 2 (codex review — pinned-assembly correctness)
+
+Codex CHANGES_REQUESTED (sound): the first cut's subprocess PYTHONPATH could
+silently import arbitrary developer checkouts — a `~/git/github` fallback plus
+an ad-hoc two-root sibling scan — so a full WF run could derive artifacts from
+branches outside the pinned assembly.
+
+1. **Single pinned assembly, fail closed.** New `resolve_subrepo_root()`
+   honors `$RENQUANT_SUBREPO_ROOT` (the standard injection point) and otherwise
+   defaults to the assembly THIS driver was loaded from — the parent of the
+   renquant-backtesting checkout (`.subrepo_runtime/repos` in the pinned
+   runtime). No `~/git/github` fallback, no sibling globbing. `subprocess_env`
+   pins `PYTHONPATH` to `required_subrepo_src_paths()`, which RAISES if the
+   assembly is missing any required repo (`renquant-model`, `renquant-common`,
+   `renquant-base-data`, `renquant-artifacts`, `renquant-pipeline`) rather than
+   letting the import fall through to another checkout.
+2. **Pinned-assembly subprocess import smoke test** — a fresh interpreter with
+   the driver's `subprocess_env` imports both `renquant_model_patchtst.hf_trainer`
+   and `.fit_calibrator` (proves the argv the driver launches resolves against
+   the pinned assembly). Plus resolver tests: env honored / no home fallback,
+   and fail-closed on an incomplete assembly.
+3. **Calibrator-leg fold test** (`test_calibrator_leg_produces_artifacts_and_
+   provenance`, opt-in via `$RENQUANT_WF_TEST_DATASET` + `$RENQUANT_WF_TEST_RAW_
+   LABEL`) runs ONE fold WITHOUT `--skip-calibrators` and asserts the production
+   calibration/provenance path: per-fold model `.pt` + model sidecar +
+   calibrator sidecar, and a manifest entry carrying BOTH `calibrator_uri` and
+   the model sidecar's `trained_date` / `effective_train_cutoff_date`.
+
+Verified: 8/8 in the file pass (calibrator-leg run ~24 s on a CPU subset). A
+2-fold `--epochs 2` run WITH the calibrator leg produced, per fold,
+`hf_patchtst_all_seed44_model.pt` + `.metadata.json` + `hf_patchtst-calibration.json`,
+and a 2/2 manifest with `calibrator_uri` set on every entry.

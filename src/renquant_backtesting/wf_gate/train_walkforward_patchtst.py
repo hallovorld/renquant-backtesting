@@ -65,34 +65,76 @@ from renquant_backtesting.repo_root import (  # noqa: E402
 for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ.setdefault(_var, "6")
 
-# ── Sibling-repo code roots ─────────────────────────────────────────────────
+# ── Pinned subrepo assembly ─────────────────────────────────────────────────
 # The per-cutoff training/calibration subprocess imports ``renquant_model_
-# patchtst`` (+ its deps) from the sibling repos' ``src`` trees, and the outer
-# driver imports ``renquant_pipeline`` / ``renquant_common`` transitively via
-# ``renquant_backtesting.walk_forward``. Those siblings sit next to this
-# checkout: ``.subrepo_runtime/repos/<repo>`` in the pinned runtime and
-# ``~/git/github/<repo>`` in a dev checkout. ``parents[3]`` is the
-# renquant-backtesting checkout root; its parent holds the sibling repos.
+# patchtst`` (+ deps) and this outer driver imports ``renquant_pipeline``
+# transitively via ``renquant_backtesting.walk_forward``. Those MUST resolve
+# from the SAME pinned subrepo assembly this driver was loaded from — never an
+# arbitrary developer checkout — so a full WF run cannot silently derive
+# artifacts from branches outside the pinned assembly. ``parents[3]`` is the
+# renquant-backtesting checkout root; its parent is the assembly root that holds
+# every ``<repo>/src`` (``.subrepo_runtime/repos`` in the pinned runtime).
 _BACKTESTING_REPO_ROOT = Path(__file__).resolve().parents[3]
-CANDIDATE_CODE_ROOTS = list(dict.fromkeys([
-    _BACKTESTING_REPO_ROOT.parent,
-    Path.home() / "git" / "github",
-]))
-MULTIREPO_REPOS = [
+
+# Repos whose ``<repo>/src`` the subprocess (and this driver) require.
+# renquant-model ships both renquant_model_patchtst and renquant_model_common.
+REQUIRED_SUBREPOS = (
     "renquant-model",
     "renquant-common",
     "renquant-base-data",
     "renquant-artifacts",
     "renquant-pipeline",
-    "renquant-strategy-104",
-]
-MULTIREPO_SRC_PATHS = list(dict.fromkeys(
-    root / repo / "src"
-    for root in CANDIDATE_CODE_ROOTS
-    for repo in MULTIREPO_REPOS
-))
-for _src_path in reversed(MULTIREPO_SRC_PATHS):
-    if _src_path.exists() and str(_src_path) not in sys.path:
+)
+
+
+def resolve_subrepo_root() -> Path:
+    """Root of the pinned subrepo assembly (the dir holding ``<repo>/src`` for
+    each pinned repo).
+
+    Precedence: ``$RENQUANT_SUBREPO_ROOT`` (the standard injection point) →
+    otherwise the assembly THIS driver was loaded from (the parent of the
+    renquant-backtesting checkout, i.e. ``.subrepo_runtime/repos`` in the pinned
+    runtime). There is deliberately NO ``~/git/github`` fallback and NO sibling
+    globbing: the single root is either explicitly injected or the driver's own
+    pinned assembly, so imports cannot leak in from ad-hoc dev checkouts.
+    """
+    env = os.environ.get("RENQUANT_SUBREPO_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    return _BACKTESTING_REPO_ROOT.parent
+
+
+def required_subrepo_src_paths(root: Path | None = None) -> list[Path]:
+    """``<repo>/src`` trees the subprocess must import from the pinned assembly.
+
+    FAIL CLOSED: raise if the assembly is missing any required repo rather than
+    let the import silently fall through to some other checkout — a full WF
+    re-score must derive artifacts only from the pinned assembly.
+    """
+    root = root if root is not None else resolve_subrepo_root()
+    srcs: list[Path] = []
+    missing: list[Path] = []
+    for repo in REQUIRED_SUBREPOS:
+        src = root / repo / "src"
+        (srcs if src.is_dir() else missing).append(src)
+    if missing:
+        raise RuntimeError(
+            "train_walkforward_patchtst: pinned subrepo assembly at "
+            f"{root} is missing required repo src trees "
+            f"{[str(p) for p in missing]}. Point $RENQUANT_SUBREPO_ROOT at the "
+            "assembly whose <repo>/src hold the pinned checkouts — refusing an "
+            "ambiguous/partial assembly to keep WF artifacts pinned."
+        )
+    return srcs
+
+
+# Put the pinned assembly's src trees on the OUTER interpreter path so a
+# standalone ``python -m ...`` in the runtime can import renquant_pipeline (the
+# manifest/loader). Single-root only (see resolve_subrepo_root); tolerant here
+# so lightweight imports don't need the full assembly — the STRICT fail-closed
+# check runs in ``subprocess_env`` right before any artifact is produced.
+for _src_path in reversed([resolve_subrepo_root() / r / "src" for r in REQUIRED_SUBREPOS]):
+    if _src_path.is_dir() and str(_src_path) not in sys.path:
         sys.path.insert(0, str(_src_path))
 
 TRAIN_MODULE = "renquant_model_patchtst.hf_trainer"
@@ -227,16 +269,18 @@ def build_entry(cutoff: pd.Timestamp, model_path: Path,
 
 
 def subprocess_env() -> dict[str, str]:
-    """Env for the training/calibration subprocess: put every existing sibling
-    ``src`` tree on ``PYTHONPATH`` so ``renquant_model_patchtst`` (and its
-    deps) import from the pinned checkouts regardless of cwd."""
+    """Env for the training/calibration subprocess: pin ``PYTHONPATH`` to the
+    required ``<repo>/src`` trees of the resolved subrepo assembly so
+    ``renquant_model_patchtst`` (and its deps) import ONLY from the pinned
+    checkouts regardless of cwd. FAIL CLOSED via ``required_subrepo_src_paths``
+    if the assembly is incomplete — an artifact must never be derived from an
+    unpinned checkout."""
     env = os.environ.copy()
-    src_paths = [str(p) for p in MULTIREPO_SRC_PATHS if p.exists()]
-    if src_paths:
-        existing = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = os.pathsep.join(
-            src_paths + ([existing] if existing else [])
-        )
+    src_paths = [str(p) for p in required_subrepo_src_paths()]
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        src_paths + ([existing] if existing else [])
+    )
     return env
 
 
