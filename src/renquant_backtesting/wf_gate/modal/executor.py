@@ -410,8 +410,12 @@ def dispatch_folds(plan: WfRescorePlan, *, timeout_s: int, retries: int,
 
     results: list[dict[str, Any]] = []
     with mod.app.run():
+        # wrap_returned_exceptions=False → a failed pod yields its underlying
+        # exception directly (opt into the post-2025-06-27 Modal behavior;
+        # otherwise it leaks a modal.exceptions.UserCodeException wrapper).
         for item in mod.train_fold_remote.map(
             payloads, order_outputs=False, return_exceptions=True,
+            wrap_returned_exceptions=False,
         ):
             if isinstance(item, Exception):
                 results.append({"ok": False, "cutoff_date": None,
