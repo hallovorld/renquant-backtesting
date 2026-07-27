@@ -315,10 +315,11 @@ def test_dispatch_fans_out_and_collects(monkeypatch, tmp_path):
     captured = _install_fake_modal(monkeypatch, map_results=results_json)
 
     plan = ex.build_plan(_default_args(staged=2))
-    got = ex.dispatch_folds(plan, timeout_s=1800, retries=1,
-                            volume_commit_id="sha256:vol01")
+    got, dinfo = ex.dispatch_folds(plan, timeout_s=1800, retries=1,
+                                   volume_commit_id="sha256:vol01")
     assert captured["app_ran"] is True
     assert len(captured["dispatched"]) == 2
+    assert dinfo["dispatched_cutoffs"] == plan.cutoffs
     # volume_commit_id threaded into every payload
     for p in captured["dispatched"]:
         assert json.loads(p)["volume_commit_id"] == "sha256:vol01"
@@ -378,8 +379,8 @@ def test_dispatch_handles_partial_failure(monkeypatch, tmp_path):
                       "error": "train_one_cutoff exit=1"})
     _install_fake_modal(monkeypatch, map_results=[good, bad])
     plan = ex.build_plan(_default_args(staged=2))
-    got = ex.dispatch_folds(plan, timeout_s=60, retries=0,
-                            volume_commit_id=None)
+    got, _ = ex.dispatch_folds(plan, timeout_s=60, retries=0,
+                               volume_commit_id=None)
     out = ex.collect_and_write(
         plan, got, repo_root=tmp_path, code_heads={},
         staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None})
@@ -398,7 +399,8 @@ def test_dispatch_map_exception_is_captured(monkeypatch, tmp_path):
     _install_fake_modal(monkeypatch,
                         map_results=[RuntimeError("pod OOM")])
     plan = ex.build_plan(_default_args(staged=1))
-    got = ex.dispatch_folds(plan, timeout_s=60, retries=0, volume_commit_id=None)
+    got, _ = ex.dispatch_folds(plan, timeout_s=60, retries=0,
+                               volume_commit_id=None)
     assert len(got) == 1 and got[0]["ok"] is False
     assert "pod OOM" in got[0]["error"]
 
@@ -412,7 +414,8 @@ def _collect_single(monkeypatch, tmp_path, *canned, skip_calibrators=False):
     _install_fake_modal(monkeypatch, map_results=list(canned))
     plan = ex.build_plan(_default_args(staged=len(canned),
                                        skip_calibrators=skip_calibrators))
-    got = ex.dispatch_folds(plan, timeout_s=60, retries=0, volume_commit_id=None)
+    got, _ = ex.dispatch_folds(plan, timeout_s=60, retries=0,
+                               volume_commit_id=None)
     return ex.collect_and_write(
         plan, got, repo_root=tmp_path, code_heads={},
         staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None})
@@ -710,6 +713,320 @@ def test_collect_refuses_canonical_serving_manifest(tmp_path):
         ex.collect_and_write(
             plan, [], repo_root=tmp_path, code_heads={},
             staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None})
+
+
+# ── Bounded pilot/resume dispatch + cost projection (model#82 P0) ────────────
+def test_select_cutoffs_exact_selection():
+    grid = ex.compute_retrain_cutoffs("2023-10-02", "2026-03-02", 21)
+    picked = [grid[7], grid[0], grid[-1]]  # deliberately unordered input
+    plan = ex.build_plan(_default_args(select_cutoffs=",".join(picked)))
+    # EXACTLY the requested folds, normalised to grid (chronological) order.
+    assert plan.cutoffs == [grid[0], grid[7], grid[-1]]
+    assert [r["cutoff_date"] for r in plan.fold_requests] == plan.cutoffs
+
+
+def test_select_cutoffs_rejects_offgrid_duplicates_empty():
+    grid = ex.compute_retrain_cutoffs("2023-10-02", "2026-03-02", 21)
+    with pytest.raises(ValueError, match="not on the corpus grid"):
+        ex.select_explicit_cutoffs(grid, f"{grid[0]},1999-01-01")
+    with pytest.raises(ValueError, match="duplicate"):
+        ex.select_explicit_cutoffs(grid, f"{grid[0]},{grid[0]}")
+    with pytest.raises(ValueError, match="no dates"):
+        ex.select_explicit_cutoffs(grid, " , ")
+
+
+def test_select_cutoffs_mutually_exclusive_with_staged():
+    with pytest.raises(SystemExit) as ei:
+        ex.parse_args(["--staged", "3", "--select-cutoffs", "2026-03-02"])
+    assert ei.value.code == 2  # argparse mutual-exclusion error
+
+
+def _strategy_artifacts(repo_root):
+    return repo_root / "backtesting" / "renquant_104" / "artifacts"
+
+
+def _run_phase(monkeypatch, repo_root, run_id, select, canned):
+    """One bounded-dispatch phase against the fake Modal SDK.
+
+    Mirrors main()'s execute path at the function seams: partition the resume
+    state, dispatch ONLY the absent folds, then rebuild manifest + provenance
+    over the union with a per-dispatch audit record.
+    """
+    captured = _install_fake_modal(monkeypatch, map_results=list(canned))
+    plan = ex.build_plan(_default_args(run_id=run_id,
+                                       select_cutoffs=",".join(select)))
+    part = ex.partition_resume(plan, _strategy_artifacts(repo_root))
+    assert not part["invalid_selected"]
+    plan.fold_requests = [r for r in plan.fold_requests
+                          if r["cutoff_date"] in set(part["dispatch"])]
+    if part["dispatch"]:
+        got, dinfo = ex.dispatch_folds(plan, timeout_s=60, retries=0,
+                                       volume_commit_id=None)
+    else:
+        got, dinfo = [], {"app_id": None}
+    out = ex.collect_and_write(
+        plan, got, repo_root=repo_root, code_heads={},
+        staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None},
+        existing_folds=part["existing"],
+        dispatch_meta={"app_id": dinfo.get("app_id"),
+                       "dispatched_cutoffs": part["dispatch"],
+                       "skipped_existing_cutoffs": part["skipped"]})
+    return captured, part, out
+
+
+PILOT = ("2026-02-09", "2026-04-10", "2026-01-12")
+REMAINDER = ("2026-03-02", "2026-05-01", "2026-02-02")
+
+
+def test_resume_skips_existing_valid_folds_and_unifies_manifest(
+        monkeypatch, tmp_path):
+    (a, ta, ea), (b, tb, eb) = PILOT, REMAINDER
+    # Phase 1 — pilot: dispatch EXACTLY fold a.
+    cap1, _, out1 = _run_phase(monkeypatch, tmp_path, "two-phase", [a],
+                               [_canned_fold_result(a, ta, ea)])
+    assert [json.loads(p)["cutoff_date"] for p in cap1["dispatched"]] == [a]
+    assert out1["n_folds"] == 1
+    # Phase 2 — resume the SAME run selecting a+b: a is skipped with ZERO
+    # retrain calls (the captured map fan-out carries ONLY b), b dispatches.
+    cap2, part2, out2 = _run_phase(monkeypatch, tmp_path, "two-phase", [a, b],
+                                   [_canned_fold_result(b, tb, eb)])
+    assert part2["skipped"] == [a]
+    assert part2["dispatch"] == [b]
+    assert [json.loads(p)["cutoff_date"] for p in cap2["dispatched"]] == [b]
+    # ONE auditable corpus manifest: rebuilt at the SAME path over the union,
+    # via the reviewed write_manifest (both folds, chronological).
+    assert out2["manifest"] == out1["manifest"]
+    manifest = json.loads(Path(out2["manifest"]).read_text())
+    assert [r["cutoff_date"][:10] for r in manifest["retrains"]] == [a, b]
+    prov = out2["provenance_obj"]
+    assert prov["requested_cutoffs"] == [a, b]
+    assert prov["n_folds_requested"] == 2
+    assert prov["promotion_ready"] is True
+    # Per-dispatch audit history: one record per phase, each naming its
+    # dispatch list + app facts; pod_facts union spans both phases.
+    d = prov["dispatches"]
+    assert len(d) == 2
+    assert d[0]["dispatched_cutoffs"] == [a]
+    assert d[0]["skipped_existing_cutoffs"] == []
+    assert d[1]["dispatched_cutoffs"] == [b]
+    assert d[1]["skipped_existing_cutoffs"] == [a]
+    assert d[0]["pod_facts"][a]["worker_id"] == f"ta-{a}"
+    assert d[1]["pod_facts"][b]["worker_id"] == f"ta-{b}"
+    assert set(prov["pod_facts"]) == {a, b}
+
+
+def test_resume_hard_fails_on_existing_but_invalid(monkeypatch, tmp_path):
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "resume-bad", [a],
+               [_canned_fold_result(a, ta, ea)])
+    # Corrupt the existing fold: truncate its model .pt to zero bytes.
+    fold_dir = (_strategy_artifacts(tmp_path) / ex.RUN_NAMESPACE_ROOT
+                / "resume-bad" / a)
+    next(fold_dir.glob("*.pt")).write_bytes(b"")
+    plan = ex.build_plan(_default_args(run_id="resume-bad", select_cutoffs=a))
+    part = ex.partition_resume(plan, _strategy_artifacts(tmp_path))
+    assert a in part["invalid_selected"]
+    assert "model_pt_empty" in part["invalid_selected"][a]
+    # main() hard-fails BEFORE any cloud call (no modal import at all).
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "resume-bad", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--execute"])
+    assert rc == 2
+    assert "modal" not in sys.modules
+
+
+def test_resume_all_existing_noop_rebuild_no_modal(monkeypatch, tmp_path,
+                                                   capsys):
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "noop-run", [a],
+               [_canned_fold_result(a, ta, ea)])
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "noop-run", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--execute"])
+    assert rc == 0  # union complete + promotable
+    assert "modal" not in sys.modules  # ZERO cloud calls
+    assert "NOTHING to dispatch" in capsys.readouterr().out
+    prov_path = (_strategy_artifacts(tmp_path) / ex.RUN_NAMESPACE_ROOT
+                 / "noop-run" / (ex.CANONICAL_SERVING_MANIFEST
+                                 + ".provenance.json"))
+    prov = json.loads(prov_path.read_text())
+    assert len(prov["dispatches"]) == 2  # phase-1 + the no-op rebuild record
+    assert prov["dispatches"][1]["dispatched_cutoffs"] == []
+    assert prov["dispatches"][1]["skipped_existing_cutoffs"] == [a]
+    assert prov["pod_facts"][a]["worker_id"] == f"ta-{a}"  # facts preserved
+
+
+def test_resume_recipe_mismatch_hard_fails(monkeypatch, tmp_path, capsys):
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "recipe-run", [a],
+               [_canned_fold_result(a, ta, ea)])
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "recipe-run", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9"])
+    assert rc == 2
+    assert "one run namespace = one recipe" in capsys.readouterr().out.lower()
+    assert "modal" not in sys.modules
+
+
+def test_resume_missing_provenance_sidecar_hard_fails_when_folds_exist(
+        monkeypatch, tmp_path, capsys):
+    """AUDIT REGRESSION GUARD (renquant-backtesting#81 review, model#82 P0).
+
+    A materialised fold on disk with NO readable provenance sidecar (deleted,
+    corrupted, or an interrupted first dispatch) must never be silently
+    resumed — the recipe-mismatch check can't verify anything without the
+    sidecar, so an old-recipe fold could be skipped and absorbed into a
+    union manifest stamped with a DIFFERENT recipe_id while still reporting
+    promotion_ready=True. Fail closed instead.
+    """
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "sidecar-gone", [a],
+               [_canned_fold_result(a, ta, ea)])
+    prov_path = (_strategy_artifacts(tmp_path) / ex.RUN_NAMESPACE_ROOT
+                 / "sidecar-gone" / (ex.CANONICAL_SERVING_MANIFEST
+                                     + ".provenance.json"))
+    prov_path.unlink()
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "sidecar-gone", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "resume refused" in out.lower()
+    assert "provenance sidecar is missing" in out.lower()
+    assert "modal" not in sys.modules  # hard-fails BEFORE any cloud call
+    assert not prov_path.exists()  # never rebuilt/overwritten
+
+
+def test_collect_and_write_seam_fails_closed_without_readable_sidecar(
+        monkeypatch, tmp_path):
+    """SECOND BELT for the #81 MED: the invariant must hold at the function
+    seam, not just main()'s CLI path — the reviewer's repro drove the seams
+    directly. With existing folds and a deleted (or unreadable) sidecar,
+    collect_and_write must refuse the union rebuild; with a readable sidecar
+    it must refuse a recipe_id mismatch, or a readable sidecar that simply
+    omits recipe_id. Fold sidecars carry no run-level recipe identity, so
+    missing/unverifiable provenance = fail closed.
+    """
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "seam-run", [a],
+               [_canned_fold_result(a, ta, ea)])
+    prov_path = (_strategy_artifacts(tmp_path) / ex.RUN_NAMESPACE_ROOT
+                 / "seam-run" / (ex.CANONICAL_SERVING_MANIFEST
+                                 + ".provenance.json"))
+    plan = ex.build_plan(_default_args(run_id="seam-run", select_cutoffs=a))
+    part = ex.partition_resume(plan, _strategy_artifacts(tmp_path))
+    staging = {"volume_name": ex.VOLUME_NAME, "volume_commit_id": None}
+    # (a) recipe mismatch with the sidecar INTACT → seam refuses the restamp.
+    plan_b = ex.build_plan(_default_args(run_id="seam-run", select_cutoffs=a,
+                                         epochs=9))
+    assert plan_b.recipe_id != plan.recipe_id
+    with pytest.raises(RuntimeError, match="one run namespace = one recipe"):
+        ex.collect_and_write(plan_b, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    # (b) sidecar UNREADABLE (corrupt JSON) → unverifiable → refuse.
+    prov_path.write_text("{not json")
+    with pytest.raises(RuntimeError, match="missing, unreadable, or omits"):
+        ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    # (c) sidecar DELETED (the reviewer's repro state) → refuse, even with
+    # UNCHANGED args — identity is unverifiable either way.
+    prov_path.unlink()
+    with pytest.raises(RuntimeError, match="missing, unreadable, or omits"):
+        ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    assert not prov_path.exists()  # never restamped
+    # (e) sidecar READABLE JSON but omits recipe_id (reviewer's second repro:
+    # a readable-but-key-missing sidecar must fail closed exactly like a
+    # missing/unreadable one — refuse, even with UNCHANGED args.
+    readable_no_recipe = {"dispatches": []}
+    prov_path.write_text(json.dumps(readable_no_recipe))
+    with pytest.raises(RuntimeError, match="missing, unreadable, or omits"):
+        ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    assert json.loads(prov_path.read_text()) == readable_no_recipe  # unchanged
+    # (f) no existing folds → a FRESH run needs no prior sidecar (unchanged).
+    fresh = ex.build_plan(_default_args(run_id="fresh-run", select_cutoffs=a))
+    out = ex.collect_and_write(fresh, [], repo_root=tmp_path, code_heads={},
+                               staging=staging)
+    assert out["n_folds"] == 0
+
+
+def test_collect_refuses_pod_result_colliding_with_existing(monkeypatch,
+                                                            tmp_path):
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "coll-run", [a],
+               [_canned_fold_result(a, ta, ea)])
+    plan = ex.build_plan(_default_args(run_id="coll-run", select_cutoffs=a))
+    part = ex.partition_resume(plan, _strategy_artifacts(tmp_path))
+    rogue = json.loads(_canned_fold_result(a, ta, ea))
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        ex.collect_and_write(
+            plan, [rogue], repo_root=tmp_path, code_heads={},
+            staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None},
+            existing_folds=part["existing"], dispatch_meta=None)
+
+
+def test_cost_projection_math():
+    prov = {"pod_facts": {
+        "2026-02-09": {"elapsed_seconds": 3600.0},
+        "2026-03-02": {"elapsed_seconds": 7200.0},
+        "2026-01-19": {"elapsed_seconds": None},  # incomplete pod → excluded
+    }}
+    proj = ex.project_cost_from_provenance(prov, 40, 2.0)
+    assert proj["n_pods_observed"] == 2
+    assert proj["observed_cutoffs"] == ["2026-02-09", "2026-03-02"]
+    assert proj["avg_elapsed_seconds"] == pytest.approx(5400.0)
+    assert proj["per_fold_usd"] == pytest.approx(3.0)  # 1.5 h × $2/h
+    assert proj["projected_usd"] == pytest.approx(120.0)
+    with pytest.raises(ValueError, match="zero observations"):
+        ex.project_cost_from_provenance({"pod_facts": {}}, 40, 2.0)
+    with pytest.raises(ValueError, match="n_folds"):
+        ex.project_cost_from_provenance(prov, 0, 2.0)
+    with pytest.raises(ValueError, match="rate_usd_per_hour"):
+        ex.project_cost_from_provenance(prov, 40, 0.0)
+
+
+def test_cost_projection_cli_pure_stdout_no_dispatch(monkeypatch, tmp_path,
+                                                     capsys):
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "proj-run", [a],
+               [_canned_fold_result(a, ta, ea)])  # elapsed_seconds = 42.0
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--print-cost-projection", "--run-id", "proj-run",
+                  "--repo-root", str(tmp_path),
+                  "--project-folds", "40", "--rate-usd-per-hour", "2.0"])
+    assert rc == 0
+    assert "modal" not in sys.modules  # pure stdout — NEVER dispatches
+    out = capsys.readouterr().out
+    assert "PROJECTED TOTAL" in out
+    assert "$0.93" in out  # 42 s / 3600 × $2/h × 40 folds
+
+
+def test_cost_projection_cli_arg_gating(capsys):
+    # Refuses --execute outright.
+    rc = ex.main(["--print-cost-projection", "--run-id", "r", "--execute",
+                  "--project-folds", "1", "--rate-usd-per-hour", "1.0"])
+    assert rc == 2
+    # Requires --run-id.
+    rc = ex.main(["--print-cost-projection",
+                  "--project-folds", "1", "--rate-usd-per-hour", "1.0"])
+    assert rc == 2
+    # Requires BOTH --project-folds and --rate-usd-per-hour.
+    rc = ex.main(["--print-cost-projection", "--run-id", "r"])
+    assert rc == 2
+    capsys.readouterr()
+
+
+def test_dry_run_previews_resume_partition(monkeypatch, tmp_path, capsys):
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "prev-run", [a],
+               [_canned_fold_result(a, ta, ea)])
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "prev-run", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--dry-run"])
+    assert rc == 0
+    assert "would skip" in capsys.readouterr().out
+    assert "modal" not in sys.modules
 
 
 # ── CLI plan-only path ───────────────────────────────────────────────────────

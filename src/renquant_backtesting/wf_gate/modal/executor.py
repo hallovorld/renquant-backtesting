@@ -35,6 +35,26 @@ Usage::
     python -m renquant_backtesting.wf_gate.modal.executor \\
         --start-date 2023-10-02 --end-date 2026-03-02 --cadence-days 21 \\
         --gpu A10G --execute
+
+Bounded two-phase dispatch (model#82 P0 — a hard budget cap must be
+operationally enforceable, not a prose tripwire)::
+
+    # Phase 1 — pilot: dispatch EXACTLY three explicit folds into a named run
+    python -m renquant_backtesting.wf_gate.modal.executor \\
+        --run-id wf-pt-pilot --select-cutoffs 2023-10-02,2024-12-02,2026-03-02 \\
+        --gpu T4 --execute
+
+    # Between phases — observed-cost projection (pure stdout, NO dispatch)
+    python -m renquant_backtesting.wf_gate.modal.executor \\
+        --print-cost-projection --run-id wf-pt-pilot \\
+        --project-folds 40 --rate-usd-per-hour 0.59
+
+    # Phase 2 — resume INTO the same run: pilot folds that already exist and
+    # pass integrity are SKIPPED (never retrained/overwritten); exactly the
+    # remaining folds dispatch; ONE manifest is rebuilt over the union.
+    python -m renquant_backtesting.wf_gate.modal.executor \\
+        --run-id wf-pt-pilot --gpu T4 --execute \\
+        --dispatch-note "projection $15.6 < remaining cap $18.55 -> GO"
 """
 from __future__ import annotations
 
@@ -199,6 +219,34 @@ def select_staged_cutoffs(cutoffs: list[str], staged: int | None) -> list[str]:
     return list(cutoffs[-staged:])
 
 
+def select_explicit_cutoffs(cutoffs: list[str], spec: str) -> list[str]:
+    """Explicit, auditable fold selection (model#82 P0 bounded dispatch).
+
+    ``spec`` is a comma-separated list of ISO cutoff dates. Every date must be
+    a member of the computed corpus grid (``start/end/cadence``-derived), with
+    no duplicates — anything else is a hard error, so the dispatched set is
+    EXACTLY what the prereg froze. The result is normalised to grid
+    (chronological) order regardless of input order, for determinism.
+    """
+    wanted = [s.strip() for s in str(spec).split(",") if s.strip()]
+    if not wanted:
+        raise ValueError("--select-cutoffs given but no dates could be parsed "
+                         f"from {spec!r}")
+    dupes = sorted({c for c in wanted if wanted.count(c) > 1})
+    if dupes:
+        raise ValueError(f"--select-cutoffs contains duplicate dates: {dupes}")
+    unknown = sorted(set(wanted) - set(cutoffs))
+    if unknown:
+        raise ValueError(
+            f"--select-cutoffs dates not on the corpus grid: {unknown}. The "
+            "grid is derived from --start-date/--end-date/--cadence-days "
+            f"({cutoffs[0]} .. {cutoffs[-1]}, {len(cutoffs)} folds); an "
+            "off-grid cutoff would break corpus identity — refusing."
+        )
+    selected = set(wanted)
+    return [c for c in cutoffs if c in selected]
+
+
 # ── Requests + recipe ────────────────────────────────────────────────────────
 @dataclass
 class WfRescorePlan:
@@ -273,7 +321,11 @@ def build_plan(args: argparse.Namespace) -> WfRescorePlan:
     all_cutoffs = compute_retrain_cutoffs(
         args.start_date, args.end_date, int(args.cadence_days)
     )
-    cutoffs = select_staged_cutoffs(all_cutoffs, getattr(args, "staged", None))
+    select_spec = getattr(args, "select_cutoffs", None)
+    if select_spec:
+        cutoffs = select_explicit_cutoffs(all_cutoffs, select_spec)
+    else:
+        cutoffs = select_staged_cutoffs(all_cutoffs, getattr(args, "staged", None))
     image_sha = image_spec_fingerprint()
     # Quarantine: artifacts + manifest always land under a run-id'd namespace,
     # never the canonical serving tree (codex #76 blocker 3).
@@ -543,12 +595,17 @@ def _import_app_with_env(gpu: str, timeout_s: int, retries: int):
 
 
 def dispatch_folds(plan: WfRescorePlan, *, timeout_s: int, retries: int,
-                   volume_commit_id: str | None) -> list[dict[str, Any]]:
+                   volume_commit_id: str | None
+                   ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fan out one pod per fold via ``train_fold_remote.map`` and collect JSON.
 
     Mirrors the orchestrator ``execute_batch`` dispatch: ``with app.run():`` +
     ``.map(order_outputs=False, return_exceptions=True)`` so a single fold's
     failure is reported, not fatal to the batch.
+
+    Returns ``(results, dispatch_info)`` where ``dispatch_info`` carries the
+    Modal ``app_id`` (+ the dispatched cutoffs) for the provenance sidecar's
+    per-dispatch audit record (model#82 P0).
     """
     mod = _import_app_with_env(plan.gpu, timeout_s, retries)
     payloads = []
@@ -558,9 +615,14 @@ def dispatch_folds(plan: WfRescorePlan, *, timeout_s: int, retries: int,
         payloads.append(json.dumps(r))
 
     results: list[dict[str, Any]] = []
+    dispatch_info: dict[str, Any] = {
+        "app_id": None,
+        "dispatched_cutoffs": [r["cutoff_date"] for r in plan.fold_requests],
+    }
     with mod.app.run() as running_app:
+        dispatch_info["app_id"] = getattr(running_app, "app_id", None)
         log.info("Modal app dispatched: app_id=%s folds=%d gpu=%s",
-                 getattr(running_app, "app_id", "?"), len(payloads), plan.gpu)
+                 dispatch_info["app_id"] or "?", len(payloads), plan.gpu)
         # wrap_returned_exceptions=False → a failed pod yields its underlying
         # exception directly (opt into the post-2025-06-27 Modal behavior;
         # otherwise it leaks a modal.exceptions.UserCodeException wrapper).
@@ -573,7 +635,7 @@ def dispatch_folds(plan: WfRescorePlan, *, timeout_s: int, retries: int,
                                 "error": repr(item)})
                 continue
             results.append(json.loads(item))
-    return results
+    return results, dispatch_info
 
 
 # ── Artifact collection + manifest + provenance ──────────────────────────────
@@ -717,6 +779,178 @@ def validate_fold_promotable(entry: dict[str, Any], *,
     return (not reasons, reasons)
 
 
+# ── Resume into an existing run namespace (model#82 P0 bounded dispatch) ─────
+#: The one integrity marker that does NOT indicate a broken on-disk fold: it
+#: only flags a diagnostic --skip-calibrators run as never-promotable. For
+#: resume purposes (skip vs hard-error) it is ignored.
+_DIAGNOSTIC_ONLY_REASON = "skip_calibrators_diagnostic"
+
+
+def _looks_like_iso_date(name: str) -> bool:
+    if len(name) != 10 or name[4] != "-" or name[7] != "-":
+        return False
+    return (name[:4] + name[5:7] + name[8:]).isdigit()
+
+
+def load_existing_fold_entry(fold_dir: Path, cutoff: str) -> dict[str, Any] | None:
+    """Reconstruct one already-materialised fold's manifest entry from disk.
+
+    Returns ``None`` when no unambiguous model ``.pt`` exists in the fold dir
+    (zero or multiple candidates) — the caller records that as a failed
+    integrity check. ``trained_date`` / ``effective_train_cutoff_date`` come
+    from the metadata sidecar's ``training_contract`` (the same contract
+    :func:`validate_fold_promotable` validates).
+    """
+    pts = sorted(p for p in fold_dir.glob("*.pt") if p.is_file())
+    if len(pts) != 1:
+        return None
+    model = pts[0]
+    entry: dict[str, Any] = {
+        "cutoff_date": cutoff,
+        "trained_date": None,
+        "effective_train_cutoff_date": None,
+        "artifact_uri": str(model),
+        "lookahead_days": 60,
+    }
+    sidecar = _sidecar_path_for_model(model)
+    if sidecar.exists():
+        try:
+            contract = (json.loads(sidecar.read_text())
+                        .get("training_contract") or {})
+        except (ValueError, OSError):
+            contract = {}
+        entry["trained_date"] = contract.get("trained_date")
+        entry["effective_train_cutoff_date"] = contract.get(
+            "effective_train_cutoff_date")
+        try:
+            entry["lookahead_days"] = int(contract.get("lookahead_days") or 60)
+        except (TypeError, ValueError):
+            pass
+    cal = model.with_name("hf_patchtst-calibration.json")
+    if cal.exists():
+        entry["calibrator_uri"] = str(cal)
+    return entry
+
+
+def scan_existing_folds(run_art_dir: Path, *,
+                        skip_calibrators: bool) -> dict[str, dict[str, Any]]:
+    """Inventory every fold already materialised under a run namespace.
+
+    Returns ``{cutoff: {"entry", "promotable", "resume_ok", "reasons"}}`` where
+    ``resume_ok`` is the RESUME integrity verdict: the fold passes every
+    :func:`validate_fold_promotable` check except the diagnostic-run marker
+    (a valid --skip-calibrators fold is skippable on resume even though it is
+    never promotable). Any fold directory that exists — even a partial or
+    empty one — is reported: something wrote into the namespace, so resume
+    must either skip it (valid) or hard-error (invalid), never overwrite it.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not run_art_dir.is_dir():
+        return out
+    for d in sorted(run_art_dir.iterdir()):
+        if not d.is_dir() or not _looks_like_iso_date(d.name):
+            continue
+        entry = load_existing_fold_entry(d, d.name)
+        if entry is None:
+            n_pt = len(list(d.glob("*.pt")))
+            reason = ("model_pt_missing" if n_pt == 0
+                      else f"model_pt_ambiguous({n_pt} candidates)")
+            out[d.name] = {"entry": None, "promotable": False,
+                           "resume_ok": False, "reasons": [reason]}
+            continue
+        promotable, reasons = validate_fold_promotable(
+            entry, skip_calibrators=skip_calibrators)
+        blocking = [r for r in reasons if r != _DIAGNOSTIC_ONLY_REASON]
+        out[d.name] = {"entry": entry, "promotable": promotable,
+                       "resume_ok": not blocking, "reasons": reasons}
+    return out
+
+
+def partition_resume(plan: WfRescorePlan,
+                     strategy_artifacts: Path) -> dict[str, Any]:
+    """Split the selected cutoffs into skip / dispatch / hard-error sets.
+
+    The bounded-dispatch invariant (model#82 P0): a fold that already exists in
+    the run namespace is NEVER retrained or overwritten —
+
+      * exists and passes integrity → ``skipped`` (not dispatched);
+      * exists but FAILS integrity  → ``invalid_selected`` (the caller must
+        hard-error before any cloud call — ambiguous state, refusing to
+        overwrite);
+      * absent → ``dispatch``.
+
+    ``existing`` carries the full namespace inventory (selected or not) so the
+    manifest + provenance can be rebuilt over the union.
+    """
+    existing = scan_existing_folds(
+        strategy_artifacts / plan.artifact_root,
+        skip_calibrators=plan.skip_calibrators)
+    skipped = [c for c in plan.cutoffs
+               if c in existing and existing[c]["resume_ok"]]
+    invalid_selected = {c: list(existing[c]["reasons"]) for c in plan.cutoffs
+                        if c in existing and not existing[c]["resume_ok"]}
+    dispatch = [c for c in plan.cutoffs if c not in existing]
+    return {"existing": existing, "skipped": skipped,
+            "dispatch": dispatch, "invalid_selected": invalid_selected}
+
+
+def _manifest_output_path(plan: WfRescorePlan,
+                          strategy_artifacts: Path) -> Path:
+    """The run's single manifest path (explicit override or run-namespace default)."""
+    if plan.manifest_output:
+        return Path(plan.manifest_output)
+    return (strategy_artifacts / RUN_NAMESPACE_ROOT / plan.run_id
+            / CANONICAL_SERVING_MANIFEST)
+
+
+def read_prior_provenance(manifest_output: Path) -> dict[str, Any] | None:
+    """Load the run's existing provenance sidecar, or None if absent/unreadable."""
+    prov_path = Path(str(manifest_output) + ".provenance.json")
+    if not prov_path.exists():
+        return None
+    try:
+        loaded = json.loads(prov_path.read_text())
+    except (ValueError, OSError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+# ── Cost projection (model#82 P0 — pure stdout, no dispatch) ─────────────────
+def project_cost_from_provenance(provenance: dict[str, Any], n_folds: int,
+                                 rate_usd_per_hour: float) -> dict[str, Any]:
+    """Project the cost of ``n_folds`` more folds from observed pod runtimes.
+
+    Averages the ``elapsed_seconds`` of every completed pod recorded in the
+    run's provenance sidecar (``pod_facts``) and prices ``n_folds`` more at
+    ``rate_usd_per_hour``. Raises ``ValueError`` when there is nothing to
+    average — a projection with zero observations would be fiction.
+    """
+    if int(n_folds) <= 0:
+        raise ValueError(f"n_folds must be > 0 (got {n_folds})")
+    if float(rate_usd_per_hour) <= 0:
+        raise ValueError(
+            f"rate_usd_per_hour must be > 0 (got {rate_usd_per_hour})")
+    pods = {c: f for c, f in (provenance.get("pod_facts") or {}).items()
+            if isinstance(f, dict)
+            and isinstance(f.get("elapsed_seconds"), (int, float))
+            and not isinstance(f.get("elapsed_seconds"), bool)}
+    if not pods:
+        raise ValueError(
+            "provenance has no completed pods with elapsed_seconds — cannot "
+            "project cost from zero observations")
+    avg = sum(f["elapsed_seconds"] for f in pods.values()) / len(pods)
+    per_fold_usd = avg / 3600.0 * float(rate_usd_per_hour)
+    return {
+        "n_pods_observed": len(pods),
+        "observed_cutoffs": sorted(pods),
+        "avg_elapsed_seconds": avg,
+        "rate_usd_per_hour": float(rate_usd_per_hour),
+        "per_fold_usd": per_fold_usd,
+        "n_folds_projected": int(n_folds),
+        "projected_usd": per_fold_usd * int(n_folds),
+    }
+
+
 def assemble_manifest(entries: list[dict[str, Any]], cadence_days: int,
                       manifest_output: Path) -> Path:
     """Write the standard WF manifest via the reviewed writer (validates leakage)."""
@@ -745,10 +979,29 @@ def assemble_manifest(entries: list[dict[str, Any]], cadence_days: int,
     return write_manifest(manifest, manifest_output)
 
 
+def _pod_facts_of(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per-pod Modal facts for ok results, keyed by cutoff."""
+    return {r.get("cutoff_date"): {
+        "worker_id": r.get("worker_id"),
+        "code_image_id": r.get("code_image_id"),
+        "elapsed_seconds": r.get("elapsed_seconds"),
+        "device": r.get("device"),
+        "result_checksum": r.get("result_checksum"),
+    } for r in results if r.get("ok")}
+
+
+def _failed_of(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"cutoff_date": r.get("cutoff_date"), "error": r.get("error")}
+            for r in results if not r.get("ok")]
+
+
 def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
                      entries: list[dict[str, Any]], *, code_heads: dict[str, str],
                      staging: dict[str, Any], manifest_path: str,
-                     fold_validation: dict[str, dict[str, Any]] | None = None
+                     fold_validation: dict[str, dict[str, Any]] | None = None,
+                     requested_cutoffs: list[str] | None = None,
+                     dispatches: list[dict[str, Any]] | None = None,
+                     prior_pod_facts: dict[str, dict[str, Any]] | None = None,
                      ) -> dict[str, Any]:
     """The FRESH-corpus provenance sidecar (GOAL-2 AC2/AC3 stamps).
 
@@ -758,6 +1011,15 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
     ``promotion_ready`` only when EVERY requested fold is promotable AND this is
     not a diagnostic ``--skip-calibrators`` run; anything else stays quarantined
     (codex #76). ``fold_validation`` defaults to empty → nothing promotable.
+
+    Resume support (model#82 P0): ``requested_cutoffs`` is the UNION of this
+    invocation's selection and every fold already in the run namespace (default:
+    this invocation's cutoffs); ``dispatches`` is the full per-dispatch audit
+    history to persist; ``prior_pod_facts`` are earlier dispatches' pod facts,
+    merged under this invocation's (so the sidecar stays the run's ONE record).
+    ``failed_folds`` reflects only THIS invocation — a previously failed fold
+    that was re-dispatched successfully must not linger as a failure; each
+    dispatch record in ``dispatches`` retains its own failure list.
     """
     fold_validation = fold_validation or {}
     fold_prov = []
@@ -772,23 +1034,18 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
             "promotable": bool(verdict.get("promotable")),
             "quarantine_reasons": list(verdict.get("reasons") or []),
         })
-    # Per-pod Modal facts, keyed by cutoff.
-    pod_facts = {r.get("cutoff_date"): {
-        "worker_id": r.get("worker_id"),
-        "code_image_id": r.get("code_image_id"),
-        "elapsed_seconds": r.get("elapsed_seconds"),
-        "device": r.get("device"),
-        "result_checksum": r.get("result_checksum"),
-    } for r in results if r.get("ok")}
-    failed = [{"cutoff_date": r.get("cutoff_date"), "error": r.get("error")}
-              for r in results if not r.get("ok")]
+    pod_facts = dict(prior_pod_facts or {})
+    pod_facts.update(_pod_facts_of(results))
+    failed = _failed_of(results)
     # The distinct Modal-built image ids the pods actually ran (the RESOLVED,
     # immutable image snapshot — a stronger dep lock than the spec fingerprint).
     resolved_image_ids = sorted({
         r.get("code_image_id") for r in results
         if r.get("ok") and r.get("code_image_id") not in (None, "unknown")
     })
-    n_requested = len(plan.cutoffs)
+    requested = (list(requested_cutoffs) if requested_cutoffs is not None
+                 else list(plan.cutoffs))
+    n_requested = len(requested)
     n_succeeded = len(entries)
     promotable_cutoffs = sorted(
         c for c, v in fold_validation.items() if v.get("promotable"))
@@ -817,6 +1074,7 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
         "expert_role": "patchtst_fresh_2nd_expert",
         "goal": "GOAL-2 AC2/AC3 (fresh PatchTST 2nd expert for GOAL-4 ensemble)",
         "manifest": manifest_path,
+        "requested_cutoffs": requested,
         "n_folds_requested": n_requested,
         "n_folds_succeeded": n_succeeded,
         "n_folds_promotable": n_promotable,
@@ -849,6 +1107,7 @@ def build_provenance(plan: WfRescorePlan, results: list[dict[str, Any]],
         "folds": fold_prov,
         "pod_facts": pod_facts,
         "failed_folds": failed,
+        "dispatches": list(dispatches or []),
     }
 
 
@@ -871,22 +1130,86 @@ def _assert_not_canonical_manifest(manifest_output: Path,
         )
 
 
+def _manifest_worthy(entry: dict[str, Any] | None) -> bool:
+    """Only a materialised, non-empty model with a dated contract may be listed."""
+    if not entry or not entry.get("artifact_uri") or not entry.get("trained_date"):
+        return False
+    model_path = Path(entry["artifact_uri"])
+    return model_path.exists() and model_path.stat().st_size > 0
+
+
 def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
                       repo_root: Path, code_heads: dict[str, str],
-                      staging: dict[str, Any]) -> dict[str, Any]:
+                      staging: dict[str, Any],
+                      existing_folds: dict[str, dict[str, Any]] | None = None,
+                      dispatch_meta: dict[str, Any] | None = None,
+                      ) -> dict[str, Any]:
     """Materialise artifacts, write the manifest + provenance sidecar locally.
 
     All outputs land under a quarantined run namespace
     (``.../artifacts/walkforward_patchtst_runs/<run_id>/``); the canonical serving
     manifest is never written here.
+
+    Resume (model#82 P0): ``existing_folds`` is the run namespace's prior-fold
+    inventory (:func:`scan_existing_folds`). Existing folds are NEVER
+    overwritten — a returned pod result colliding with one is a hard error —
+    and the run's ONE manifest is REBUILT over the union of existing + new
+    folds via the same reviewed :func:`assemble_manifest` writer. The
+    provenance sidecar is likewise rebuilt over the union, appending one
+    per-dispatch audit record (``dispatch_meta`` + this invocation's pod facts
+    and failures) to the run's ``dispatches`` history.
     """
+    existing_folds = existing_folds or {}
     strategy_artifacts = repo_root / "backtesting" / plan.strategy / "artifacts"
-    run_dir = strategy_artifacts / RUN_NAMESPACE_ROOT / plan.run_id
-    entries = []
+    manifest_output = _manifest_output_path(plan, strategy_artifacts)
+    _assert_not_canonical_manifest(manifest_output, strategy_artifacts)
+    prior_raw = read_prior_provenance(manifest_output)
+    # One-run-one-recipe, enforced at the FUNCTION SEAM too (PR #81 review
+    # MED; second belt behind main()'s pre-dispatch refusal). Existing folds
+    # may only be absorbed into a union rebuild under a readable prior
+    # provenance whose recipe_id matches this plan. The per-fold
+    # .metadata.json carries NO run-level recipe identity (hf_trainer's
+    # training_contract has no recipe_id and omits run-level fields such as
+    # cadence_days/calibrator_method), so with the sidecar missing/unreadable
+    # the invariant is UNVERIFIABLE → fail closed rather than silently
+    # restamp the run's provenance with a new recipe_id.
+    if existing_folds:
+        prior_recipe = prior_raw.get("recipe_id") if prior_raw else None
+        if not prior_recipe:
+            raise RuntimeError(
+                f"run namespace {plan.run_id!r} holds {len(existing_folds)} "
+                "existing fold(s) but its provenance sidecar "
+                f"({manifest_output}.provenance.json) is missing, unreadable, "
+                "or omits recipe_id — the one-run-one-recipe invariant cannot "
+                "be verified (per-fold metadata sidecars carry no run-level "
+                "recipe_id). Refusing to rebuild/restamp; restore the sidecar "
+                "or use a fresh --run-id.")
+        if prior_recipe != plan.recipe_id:
+            raise RuntimeError(
+                f"run namespace {plan.run_id!r} was built with recipe_id "
+                f"{prior_recipe} but this rebuild computes {plan.recipe_id} — "
+                "one run namespace = one recipe; refusing to restamp a mixed "
+                "corpus.")
+    prior = prior_raw or {}
+
+    entries: list[dict[str, Any]] = []
     fold_validation: dict[str, dict[str, Any]] = {}
+    # Existing folds first: reconstructed from disk, never re-collected.
+    for cutoff, info in existing_folds.items():
+        fold_validation[cutoff] = {
+            "promotable": bool(info.get("promotable")),
+            "reasons": list(info.get("reasons") or [])}
+        if _manifest_worthy(info.get("entry")):
+            entries.append(dict(info["entry"]))
     for r in results:
         if not r.get("ok"):
             continue
+        if r.get("cutoff_date") in existing_folds:
+            raise RuntimeError(
+                f"pod returned cutoff {r.get('cutoff_date')} which ALREADY "
+                f"exists in run namespace {plan.run_id!r} — refusing to "
+                "overwrite an existing fold (model#82 P0: pilot folds are "
+                "never retrained/overwritten).")
         entry = collect_fold_artifacts(r, strategy_artifacts, plan.artifact_root)
         promotable, reasons = validate_fold_promotable(
             entry, skip_calibrators=plan.skip_calibrators)
@@ -895,25 +1218,41 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
         # Only a materialised (present + non-empty) model belongs in the manifest;
         # an ``ok`` fold that returned no model blob is recorded (quarantined) but
         # never referenced as a serving artifact.
-        model_path = Path(entry["artifact_uri"]) if entry.get("artifact_uri") else None
-        if model_path and model_path.exists() and model_path.stat().st_size > 0:
+        if _manifest_worthy(entry):
             entries.append(entry)
-    manifest_output = (Path(plan.manifest_output) if plan.manifest_output
-                       else run_dir / CANONICAL_SERVING_MANIFEST)
-    _assert_not_canonical_manifest(manifest_output, strategy_artifacts)
+    entries.sort(key=lambda e: str(e["cutoff_date"]))
+
     manifest_path = ""
     if entries:
         manifest_path = str(assemble_manifest(
             entries, plan.recipe["cadence_days"], manifest_output))
+
+    # ONE auditable corpus: requested = this selection ∪ every namespace fold.
+    requested_union = sorted(set(plan.cutoffs) | set(existing_folds))
+    dispatches = list(prior.get("dispatches") or [])
+    if dispatch_meta is not None:
+        from datetime import datetime, timezone  # noqa: PLC0415
+        record = dict(dispatch_meta)
+        record.setdefault(
+            "dispatched_at",
+            datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        record.setdefault("gpu", plan.gpu)
+        record.setdefault("volume_commit_id", staging.get("volume_commit_id"))
+        record["pod_facts"] = _pod_facts_of(results)
+        record["failed_folds"] = _failed_of(results)
+        dispatches.append(record)
+
     provenance = build_provenance(
         plan, results, entries, code_heads=code_heads, staging=staging,
-        manifest_path=manifest_path, fold_validation=fold_validation)
+        manifest_path=manifest_path, fold_validation=fold_validation,
+        requested_cutoffs=requested_union, dispatches=dispatches,
+        prior_pod_facts=prior.get("pod_facts") or {})
     prov_path = Path(str(manifest_output) + ".provenance.json")
     prov_path.parent.mkdir(parents=True, exist_ok=True)
     prov_path.write_text(json.dumps(provenance, indent=2, sort_keys=True))
     log.info("wrote %d/%d folds (run_id=%s promotion_ready=%s); "
              "manifest=%s provenance=%s",
-             len(entries), len(plan.cutoffs), plan.run_id,
+             len(entries), len(requested_union), plan.run_id,
              provenance["promotion_ready"], manifest_path, prov_path)
     return {"manifest": manifest_path, "provenance": str(prov_path),
             "n_folds": len(entries), "provenance_obj": provenance,
@@ -978,8 +1317,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--start-date", default="2023-10-02")
     p.add_argument("--end-date", default="2026-03-02")
     p.add_argument("--cadence-days", type=int, default=21)
-    p.add_argument("--staged", type=int, default=None,
-                   help="Run only the N most-recent folds (directional read).")
+    sel = p.add_mutually_exclusive_group()
+    sel.add_argument("--staged", type=int, default=None,
+                     help="Run only the N most-recent folds (directional read).")
+    sel.add_argument("--select-cutoffs", default=None,
+                     help="Comma-separated ISO cutoff dates to run — each must "
+                          "be on the start/end/cadence corpus grid (duplicates "
+                          "or off-grid dates are hard errors). Deterministic, "
+                          "auditable bounded dispatch (model#82 P0); mutually "
+                          "exclusive with --staged.")
     p.add_argument("--gpu", default="T4",
                    help="Modal GPU type (T4|A10G|L4|A100|...). Use 'cpu' to "
                         "run CPU-only pods (slower, cheaper).")
@@ -1016,7 +1362,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--run-id", default=None,
                    help="Isolated run namespace for artifacts + manifest "
                         "(default: wf-pt-<recipe8>-<utc>). NEVER the canonical "
-                        "serving tree; promotion is a separate reviewed step.")
+                        "serving tree; promotion is a separate reviewed step. "
+                        "Naming an EXISTING run resumes into it: folds already "
+                        "on disk that pass integrity are skipped (never "
+                        "retrained/overwritten), an existing-but-invalid "
+                        "selected fold is a hard error, and the run's single "
+                        "manifest + provenance sidecar are rebuilt over the "
+                        "union (model#82 P0).")
+    p.add_argument("--dispatch-note", default=None,
+                   help="Optional note stamped into this dispatch's provenance "
+                        "audit record — e.g. the observed-cost GO decision "
+                        "between the pilot and the remainder (model#82 P0).")
+    # ── Cost projection (pure stdout, no dispatch; model#82 P0) ──────────────
+    p.add_argument("--print-cost-projection", action="store_true",
+                   help="Read the run's provenance sidecar (requires --run-id), "
+                        "average completed pods' elapsed_seconds, and print the "
+                        "projected cost of --project-folds more folds at "
+                        "--rate-usd-per-hour. Pure stdout — never dispatches "
+                        "(and refuses --execute).")
+    p.add_argument("--project-folds", type=int, default=None,
+                   help="N additional folds to project the cost of "
+                        "(required with --print-cost-projection).")
+    p.add_argument("--rate-usd-per-hour", type=float, default=None,
+                   help="GPU $/hour used for the projection — explicit on "
+                        "purpose, no baked-in price (required with "
+                        "--print-cost-projection).")
     p.add_argument("--code-root", default=None,
                    help="SINGLE pinned-assembly root holding <repo>/src for every "
                         "bundled repo (default: the assembly THIS executor runs "
@@ -1061,8 +1431,52 @@ def resolve_repo_root(value: str | None) -> Path:
     return _rrr(value)
 
 
+def _print_cost_projection(args: argparse.Namespace) -> int:
+    """The --print-cost-projection subpath: pure stdout, never dispatches."""
+    if args.execute:
+        print("--print-cost-projection is a read-only helper and refuses "
+              "--execute (it NEVER dispatches).")
+        return 2
+    if not args.run_id:
+        print("--print-cost-projection requires --run-id (the run whose "
+              "provenance sidecar holds the observed pod runtimes).")
+        return 2
+    if args.project_folds is None or args.rate_usd_per_hour is None:
+        print("--print-cost-projection requires BOTH --project-folds and "
+              "--rate-usd-per-hour (no baked-in GPU price).")
+        return 2
+    repo_root = resolve_repo_root(args.repo_root)
+    strategy_artifacts = repo_root / "backtesting" / args.strategy / "artifacts"
+    manifest_output = (Path(args.manifest_output) if args.manifest_output
+                       else strategy_artifacts / RUN_NAMESPACE_ROOT
+                       / args.run_id / CANONICAL_SERVING_MANIFEST)
+    prov = read_prior_provenance(manifest_output)
+    if prov is None:
+        print(f"No readable provenance sidecar at "
+              f"{manifest_output}.provenance.json — cannot project.")
+        return 2
+    try:
+        proj = project_cost_from_provenance(
+            prov, args.project_folds, args.rate_usd_per_hour)
+    except ValueError as exc:
+        print(f"Cost projection failed: {exc}")
+        return 2
+    print(f"COST PROJECTION (run_id={args.run_id})")
+    print(f"  provenance          : {manifest_output}.provenance.json")
+    print(f"  pods observed       : {proj['n_pods_observed']} "
+          f"({', '.join(proj['observed_cutoffs'])})")
+    print(f"  avg elapsed         : {proj['avg_elapsed_seconds']:.1f} s/fold")
+    print(f"  rate                : ${proj['rate_usd_per_hour']:.4f}/h")
+    print(f"  per-fold projected  : ${proj['per_fold_usd']:.4f}")
+    print(f"  folds projected     : {proj['n_folds_projected']}")
+    print(f"  PROJECTED TOTAL     : ${proj['projected_usd']:.2f}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.print_cost_projection:
+        return _print_cost_projection(args)
     plan = build_plan(args)
 
     print(f"WF PatchTST Modal re-score plan")
@@ -1075,62 +1489,141 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  calibrators   : {'SKIPPED' if plan.skip_calibrators else 'RUN'}")
 
     if args.dry_run or not args.execute:
+        # Best-effort resume preview: annotate folds already in the namespace.
+        existing_preview: dict[str, dict[str, Any]] = {}
+        try:
+            preview_arts = (resolve_repo_root(args.repo_root) / "backtesting"
+                            / plan.strategy / "artifacts")
+            existing_preview = scan_existing_folds(
+                preview_arts / plan.artifact_root,
+                skip_calibrators=plan.skip_calibrators)
+        except Exception:  # noqa: BLE001 — preview only, never blocks a plan
+            existing_preview = {}
         for i, c in enumerate(plan.cutoffs):
-            print(f"    [{i + 1:02d}/{len(plan.cutoffs)}] cutoff={c}")
+            tag = ""
+            if c in existing_preview:
+                tag = ("  [EXISTS: would skip]"
+                       if existing_preview[c]["resume_ok"]
+                       else "  [EXISTS: INVALID — hard error on --execute]")
+            print(f"    [{i + 1:02d}/{len(plan.cutoffs)}] cutoff={c}{tag}")
         if not args.execute:
             print("\n(plan-only; pass --execute to dispatch to Modal)")
         return 0
 
-    readiness = modal_readiness()
-    if not readiness["ready"]:
-        print("\nMODAL NOT READY — cannot dispatch. Missing:")
-        for m in readiness["missing"]:
-            print(f"  - {m}")
-        return 2
-
     repo_root = resolve_repo_root(args.repo_root)
-    dataset_path = repo_root / plan.dataset
-    raw_label_path = repo_root / plan.raw_label_panel
-    for pth in (dataset_path, raw_label_path):
-        if not pth.exists():
-            print(f"\nMissing required input panel: {pth}")
+    strategy_artifacts = repo_root / "backtesting" / plan.strategy / "artifacts"
+
+    # ── Resume partition (model#82 P0 bounded dispatch) ─────────────────────
+    # Decided from the run namespace BEFORE any cloud call: existing-and-valid
+    # folds are skipped (never retrained/overwritten); an existing-but-invalid
+    # selected fold is a hard error; only absent folds dispatch.
+    part = partition_resume(plan, strategy_artifacts)
+    prior_prov = read_prior_provenance(
+        _manifest_output_path(plan, strategy_artifacts))
+    if part["existing"] and not (prior_prov and prior_prov.get("recipe_id")):
+        print(f"\nRESUME REFUSED: run {plan.run_id!r} already has "
+              f"{len(part['existing'])} materialised fold(s) on disk but the "
+              "provenance sidecar is missing or unreadable — the prior "
+              "recipe_id can't be verified. Resuming into an unverifiable "
+              "namespace risks silently mixing recipes (one run namespace = "
+              "one recipe). Restore the sidecar or start a new --run-id.")
+        return 2
+    if (prior_prov and prior_prov.get("recipe_id")
+            and prior_prov["recipe_id"] != plan.recipe_id):
+        print(f"\nRESUME REFUSED: run {plan.run_id!r} was built with recipe_id "
+              f"{prior_prov['recipe_id']} but this invocation computes "
+              f"{plan.recipe_id}. One run namespace = one recipe — a mixed "
+              "corpus would not be auditable.")
+        return 2
+    if part["invalid_selected"]:
+        print("\nRESUME REFUSED: selected fold(s) already exist in run "
+              f"namespace {plan.run_id!r} but FAIL integrity — refusing to "
+              "retrain/overwrite an ambiguous fold. Inspect (and, if truly "
+              "dead, manually quarantine) these before re-dispatching:")
+        for c, reasons in sorted(part["invalid_selected"].items()):
+            print(f"  - {c}: {', '.join(reasons)}")
+        return 2
+    to_dispatch = part["dispatch"]
+    skipped = part["skipped"]
+    if skipped:
+        print(f"\nRESUME: {len(skipped)} fold(s) already exist and pass "
+              f"integrity — SKIPPED (never retrained): {', '.join(skipped)}")
+    plan.fold_requests = [r for r in plan.fold_requests
+                          if r["cutoff_date"] in set(to_dispatch)]
+    dispatch_meta: dict[str, Any] = {
+        "app_id": None,
+        "dispatched_cutoffs": list(to_dispatch),
+        "skipped_existing_cutoffs": list(skipped),
+        "timeout_seconds": int(args.timeout_seconds),
+        "retries": int(args.retries),
+        "note": args.dispatch_note,
+    }
+
+    if not to_dispatch:
+        print("\nRESUME: every selected fold already exists and passes "
+              "integrity — NOTHING to dispatch. Rebuilding the run's single "
+              "manifest + provenance over the union (no cloud calls).")
+        prior_modal = (prior_prov or {}).get("modal") or {}
+        out = collect_and_write(
+            plan, [], repo_root=repo_root,
+            code_heads=prior_modal.get("code_git_heads") or {},
+            staging={"volume_name": prior_modal.get("volume_name"),
+                     "volume_commit_id": prior_modal.get("volume_commit_id"),
+                     "data_digests": prior_modal.get("data_digests") or {}},
+            existing_folds=part["existing"], dispatch_meta=dispatch_meta)
+    else:
+        readiness = modal_readiness()
+        if not readiness["ready"]:
+            print("\nMODAL NOT READY — cannot dispatch. Missing:")
+            for m in readiness["missing"]:
+                print(f"  - {m}")
             return 2
 
-    # AC7 fail-closed freshness/coverage gate (GOAL-5) — the SAME canonical
-    # renquant-common contract the #74 driver runs, applied to the LOCAL panel
-    # BEFORE staging it to the Volume. A Modal corpus runs each fold's
-    # train_one_cutoff directly (never the driver's main()), so without this
-    # pre-dispatch check a stale/truncated panel would silently short-train
-    # every pod.
-    rc = _assert_panel_fresh_or_report(plan, args, dataset_path)
-    if rc != 0:
-        return rc
+        dataset_path = repo_root / plan.dataset
+        raw_label_path = repo_root / plan.raw_label_panel
+        for pth in (dataset_path, raw_label_path):
+            if not pth.exists():
+                print(f"\nMissing required input panel: {pth}")
+                return 2
 
-    import tempfile  # noqa: PLC0415
-    # ONE explicit pinned assembly (codex #76 blocker 1): the reviewed checkout
-    # this executor runs from, or an explicit --code-root. NO ~/git/github
-    # fallback and NO per-repo search — bundle_code fails closed if the single
-    # root is missing any required repo, so a corpus can't be sourced from an
-    # ambient/arbitrary checkout.
-    code_root = (Path(args.code_root).expanduser().resolve()
-                 if args.code_root else _EXECUTOR_CHECKOUT_ROOT.parent)
-    assembly_lock = None
-    if args.assembly_lock:
-        assembly_lock = json.loads(Path(args.assembly_lock).read_text())
-    with tempfile.TemporaryDirectory(prefix="wf-pt-bundle-") as td:
-        bundle_dir = Path(td)
-        code_heads = bundle_code(bundle_dir, code_root,
-                                 assembly_lock=assembly_lock)
-        staging = stage_inputs_to_volume(
-            plan, bundle_dir=bundle_dir, dataset_path=dataset_path,
-            raw_label_path=raw_label_path)
-        results = dispatch_folds(
-            plan, timeout_s=args.timeout_seconds, retries=args.retries,
-            volume_commit_id=staging.get("volume_commit_id"))
-    out = collect_and_write(
-        plan, results, repo_root=repo_root, code_heads=code_heads,
-        staging=staging)
-    print(f"\nDONE: {out['n_folds']}/{len(plan.cutoffs)} folds "
+        # AC7 fail-closed freshness/coverage gate (GOAL-5) — the SAME canonical
+        # renquant-common contract the #74 driver runs, applied to the LOCAL
+        # panel BEFORE staging it to the Volume. A Modal corpus runs each fold's
+        # train_one_cutoff directly (never the driver's main()), so without this
+        # pre-dispatch check a stale/truncated panel would silently short-train
+        # every pod.
+        rc = _assert_panel_fresh_or_report(plan, args, dataset_path)
+        if rc != 0:
+            return rc
+
+        import tempfile  # noqa: PLC0415
+        # ONE explicit pinned assembly (codex #76 blocker 1): the reviewed
+        # checkout this executor runs from, or an explicit --code-root. NO
+        # ~/git/github fallback and NO per-repo search — bundle_code fails
+        # closed if the single root is missing any required repo, so a corpus
+        # can't be sourced from an ambient/arbitrary checkout.
+        code_root = (Path(args.code_root).expanduser().resolve()
+                     if args.code_root else _EXECUTOR_CHECKOUT_ROOT.parent)
+        assembly_lock = None
+        if args.assembly_lock:
+            assembly_lock = json.loads(Path(args.assembly_lock).read_text())
+        with tempfile.TemporaryDirectory(prefix="wf-pt-bundle-") as td:
+            bundle_dir = Path(td)
+            code_heads = bundle_code(bundle_dir, code_root,
+                                     assembly_lock=assembly_lock)
+            staging = stage_inputs_to_volume(
+                plan, bundle_dir=bundle_dir, dataset_path=dataset_path,
+                raw_label_path=raw_label_path)
+            results, dispatch_info = dispatch_folds(
+                plan, timeout_s=args.timeout_seconds, retries=args.retries,
+                volume_commit_id=staging.get("volume_commit_id"))
+        dispatch_meta["app_id"] = dispatch_info.get("app_id")
+        out = collect_and_write(
+            plan, results, repo_root=repo_root, code_heads=code_heads,
+            staging=staging, existing_folds=part["existing"],
+            dispatch_meta=dispatch_meta)
+    print(f"\nDONE: {out['n_folds']}/"
+          f"{out['provenance_obj']['n_folds_requested']} folds "
           f"(run_id={plan.run_id})")
     print(f"  manifest   : {out['manifest']}  [QUARANTINED run namespace]")
     print(f"  provenance : {out['provenance']}")
@@ -1145,7 +1638,8 @@ def main(argv: list[str] | None = None) -> int:
     # calibrator, or a diagnostic --skip-calibrators run) both land here.
     gate = out["provenance_obj"].get("promotion_gate", {})
     print(f"  status     : QUARANTINED — not promotable "
-          f"({gate.get('n_folds_promotable', 0)}/{len(plan.cutoffs)} folds "
+          f"({gate.get('n_folds_promotable', 0)}/"
+          f"{out['provenance_obj']['n_folds_requested']} folds "
           f"passed the fail-closed gate).")
     reasons = gate.get("quarantine_reasons") or []
     if reasons:
