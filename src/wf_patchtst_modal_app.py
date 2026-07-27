@@ -41,7 +41,11 @@ VOLUME_NAME = "renquant-wf-patchtst-data"
 # these env vars before importing this module (its only import site) so the
 # caller's requested values are what gets baked in.
 DEFAULT_GPU = "T4"
-DEFAULT_TIMEOUT_SECONDS = 3600
+# Keep in lockstep with the executor CLI default (--timeout-seconds). The
+# 2026-07-27 staged-1 probe (1 fold) measured train=2388.1s on T4 and the
+# calibrator leg was right-censored when the 3600s timeout killed it — 3600s
+# is confirmed below at least one production-like T4 fold's true runtime.
+DEFAULT_TIMEOUT_SECONDS = 7200
 DEFAULT_RETRIES = 1
 WORKER_GPU = os.environ.get("RENQUANT_WF_MODAL_GPU", DEFAULT_GPU)
 WORKER_TIMEOUT_SECONDS = int(
