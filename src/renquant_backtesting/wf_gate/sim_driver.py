@@ -30,6 +30,42 @@ SIM_START  = "2024-01-02"
 SIM_END    = "2026-03-28"   # ~27 months
 
 
+def _input_bundle_mismatches(args, repo_root: Path) -> list:
+    """Run the frozen-input-bundle guard; echo every VOID line to stdout.
+
+    stdout (not logging) so the launching wrapper's tee captures the
+    verdict verbatim (model#79 round-3: enforcement THROUGH the launched
+    command).
+    """
+    from renquant_backtesting.wf_gate.input_bundle_guard import (  # noqa: PLC0415
+        verify_input_bundle,
+    )
+    mismatches = verify_input_bundle(
+        args.input_bundle, repo_root, args.input_bundle_root)
+    for line in mismatches:
+        print(line)
+    return mismatches
+
+
+def _post_run_input_bundle_check(args, repo_root: Path) -> None:
+    """Postcondition leg of the input-bundle guard (no-op without flags).
+
+    Runs AFTER the sim completed and all requested outputs were written:
+    a mismatch here means an execution-time input mutation (e.g. a data
+    refetch or an artifact re-fit clobbered a verified input), which
+    voids the run even though the preflight passed. Distinct exit code 6
+    so wrappers can tell "never ran" (4) from "ran on mutated inputs".
+    """
+    if args.input_bundle is None:
+        return
+    mismatches = _input_bundle_mismatches(args, repo_root)
+    if mismatches:
+        print(f"INPUT BUNDLE POST-RUN FAILED (execution-time input "
+              f"mutation): {len(mismatches)} mismatch(es)")
+        sys.exit(6)
+    print(f"INPUT BUNDLE POST-RUN OK: root={args.input_bundle_root}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -79,9 +115,34 @@ def main() -> None:
     p.add_argument("--allow-raw-qp-mu", action="store_true",
                    help="Emergency/debug override: allow QP configs that do "
                         "not have a strict expected-return μ contract.")
+    # 2026-07-27 (model#79 round-3): frozen-input-bundle enforcement THROUGH
+    # the launched command. When both flags are given, the input-bundle guard
+    # runs as a precondition (before any data loading/scoring; mismatch =>
+    # exit 4) AND as a postcondition (after the sim and its outputs; mismatch
+    # => exit 6, execution-time input mutation). Flags absent = byte-identical
+    # legacy behavior.
+    p.add_argument("--input-bundle", default=None,
+                   help="Frozen input bundle dir (contains MANIFEST.sha256). "
+                        "Requires --input-bundle-root. Verified against "
+                        "--repo-root before AND after the sim.")
+    p.add_argument("--input-bundle-root", default=None,
+                   help="Frozen 64-hex sha256 of the bundle's MANIFEST.sha256. "
+                        "Requires --input-bundle.")
     args = p.parse_args()
+    if (args.input_bundle is None) != (args.input_bundle_root is None):
+        p.error("--input-bundle and --input-bundle-root must be given together")
 
     repo_root = Path(args.repo_root).expanduser().resolve() if args.repo_root else Path.cwd().resolve()
+
+    # Input-bundle PREFLIGHT: before any config/data loading or scoring.
+    # Results go to stdout so a wrapper's tee captures them verbatim.
+    if args.input_bundle is not None:
+        mismatches = _input_bundle_mismatches(args, repo_root)
+        if mismatches:
+            print(f"INPUT BUNDLE PREFLIGHT FAILED: {len(mismatches)} "
+                  f"mismatch(es)")
+            sys.exit(4)
+        print(f"INPUT BUNDLE PREFLIGHT OK: root={args.input_bundle_root}")
     sys.path.insert(0, str(repo_root))
     strategy_dir = repo_root / "backtesting" / STRATEGY
     sys.path.insert(0, str(strategy_dir))
@@ -290,6 +351,7 @@ def main() -> None:
 
     # Compare to golden if available (skip with --no-compare to halve runtime)
     if args.no_compare:
+        _post_run_input_bundle_check(args, repo_root)
         return
     golden_path = strategy_dir / args.compare_to
     if golden_path.exists() and args.compare_to != args.strategy_config_name:
@@ -322,6 +384,7 @@ def main() -> None:
         verdict = "PROMOTE ✓" if delta >= 0 else "REJECT ✗"
         print(f"  Verdict: {verdict}")
         print("=" * 50)
+    _post_run_input_bundle_check(args, repo_root)
 
 
 if __name__ == "__main__":
