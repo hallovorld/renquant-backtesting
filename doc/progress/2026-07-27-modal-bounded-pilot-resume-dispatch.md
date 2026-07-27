@@ -110,3 +110,35 @@ NEXT:      (1) model#82 prereg update: cite this PR as the merged
            / resume remainder with `--dispatch-note` recording the
            observed-cost GO); (2) the projection's $/h rate must come from
            the prereg (no default is baked in — deliberate).
+
+## fixed by claude — review round 1 (2026-07-27)
+
+Codex MED (`executor.py:795-915,1198-1225,1493-1502`): the recipe-mismatch
+refusal in `main()` read ONLY `read_prior_provenance()`, which returns
+`None` when the run's provenance sidecar is missing/unreadable — a
+non-empty run namespace (folds materialised on disk) with a deleted/absent
+sidecar was silently treated as "no prior recipe", so an old-recipe fold
+could be skipped and folded into a union manifest stamped with the new
+invocation's `recipe_id`, still reporting `promotion_ready=True`. Reviewer
+reproduced this by deleting the sidecar after a one-fold run and rebuilding
+the same `--run-id` with changed hyperparameters.
+
+Fix: reordered `main()` to compute `partition_resume()`'s namespace
+inventory (`part["existing"]`) before the recipe check, and fail closed
+(exit 2, no cloud call) whenever that inventory is non-empty but the prior
+provenance can't be read — "one run namespace = one recipe" now holds even
+when the sidecar itself is gone, instead of only when it happens to be
+present and parseable.
+
+EVIDENCE: artifact: `src/renquant_backtesting/wf_gate/modal/executor.py`
+(`main()`, resume-partition block) + `tests/test_modal_wf_patchtst.py`
+(new `test_resume_missing_provenance_sidecar_hard_fails_when_folds_exist`,
+reproducing the reviewer's exact repro: one-fold run, sidecar deleted,
+resume with `--epochs 9` -> asserts `rc == 2`, "provenance sidecar is
+missing" in stdout, zero `modal` import, sidecar still absent afterward).
+prod or exp: experiment tooling, no production path touched.
+scope: this is a correctness fix to the resume-partition fail-closed gate
+added by this same PR; not a new feature.
+Focused run: `PYTHONPATH=<repo>/src:<sibling src>... pytest -q
+tests/test_modal_wf_patchtst.py` -> 49 passed (48 pre-existing + 1 new),
+0 failed.

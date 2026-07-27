@@ -1490,8 +1490,17 @@ def main(argv: list[str] | None = None) -> int:
     # Decided from the run namespace BEFORE any cloud call: existing-and-valid
     # folds are skipped (never retrained/overwritten); an existing-but-invalid
     # selected fold is a hard error; only absent folds dispatch.
+    part = partition_resume(plan, strategy_artifacts)
     prior_prov = read_prior_provenance(
         _manifest_output_path(plan, strategy_artifacts))
+    if part["existing"] and not (prior_prov and prior_prov.get("recipe_id")):
+        print(f"\nRESUME REFUSED: run {plan.run_id!r} already has "
+              f"{len(part['existing'])} materialised fold(s) on disk but the "
+              "provenance sidecar is missing or unreadable — the prior "
+              "recipe_id can't be verified. Resuming into an unverifiable "
+              "namespace risks silently mixing recipes (one run namespace = "
+              "one recipe). Restore the sidecar or start a new --run-id.")
+        return 2
     if (prior_prov and prior_prov.get("recipe_id")
             and prior_prov["recipe_id"] != plan.recipe_id):
         print(f"\nRESUME REFUSED: run {plan.run_id!r} was built with recipe_id "
@@ -1499,7 +1508,6 @@ def main(argv: list[str] | None = None) -> int:
               f"{plan.recipe_id}. One run namespace = one recipe — a mixed "
               "corpus would not be auditable.")
         return 2
-    part = partition_resume(plan, strategy_artifacts)
     if part["invalid_selected"]:
         print("\nRESUME REFUSED: selected fold(s) already exist in run "
               f"namespace {plan.run_id!r} but FAIL integrity — refusing to "

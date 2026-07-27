@@ -868,6 +868,35 @@ def test_resume_recipe_mismatch_hard_fails(monkeypatch, tmp_path, capsys):
     assert "modal" not in sys.modules
 
 
+def test_resume_missing_provenance_sidecar_hard_fails_when_folds_exist(
+        monkeypatch, tmp_path, capsys):
+    """AUDIT REGRESSION GUARD (renquant-backtesting#81 review, model#82 P0).
+
+    A materialised fold on disk with NO readable provenance sidecar (deleted,
+    corrupted, or an interrupted first dispatch) must never be silently
+    resumed — the recipe-mismatch check can't verify anything without the
+    sidecar, so an old-recipe fold could be skipped and absorbed into a
+    union manifest stamped with a DIFFERENT recipe_id while still reporting
+    promotion_ready=True. Fail closed instead.
+    """
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "sidecar-gone", [a],
+               [_canned_fold_result(a, ta, ea)])
+    prov_path = (_strategy_artifacts(tmp_path) / ex.RUN_NAMESPACE_ROOT
+                 / "sidecar-gone" / (ex.CANONICAL_SERVING_MANIFEST
+                                     + ".provenance.json"))
+    prov_path.unlink()
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "sidecar-gone", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "resume refused" in out.lower()
+    assert "provenance sidecar is missing" in out.lower()
+    assert "modal" not in sys.modules  # hard-fails BEFORE any cloud call
+    assert not prov_path.exists()  # never rebuilt/overwritten
+
+
 def test_collect_refuses_pod_result_colliding_with_existing(monkeypatch,
                                                             tmp_path):
     a, ta, ea = REMAINDER
