@@ -63,7 +63,22 @@ WHY/DIR:   codex round-3 CHANGES_REQUESTED on renquant-model#79 (G4 XGB
            not a request to put model-training logic downstream: it is
            run-integrity plumbing alongside the sim driver, where it can
            actually prevent an unverified execution."
-EVIDENCE:  `PYTHONPATH=<common src>:<base-data src>:<artifacts src>:
+EVIDENCE:  artifact:      `wf_gate/input_bundle_guard.py` +
+           `wf_gate/sim_driver.py` (this repo, this PR).
+           prod or exp:   experiment — feature branch, not yet merged or
+           pinned into any G4 rerun / daily-run surface.
+           existing data: no prior ENFORCED checker existed at the
+           sim-driver layer; the only precedent is v1
+           (`verify_g4_input_bundle`) living under
+           `renquant-model/doc/research/evidence`, which codex round-3
+           flagged as an unenforced manual convention (see WHY/DIR) —
+           grepping this repo's history shows no earlier guard module.
+           best-known?:   yes for this repo — supersedes v1 as the
+           enforced variant; v1 is referenced only as the port source,
+           not as a live evidence path going forward.
+           scope:         this is an ENGINEERING correctness claim (test
+           suite pass/fail + CLI smoke), not a model/IC/Sharpe number —
+           `PYTHONPATH=<common src>:<base-data src>:<artifacts src>:
            <pipeline src>:src /Users/renhao/git/github/RenQuant/.venv/bin/
            python -m pytest -q` (full repo suite) -> 406 passed, 8
            skipped, 0 failed (389 baseline + 17 new, no regressions).
