@@ -897,6 +897,50 @@ def test_resume_missing_provenance_sidecar_hard_fails_when_folds_exist(
     assert not prov_path.exists()  # never rebuilt/overwritten
 
 
+def test_collect_and_write_seam_fails_closed_without_readable_sidecar(
+        monkeypatch, tmp_path):
+    """SECOND BELT for the #81 MED: the invariant must hold at the function
+    seam, not just main()'s CLI path — the reviewer's repro drove the seams
+    directly. With existing folds and a deleted (or unreadable) sidecar,
+    collect_and_write must refuse the union rebuild; with a readable sidecar
+    it must refuse a recipe_id mismatch. Fold sidecars carry no run-level
+    recipe identity, so missing-provenance = unverifiable = fail closed.
+    """
+    a, ta, ea = REMAINDER
+    _run_phase(monkeypatch, tmp_path, "seam-run", [a],
+               [_canned_fold_result(a, ta, ea)])
+    prov_path = (_strategy_artifacts(tmp_path) / ex.RUN_NAMESPACE_ROOT
+                 / "seam-run" / (ex.CANONICAL_SERVING_MANIFEST
+                                 + ".provenance.json"))
+    plan = ex.build_plan(_default_args(run_id="seam-run", select_cutoffs=a))
+    part = ex.partition_resume(plan, _strategy_artifacts(tmp_path))
+    staging = {"volume_name": ex.VOLUME_NAME, "volume_commit_id": None}
+    # (a) recipe mismatch with the sidecar INTACT → seam refuses the restamp.
+    plan_b = ex.build_plan(_default_args(run_id="seam-run", select_cutoffs=a,
+                                         epochs=9))
+    assert plan_b.recipe_id != plan.recipe_id
+    with pytest.raises(RuntimeError, match="one run namespace = one recipe"):
+        ex.collect_and_write(plan_b, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    # (b) sidecar UNREADABLE (corrupt JSON) → unverifiable → refuse.
+    prov_path.write_text("{not json")
+    with pytest.raises(RuntimeError, match="missing or unreadable"):
+        ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    # (c) sidecar DELETED (the reviewer's repro state) → refuse, even with
+    # UNCHANGED args — identity is unverifiable either way.
+    prov_path.unlink()
+    with pytest.raises(RuntimeError, match="missing or unreadable"):
+        ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    assert not prov_path.exists()  # never restamped
+    # (d) no existing folds → a FRESH run needs no prior sidecar (unchanged).
+    fresh = ex.build_plan(_default_args(run_id="fresh-run", select_cutoffs=a))
+    out = ex.collect_and_write(fresh, [], repo_root=tmp_path, code_heads={},
+                               staging=staging)
+    assert out["n_folds"] == 0
+
+
 def test_collect_refuses_pod_result_colliding_with_existing(monkeypatch,
                                                             tmp_path):
     a, ta, ea = REMAINDER

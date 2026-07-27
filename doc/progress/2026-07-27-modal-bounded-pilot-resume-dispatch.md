@@ -142,3 +142,31 @@ added by this same PR; not a new feature.
 Focused run: `PYTHONPATH=<repo>/src:<sibling src>... pytest -q
 tests/test_modal_wf_patchtst.py` -> 49 passed (48 pre-existing + 1 new),
 0 failed.
+
+## fixed by claude — review round 1, second belt (2026-07-27)
+
+Why fail-closed-on-missing-sidecar is the ONLY sound rule (checked, not
+assumed): the per-fold `.metadata.json` is written by renquant-model's
+`hf_trainer.build_training_contract()`, whose `training_contract` carries
+NO run-level recipe identity — no `recipe_id` field, and it omits
+run-level `RECIPE_FIELDS` such as `cadence_days` and `calibrator_method`
+— so the run recipe cannot be recovered (nor faithfully recomputed) from
+fold sidecars. The reviewer's alternative fix shape (per-fold recipe
+recovery) is therefore not implementable without inventing a second
+identity definition.
+
+Second belt: the round-1 fix guarded only `main()`'s CLI path; the
+reviewer's repro drove the function seams directly, which could still
+restamp. `collect_and_write()` now enforces the invariant at the seam:
+with `existing_folds` non-empty it raises `RuntimeError` when the prior
+provenance sidecar is missing/unreadable ("missing or unreadable") OR
+when its `recipe_id` differs from the plan's ("one run namespace = one
+recipe"). Fresh runs (no existing folds) are unchanged.
+
+EVIDENCE: artifact: `collect_and_write()` seam guard + new
+`test_collect_and_write_seam_fails_closed_without_readable_sidecar`
+(4 legs: recipe mismatch with sidecar intact / corrupt sidecar / deleted
+sidecar even with UNCHANGED args / fresh-run unaffected).
+Full suite (umbrella venv + sibling PYTHONPATH): 424 passed, 8 skipped,
+0 failed (baseline 410 at origin/main 9942bce + 12 feature + 1 round-1 +
+1 second-belt; no regressions).

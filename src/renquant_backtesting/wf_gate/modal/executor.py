@@ -1163,7 +1163,34 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
     strategy_artifacts = repo_root / "backtesting" / plan.strategy / "artifacts"
     manifest_output = _manifest_output_path(plan, strategy_artifacts)
     _assert_not_canonical_manifest(manifest_output, strategy_artifacts)
-    prior = read_prior_provenance(manifest_output) or {}
+    prior_raw = read_prior_provenance(manifest_output)
+    # One-run-one-recipe, enforced at the FUNCTION SEAM too (PR #81 review
+    # MED; second belt behind main()'s pre-dispatch refusal). Existing folds
+    # may only be absorbed into a union rebuild under a readable prior
+    # provenance whose recipe_id matches this plan. The per-fold
+    # .metadata.json carries NO run-level recipe identity (hf_trainer's
+    # training_contract has no recipe_id and omits run-level fields such as
+    # cadence_days/calibrator_method), so with the sidecar missing/unreadable
+    # the invariant is UNVERIFIABLE → fail closed rather than silently
+    # restamp the run's provenance with a new recipe_id.
+    if existing_folds:
+        if prior_raw is None:
+            raise RuntimeError(
+                f"run namespace {plan.run_id!r} holds {len(existing_folds)} "
+                "existing fold(s) but its provenance sidecar "
+                f"({manifest_output}.provenance.json) is missing or unreadable "
+                "— the one-run-one-recipe invariant cannot be verified "
+                "(per-fold metadata sidecars carry no run-level recipe_id). "
+                "Refusing to rebuild/restamp; restore the sidecar or use a "
+                "fresh --run-id.")
+        prior_recipe = prior_raw.get("recipe_id")
+        if prior_recipe and prior_recipe != plan.recipe_id:
+            raise RuntimeError(
+                f"run namespace {plan.run_id!r} was built with recipe_id "
+                f"{prior_recipe} but this rebuild computes {plan.recipe_id} — "
+                "one run namespace = one recipe; refusing to restamp a mixed "
+                "corpus.")
+    prior = prior_raw or {}
 
     entries: list[dict[str, Any]] = []
     fold_validation: dict[str, dict[str, Any]] = {}
