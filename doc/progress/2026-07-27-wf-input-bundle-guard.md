@@ -78,7 +78,25 @@ WHY/DIR:   codex round-3 CHANGES_REQUESTED on renquant-model#79 (G4 XGB
            not a request to put model-training logic downstream: it is
            run-integrity plumbing alongside the sim driver, where it can
            actually prevent an unverified execution."
-EVIDENCE:  REAL-TREE VALIDATION (the enforcement path exercised against
+EVIDENCE:  artifact:      `wf_gate/input_bundle_guard.py` +
+           `wf_gate/sim_driver.py` (this repo, this PR).
+           prod or exp:   experiment — feature branch, not yet merged or
+           pinned into any G4 rerun / daily-run surface.
+           existing data: no prior ENFORCED checker existed at the
+           sim-driver layer; the only precedent is v1
+           (`verify_g4_input_bundle`) living under
+           `renquant-model/doc/research/evidence`, which codex round-3
+           flagged as an unenforced manual convention (see WHY/DIR).
+           This PR's own first revision (bundle-DERIVED covered roots)
+           is now also superseded: the real-tree field test below
+           falsified it.
+           best-known?:   yes for this repo — supersedes v1 as the
+           enforced variant; v1 is referenced only as the port source,
+           not as a live evidence path going forward.
+           scope:         this is an ENGINEERING correctness claim (test
+           suite pass/fail + real-tree CLI verification), not a
+           model/IC/Sharpe number.
+           REAL-TREE VALIDATION (the enforcement path exercised against
            the actual frozen G4 bundle + rerun worktree, 6 covered
            roots: data/ohlcv, data/earnings_surprise,
            data/news_sentiment_alpaca, backtesting/renquant_104/
