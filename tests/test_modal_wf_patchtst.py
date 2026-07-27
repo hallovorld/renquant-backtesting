@@ -903,8 +903,9 @@ def test_collect_and_write_seam_fails_closed_without_readable_sidecar(
     seam, not just main()'s CLI path — the reviewer's repro drove the seams
     directly. With existing folds and a deleted (or unreadable) sidecar,
     collect_and_write must refuse the union rebuild; with a readable sidecar
-    it must refuse a recipe_id mismatch. Fold sidecars carry no run-level
-    recipe identity, so missing-provenance = unverifiable = fail closed.
+    it must refuse a recipe_id mismatch, or a readable sidecar that simply
+    omits recipe_id. Fold sidecars carry no run-level recipe identity, so
+    missing/unverifiable provenance = fail closed.
     """
     a, ta, ea = REMAINDER
     _run_phase(monkeypatch, tmp_path, "seam-run", [a],
@@ -924,17 +925,26 @@ def test_collect_and_write_seam_fails_closed_without_readable_sidecar(
                              staging=staging, existing_folds=part["existing"])
     # (b) sidecar UNREADABLE (corrupt JSON) → unverifiable → refuse.
     prov_path.write_text("{not json")
-    with pytest.raises(RuntimeError, match="missing or unreadable"):
+    with pytest.raises(RuntimeError, match="missing, unreadable, or omits"):
         ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
                              staging=staging, existing_folds=part["existing"])
     # (c) sidecar DELETED (the reviewer's repro state) → refuse, even with
     # UNCHANGED args — identity is unverifiable either way.
     prov_path.unlink()
-    with pytest.raises(RuntimeError, match="missing or unreadable"):
+    with pytest.raises(RuntimeError, match="missing, unreadable, or omits"):
         ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
                              staging=staging, existing_folds=part["existing"])
     assert not prov_path.exists()  # never restamped
-    # (d) no existing folds → a FRESH run needs no prior sidecar (unchanged).
+    # (e) sidecar READABLE JSON but omits recipe_id (reviewer's second repro:
+    # a readable-but-key-missing sidecar must fail closed exactly like a
+    # missing/unreadable one — refuse, even with UNCHANGED args.
+    readable_no_recipe = {"dispatches": []}
+    prov_path.write_text(json.dumps(readable_no_recipe))
+    with pytest.raises(RuntimeError, match="missing, unreadable, or omits"):
+        ex.collect_and_write(plan, [], repo_root=tmp_path, code_heads={},
+                             staging=staging, existing_folds=part["existing"])
+    assert json.loads(prov_path.read_text()) == readable_no_recipe  # unchanged
+    # (f) no existing folds → a FRESH run needs no prior sidecar (unchanged).
     fresh = ex.build_plan(_default_args(run_id="fresh-run", select_cutoffs=a))
     out = ex.collect_and_write(fresh, [], repo_root=tmp_path, code_heads={},
                                staging=staging)

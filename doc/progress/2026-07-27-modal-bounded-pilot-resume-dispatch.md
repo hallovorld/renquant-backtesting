@@ -170,3 +170,42 @@ sidecar even with UNCHANGED args / fresh-run unaffected).
 Full suite (umbrella venv + sibling PYTHONPATH): 424 passed, 8 skipped,
 0 failed (baseline 410 at origin/main 9942bce + 12 feature + 1 round-1 +
 1 second-belt; no regressions).
+
+## fixed by claude — review round 2 (2026-07-27)
+
+Codex MED (`executor.py:1176-1193`): the second-belt seam guard still did
+not fail closed when the prior provenance sidecar was readable JSON but
+simply omitted the `recipe_id` key. `main()` already rejected that exact
+state via `not (prior_prov and prior_prov.get("recipe_id"))`, but
+`collect_and_write()` only raised on `prior_raw is None` or on a
+mismatching *present* `recipe_id` — `prior_raw == {...}` without the key
+fell through both checks (`prior_recipe = prior_raw.get("recipe_id")`
+is falsy, so `if prior_recipe and prior_recipe != plan.recipe_id` never
+fires), so the union rebuild proceeded and restamped the run's provenance
+with the current invocation's `recipe_id` while `promotion_ready` stayed
+`True`. Reviewer reproduced by writing a one-fold run's sidecar back
+minus its `recipe_id` field and calling `collect_and_write()` directly.
+
+Fix: collapsed the seam's two checks into one — `prior_recipe` is now
+computed once from `prior_raw` (or `None` if `prior_raw` itself is falsy),
+and a single `if not prior_recipe` guard treats "no sidecar", "unreadable
+sidecar", and "readable sidecar missing/empty `recipe_id`" identically as
+unverifiable ⇒ fail closed, mirroring `main()`'s existing
+`not (prior_prov and prior_prov.get("recipe_id"))` check. The
+mismatch check now only needs to compare two known-truthy strings.
+
+EVIDENCE: artifact: `src/renquant_backtesting/wf_gate/modal/executor.py`
+(`collect_and_write()` seam guard, ~line 1176) + `tests/test_modal_wf_patchtst.py`
+(extended `test_collect_and_write_seam_fails_closed_without_readable_sidecar`
+with leg (e): sidecar rewritten as valid JSON `{"dispatches": []}` with no
+`recipe_id` key → `collect_and_write()` still raises, sidecar left
+byte-unchanged; updated the corrupt/deleted-sidecar legs' `match=` to the
+new unified error wording).
+prod or exp: experiment tooling, no production path touched.
+scope: this is a correctness fix to the seam guard added by this same
+PR's round-1 second belt; not a new feature.
+Focused run: `PYTHONPATH=<repo>/src:<sibling src>... pytest -q
+tests/test_modal_wf_patchtst.py` -> 50 passed, 0 failed.
+Full suite (umbrella venv + sibling PYTHONPATH): 424 passed, 8 skipped,
+0 failed (same 424/8 as round-1 second belt — this is a same-file
+correctness fix, no test count change; no regressions).

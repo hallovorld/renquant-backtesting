@@ -1174,17 +1174,17 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
     # the invariant is UNVERIFIABLE → fail closed rather than silently
     # restamp the run's provenance with a new recipe_id.
     if existing_folds:
-        if prior_raw is None:
+        prior_recipe = prior_raw.get("recipe_id") if prior_raw else None
+        if not prior_recipe:
             raise RuntimeError(
                 f"run namespace {plan.run_id!r} holds {len(existing_folds)} "
                 "existing fold(s) but its provenance sidecar "
-                f"({manifest_output}.provenance.json) is missing or unreadable "
-                "— the one-run-one-recipe invariant cannot be verified "
-                "(per-fold metadata sidecars carry no run-level recipe_id). "
-                "Refusing to rebuild/restamp; restore the sidecar or use a "
-                "fresh --run-id.")
-        prior_recipe = prior_raw.get("recipe_id")
-        if prior_recipe and prior_recipe != plan.recipe_id:
+                f"({manifest_output}.provenance.json) is missing, unreadable, "
+                "or omits recipe_id — the one-run-one-recipe invariant cannot "
+                "be verified (per-fold metadata sidecars carry no run-level "
+                "recipe_id). Refusing to rebuild/restamp; restore the sidecar "
+                "or use a fresh --run-id.")
+        if prior_recipe != plan.recipe_id:
             raise RuntimeError(
                 f"run namespace {plan.run_id!r} was built with recipe_id "
                 f"{prior_recipe} but this rebuild computes {plan.recipe_id} — "
