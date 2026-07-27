@@ -830,7 +830,8 @@ def test_resume_hard_fails_on_existing_but_invalid(monkeypatch, tmp_path):
     # main() hard-fails BEFORE any cloud call (no modal import at all).
     monkeypatch.delitem(sys.modules, "modal", raising=False)
     rc = ex.main(["--run-id", "resume-bad", "--select-cutoffs", a,
-                  "--repo-root", str(tmp_path), "--execute"])
+                  "--repo-root", str(tmp_path), "--execute",
+                  "--max-total-usd", "999", "--rate-usd-per-hour", "1.0"])
     assert rc == 2
     assert "modal" not in sys.modules
 
@@ -842,7 +843,8 @@ def test_resume_all_existing_noop_rebuild_no_modal(monkeypatch, tmp_path,
                [_canned_fold_result(a, ta, ea)])
     monkeypatch.delitem(sys.modules, "modal", raising=False)
     rc = ex.main(["--run-id", "noop-run", "--select-cutoffs", a,
-                  "--repo-root", str(tmp_path), "--execute"])
+                  "--repo-root", str(tmp_path), "--execute",
+                  "--max-total-usd", "999", "--rate-usd-per-hour", "1.0"])
     assert rc == 0  # union complete + promotable
     assert "modal" not in sys.modules  # ZERO cloud calls
     assert "NOTHING to dispatch" in capsys.readouterr().out
@@ -862,7 +864,8 @@ def test_resume_recipe_mismatch_hard_fails(monkeypatch, tmp_path, capsys):
                [_canned_fold_result(a, ta, ea)])
     monkeypatch.delitem(sys.modules, "modal", raising=False)
     rc = ex.main(["--run-id", "recipe-run", "--select-cutoffs", a,
-                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9"])
+                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9",
+                  "--max-total-usd", "999", "--rate-usd-per-hour", "1.0"])
     assert rc == 2
     assert "one run namespace = one recipe" in capsys.readouterr().out.lower()
     assert "modal" not in sys.modules
@@ -888,7 +891,8 @@ def test_resume_missing_provenance_sidecar_hard_fails_when_folds_exist(
     prov_path.unlink()
     monkeypatch.delitem(sys.modules, "modal", raising=False)
     rc = ex.main(["--run-id", "sidecar-gone", "--select-cutoffs", a,
-                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9"])
+                  "--repo-root", str(tmp_path), "--execute", "--epochs", "9",
+                  "--max-total-usd", "999", "--rate-usd-per-hour", "1.0"])
     assert rc == 2
     out = capsys.readouterr().out
     assert "resume refused" in out.lower()
@@ -1027,6 +1031,186 @@ def test_dry_run_previews_resume_partition(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert "would skip" in capsys.readouterr().out
     assert "modal" not in sys.modules
+
+
+# ── Execute-time hard cost cap (model#82 P0 round 2) ─────────────────────────
+def _run_prov_path(repo_root, run_id):
+    return (_strategy_artifacts(repo_root) / ex.RUN_NAMESPACE_ROOT / run_id
+            / (ex.CANONICAL_SERVING_MANIFEST + ".provenance.json"))
+
+
+def test_cost_gate_math_measured_basis():
+    pod_facts = {"2026-02-09": {"elapsed_seconds": 3600.0},
+                 "2026-03-02": {"elapsed_seconds": 7200.0},
+                 "2026-01-19": {"elapsed_seconds": None}}  # incomplete pod
+    gate = ex.compute_cost_gate(
+        pod_facts=pod_facts, n_to_dispatch=40, rate_usd_per_hour=2.0,
+        timeout_seconds=7200, max_total_usd=200.0, pre_spend_usd=1.45,
+        overhead_frac=0.15)
+    assert gate["basis"] == "measured_mean"
+    assert gate["n_completed_pods"] == 2
+    # measured: 10800 s x ($2/3600) x 1.15 = $6.90
+    assert gate["measured_cost_usd"] == pytest.approx(6.90)
+    # remaining: mean 5400 s x 40 folds x ($2/3600) x 1.15 = $138.00
+    assert gate["per_fold_seconds"] == pytest.approx(5400.0)
+    assert gate["projected_remaining_usd"] == pytest.approx(138.0)
+    # all-in: pre-spend + measured + remaining
+    assert gate["projected_total_usd"] == pytest.approx(146.35)
+    assert gate["verdict"] == "GO"
+    refused = ex.compute_cost_gate(
+        pod_facts=pod_facts, n_to_dispatch=40, rate_usd_per_hour=2.0,
+        timeout_seconds=7200, max_total_usd=20.0, pre_spend_usd=1.45,
+        overhead_frac=0.15)
+    assert refused["verdict"] == "REFUSED"
+    assert "COST GATE REFUSED" in refused["summary"]
+    assert "$146.35" in refused["summary"]  # full calc in the one clear line
+
+
+def test_cost_gate_worst_case_timeout_basis_phase1():
+    # No completed pods yet (phase 1): the per-fold bound is timeout_seconds —
+    # the hardest upper bound a fold can bill before Modal kills it.
+    gate = ex.compute_cost_gate(
+        pod_facts={}, n_to_dispatch=3, rate_usd_per_hour=2.0,
+        timeout_seconds=7200, max_total_usd=20.0, overhead_frac=0.0)
+    assert gate["basis"] == "worst_case_timeout"
+    assert gate["n_completed_pods"] == 0
+    assert gate["measured_cost_usd"] == 0.0
+    assert gate["per_fold_seconds"] == 7200.0
+    # 3 folds x 7200 s x $2/3600 = $12.00 (overhead 0 for exactness)
+    assert gate["projected_total_usd"] == pytest.approx(12.0)
+    assert gate["verdict"] == "GO"
+    refused = ex.compute_cost_gate(
+        pod_facts={}, n_to_dispatch=3, rate_usd_per_hour=2.0,
+        timeout_seconds=7200, max_total_usd=11.99, overhead_frac=0.0)
+    assert refused["verdict"] == "REFUSED"
+
+
+def test_cost_cap_flags_required_with_execute_select_cutoffs():
+    a = REMAINDER[0]
+    # missing --max-total-usd -> argparse error (exit 2)
+    with pytest.raises(SystemExit) as ei:
+        ex.parse_args(["--execute", "--select-cutoffs", a, "--run-id", "r"])
+    assert ei.value.code == 2
+    # --max-total-usd without --rate-usd-per-hour -> argparse error
+    with pytest.raises(SystemExit) as ei:
+        ex.parse_args(["--execute", "--select-cutoffs", a, "--run-id", "r",
+                       "--max-total-usd", "20"])
+    assert ei.value.code == 2
+    # missing --run-id (both phases must target ONE namespace) -> error
+    with pytest.raises(SystemExit) as ei:
+        ex.parse_args(["--execute", "--select-cutoffs", a,
+                       "--max-total-usd", "20", "--rate-usd-per-hour", "1"])
+    assert ei.value.code == 2
+    # fully-specified capped execute parses; documented defaults hold
+    ns = ex.parse_args(["--execute", "--select-cutoffs", a, "--run-id", "r",
+                        "--max-total-usd", "20", "--rate-usd-per-hour", "1"])
+    assert ns.max_total_usd == 20.0
+    assert ns.pre_spend_usd == 0.0
+    assert ns.overhead_frac == 0.15
+    # plan-only (--dry-run / no --execute) needs no cap flags
+    ns = ex.parse_args(["--select-cutoffs", a, "--dry-run"])
+    assert ns.max_total_usd is None
+
+
+def test_cost_cap_phase1_worst_case_refusal_before_modal(monkeypatch,
+                                                         tmp_path, capsys):
+    a, b = PILOT[0], REMAINDER[0]
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    # Worst case: 2 folds x 7200 s x $2/3600 x 1.15 = $9.20 > cap $5 -> exit 4.
+    rc = ex.main(["--run-id", "cap-run", "--select-cutoffs", f"{a},{b}",
+                  "--repo-root", str(tmp_path), "--execute",
+                  "--max-total-usd", "5", "--rate-usd-per-hour", "2.0"])
+    assert rc == 4
+    assert "modal" not in sys.modules  # refused BEFORE any modal import
+    out = capsys.readouterr().out
+    assert "COST GATE REFUSED" in out
+    assert "worst_case_timeout" in out
+    # The refused attempt is persisted into the run's audit history with the
+    # claimed run/recipe identity, so a later retry inherits the record.
+    prov = json.loads(_run_prov_path(tmp_path, "cap-run").read_text())
+    assert prov["run_id"] == "cap-run"
+    assert prov["recipe_id"].startswith("sha256:")
+    rec = prov["dispatches"][-1]
+    assert rec["dispatched_cutoffs"] == []  # nothing dispatched
+    assert rec["refused_cutoffs"] == [a, b]
+    gate = rec["cost_gate"]
+    assert gate["verdict"] == "REFUSED"
+    assert gate["basis"] == "worst_case_timeout"
+    assert gate["projected_total_usd"] == pytest.approx(
+        2 * 7200 / 3600 * 2.0 * 1.15)  # $9.20
+    assert gate["max_total_usd"] == 5.0
+
+
+def test_cost_cap_phase2_measured_projection_refusal(monkeypatch, tmp_path,
+                                                     capsys):
+    (a, ta, ea), b = PILOT, REMAINDER[0]
+    _run_phase(monkeypatch, tmp_path, "cap2-run", [a],
+               [_canned_fold_result(a, ta, ea)])  # pilot pod elapsed 42.0 s
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    # Measured basis + overhead + pre-spend:
+    #   usd/s = $2/3600 x 1.15; measured = 42 x usd/s; remaining = 42 x 1 x
+    #   usd/s; total = 0.96 + 0.0268 + 0.0268 = $1.0137 > cap $1.00 -> exit 4.
+    rc = ex.main(["--run-id", "cap2-run", "--select-cutoffs", f"{a},{b}",
+                  "--repo-root", str(tmp_path), "--execute",
+                  "--max-total-usd", "1.0", "--rate-usd-per-hour", "2.0",
+                  "--pre-spend-usd", "0.96"])
+    assert rc == 4
+    assert "modal" not in sys.modules
+    out = capsys.readouterr().out
+    assert "COST GATE REFUSED" in out
+    assert "measured_mean" in out
+    prov = json.loads(_run_prov_path(tmp_path, "cap2-run").read_text())
+    assert len(prov["dispatches"]) == 2  # phase-1 record + this refusal
+    assert prov["dispatches"][0]["dispatched_cutoffs"] == [a]  # untouched
+    rec = prov["dispatches"][-1]
+    gate = rec["cost_gate"]
+    assert gate["basis"] == "measured_mean"
+    usd_per_sec = 2.0 / 3600 * 1.15
+    assert gate["projected_total_usd"] == pytest.approx(
+        0.96 + 42.0 * usd_per_sec + 42.0 * 1 * usd_per_sec)
+    assert gate["verdict"] == "REFUSED"
+    # Resume partition respected: only the absent fold was up for dispatch.
+    assert rec["refused_cutoffs"] == [b]
+    assert rec["skipped_existing_cutoffs"] == [a]
+
+
+def test_cost_cap_go_prints_and_rides_dispatch_record(monkeypatch, tmp_path,
+                                                      capsys):
+    a, ta, ea = PILOT
+    # (a) CLI: generous cap -> gate prints GO and does NOT exit 4; the run
+    # proceeds past the gate and stops downstream (readiness or missing
+    # panels, environment-dependent) with rc 2 either way.
+    monkeypatch.delitem(sys.modules, "modal", raising=False)
+    rc = ex.main(["--run-id", "go-run", "--select-cutoffs", a,
+                  "--repo-root", str(tmp_path), "--execute",
+                  "--max-total-usd", "999", "--rate-usd-per-hour", "2.0"])
+    assert rc == 2
+    assert "COST GATE GO" in capsys.readouterr().out
+    # (b) seam: a GO gate record handed to collect_and_write via dispatch_meta
+    # lands verbatim in the appended dispatches[] audit record.
+    captured = _install_fake_modal(
+        monkeypatch, map_results=[_canned_fold_result(a, ta, ea)])
+    plan = ex.build_plan(_default_args(run_id="go-run2", select_cutoffs=a))
+    part = ex.partition_resume(plan, _strategy_artifacts(tmp_path))
+    got, dinfo = ex.dispatch_folds(plan, timeout_s=60, retries=0,
+                                   volume_commit_id=None)
+    gate = ex.compute_cost_gate(
+        pod_facts={}, n_to_dispatch=1, rate_usd_per_hour=2.0,
+        timeout_seconds=7200, max_total_usd=999.0)
+    assert gate["verdict"] == "GO"
+    out = ex.collect_and_write(
+        plan, got, repo_root=tmp_path, code_heads={},
+        staging={"volume_name": ex.VOLUME_NAME, "volume_commit_id": None},
+        existing_folds=part["existing"],
+        dispatch_meta={"app_id": dinfo.get("app_id"),
+                       "dispatched_cutoffs": part["dispatch"],
+                       "skipped_existing_cutoffs": part["skipped"],
+                       "cost_gate": gate})
+    rec = out["provenance_obj"]["dispatches"][-1]
+    assert rec["cost_gate"]["verdict"] == "GO"
+    assert rec["cost_gate"]["projected_total_usd"] == \
+        gate["projected_total_usd"]
+    assert len(captured["dispatched"]) == 1  # the GO path actually dispatched
 
 
 # ── CLI plan-only path ───────────────────────────────────────────────────────
