@@ -5,13 +5,15 @@ Tiny synthetic bundle + target fixture. Contract under test
 
 * clean target -> empty mismatch list;
 * missing listed file / mutated listed file -> one VOID line each;
-* extra file inside a covered group -> VOID extra (bidirectional
-  membership), while files outside every covered group are ignored;
+* extra file inside an EXPLICIT covered root -> VOID extra
+  (bidirectional membership), while files outside every covered root
+  are ignored by the sweep;
+* manifest entries OUTSIDE all covered roots (singletons) are still
+  digest-verified individually;
 * wrong frozen root digest -> single short-circuit VOID line;
 * manifest rows naming META files (MANIFEST.sha256 / ROOT_DIGEST) are
   excluded from verification;
-* covered groups are BUNDLE-DERIVED: manifest parent dirs truncated to
-  the top 2 path levels; root-level entries contribute no group.
+* CLI requires at least one --covered-root.
 """
 from __future__ import annotations
 
@@ -21,7 +23,6 @@ from pathlib import Path
 import pytest
 
 from renquant_backtesting.wf_gate.input_bundle_guard import (
-    derive_covered_groups,
     main,
     verify_input_bundle,
 )
@@ -31,8 +32,13 @@ TARGET_FILES = {
     "data/ohlcv/MSFT.csv": b"msft-prices",
     "models/model.bin": b"weights",
     "artifacts/wf/calibrators/cal.json": b"{}",
-    "run_meta.txt": b"root-level listed file",
+    "run_meta.txt": b"root-level listed singleton",
 }
+
+#: Explicit covered roots for the fixture (caller-frozen, NOT derived).
+#: ``run_meta.txt`` is deliberately outside all of them: a listed
+#: singleton that must be digest-checked without sweeping the target root.
+COVERED_ROOTS = ["data/ohlcv", "models", "artifacts/wf/calibrators"]
 
 
 def _write_target(tmp_path: Path) -> Path:
@@ -70,13 +76,13 @@ def bundle_and_target(tmp_path: Path) -> tuple[Path, Path, str]:
 
 def test_clean_target_verifies_ok(bundle_and_target) -> None:
     bundle, target, root = bundle_and_target
-    assert verify_input_bundle(bundle, target, root) == []
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == []
 
 
 def test_missing_listed_file_is_void(bundle_and_target) -> None:
     bundle, target, root = bundle_and_target
     (target / "data/ohlcv/MSFT.csv").unlink()
-    assert verify_input_bundle(bundle, target, root) == [
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == [
         "VOID missing: data/ohlcv/MSFT.csv",
     ]
 
@@ -84,45 +90,51 @@ def test_missing_listed_file_is_void(bundle_and_target) -> None:
 def test_mutated_listed_file_is_void(bundle_and_target) -> None:
     bundle, target, root = bundle_and_target
     (target / "data/ohlcv/AAPL.csv").write_bytes(b"tampered")
-    assert verify_input_bundle(bundle, target, root) == [
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == [
         "VOID digest mismatch: data/ohlcv/AAPL.csv",
     ]
 
 
-def test_extra_file_in_covered_group_is_void(bundle_and_target) -> None:
+def test_extra_file_in_covered_root_is_void(bundle_and_target) -> None:
     bundle, target, root = bundle_and_target
     (target / "data/ohlcv/TSLA.csv").write_bytes(b"not frozen")
-    assert verify_input_bundle(bundle, target, root) == [
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == [
         "VOID extra file not in manifest: data/ohlcv/TSLA.csv",
     ]
 
 
-def test_extra_file_outside_covered_groups_is_ignored(bundle_and_target) -> None:
-    """Membership only sweeps covered groups.
+def test_extra_files_outside_covered_roots_are_ignored(
+        bundle_and_target) -> None:
+    """The sweep runs ONLY over the explicit covered roots.
 
-    ``data/other/`` shares only ONE level with the covered ``data/ohlcv``
-    group, and root-level entries (``run_meta.txt``) contribute no group,
-    so neither stray is flagged.
+    Strays in ``data/other/`` (sibling of a covered root), in
+    ``artifacts/wf/other/`` (sibling subdir under a covered root's
+    parent), and at the target root are all outside every covered root
+    -> ignored. This is exactly the class of false VOID the derived
+    top-2-level rule produced on the real G4 tree (sim outputs under
+    ``data/``, code under ``backtesting/renquant_104/``).
     """
     bundle, target, root = bundle_and_target
     (target / "data" / "other").mkdir(parents=True)
-    (target / "data/other/stray.csv").write_bytes(b"uncovered")
+    (target / "data/other/sim_runs_101.db").write_bytes(b"sim output")
+    (target / "artifacts" / "wf" / "other").mkdir(parents=True)
+    (target / "artifacts/wf/other/x.bin").write_bytes(b"uncovered")
     (target / "stray_root.txt").write_bytes(b"uncovered")
-    assert verify_input_bundle(bundle, target, root) == []
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == []
 
 
-def test_extra_in_sibling_subdir_of_covered_group_is_void(
+def test_singleton_entry_outside_roots_still_digest_verified(
         bundle_and_target) -> None:
-    """A group claims its WHOLE top-2 prefix, including sibling subdirs.
+    """Manifest entries outside all covered roots keep their digest check.
 
-    ``artifacts/wf/calibrators/cal.json`` derives group ``artifacts/wf``,
-    so an unlisted file under ``artifacts/wf/other/`` is an extra.
+    ``run_meta.txt`` is not under any covered root; mutating it must
+    still VOID (check 2 is unconditional), without any sweep of its
+    parent directory.
     """
     bundle, target, root = bundle_and_target
-    (target / "artifacts" / "wf" / "other").mkdir(parents=True)
-    (target / "artifacts/wf/other/x.bin").write_bytes(b"uncovered? no")
-    assert verify_input_bundle(bundle, target, root) == [
-        "VOID extra file not in manifest: artifacts/wf/other/x.bin",
+    (target / "run_meta.txt").write_bytes(b"tampered singleton")
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == [
+        "VOID digest mismatch: run_meta.txt",
     ]
 
 
@@ -130,7 +142,7 @@ def test_bad_root_digest_short_circuits(bundle_and_target) -> None:
     """Wrong frozen root => single VOID line even with other damage."""
     bundle, target, _root = bundle_and_target
     (target / "data/ohlcv/MSFT.csv").unlink()  # would also be VOID
-    mismatches = verify_input_bundle(bundle, target, "0" * 64)
+    mismatches = verify_input_bundle(bundle, target, "0" * 64, COVERED_ROOTS)
     assert len(mismatches) == 1
     assert mismatches[0].startswith("VOID root digest: ")
     assert mismatches[0].endswith(f"!= frozen {'0' * 64}")
@@ -148,31 +160,30 @@ def test_meta_file_rows_are_excluded(tmp_path: Path) -> None:
         f"{fake}  4  MANIFEST.sha256",
         f"{fake}  4  ROOT_DIGEST",
     ])
-    assert verify_input_bundle(bundle, target, root) == []
+    assert verify_input_bundle(bundle, target, root, COVERED_ROOTS) == []
 
 
 def test_missing_manifest_is_a_mismatch(tmp_path: Path) -> None:
     target = _write_target(tmp_path)
     empty_bundle = tmp_path / "empty_bundle"
     empty_bundle.mkdir()
-    mismatches = verify_input_bundle(empty_bundle, target, "0" * 64)
+    mismatches = verify_input_bundle(
+        empty_bundle, target, "0" * 64, COVERED_ROOTS)
     assert len(mismatches) == 1
     assert mismatches[0].startswith("VOID manifest missing: ")
 
 
-def test_derive_covered_groups_rule() -> None:
-    """Top-2-level truncation of manifest parent dirs; root entries none."""
-    assert derive_covered_groups([
-        "data/ohlcv/AAPL.csv",
-        "models/model.bin",
-        "artifacts/wf/calibrators/cal.json",
-        "run_meta.txt",
-    ]) == ["artifacts/wf", "data/ohlcv", "models"]
+def _cli_covered_root_args() -> list[str]:
+    args: list[str] = []
+    for r in COVERED_ROOTS:
+        args += ["--covered-root", r]
+    return args
 
 
 def test_cli_ok_exit_0(bundle_and_target, capsys) -> None:
     bundle, target, root = bundle_and_target
-    rc = main([str(bundle), str(target), "--frozen-root", root])
+    rc = main([str(bundle), str(target), "--frozen-root", root,
+               *_cli_covered_root_args()])
     out = capsys.readouterr().out
     assert rc == 0
     assert f"VERIFY OK: {len(TARGET_FILES)} files verified" in out
@@ -184,9 +195,17 @@ def test_cli_mismatch_exit_4_prints_all_void_lines(
     bundle, target, root = bundle_and_target
     (target / "data/ohlcv/AAPL.csv").write_bytes(b"tampered")
     (target / "data/ohlcv/MSFT.csv").unlink()
-    rc = main([str(bundle), str(target), "--frozen-root", root])
+    rc = main([str(bundle), str(target), "--frozen-root", root,
+               *_cli_covered_root_args()])
     out = capsys.readouterr().out
     assert rc == 4
     assert "VOID digest mismatch: data/ohlcv/AAPL.csv" in out
     assert "VOID missing: data/ohlcv/MSFT.csv" in out
     assert "PREFLIGHT FAILED: 2 mismatch(es)" in out
+
+
+def test_cli_requires_at_least_one_covered_root(bundle_and_target) -> None:
+    bundle, target, root = bundle_and_target
+    with pytest.raises(SystemExit) as exc:
+        main([str(bundle), str(target), "--frozen-root", root])
+    assert exc.value.code == 2  # argparse error

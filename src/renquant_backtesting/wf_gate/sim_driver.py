@@ -41,7 +41,8 @@ def _input_bundle_mismatches(args, repo_root: Path) -> list:
         verify_input_bundle,
     )
     mismatches = verify_input_bundle(
-        args.input_bundle, repo_root, args.input_bundle_root)
+        args.input_bundle, repo_root, args.input_bundle_root,
+        args.input_bundle_covered_root)
     for line in mismatches:
         print(line)
     return mismatches
@@ -116,21 +117,33 @@ def main() -> None:
                    help="Emergency/debug override: allow QP configs that do "
                         "not have a strict expected-return μ contract.")
     # 2026-07-27 (model#79 round-3): frozen-input-bundle enforcement THROUGH
-    # the launched command. When both flags are given, the input-bundle guard
-    # runs as a precondition (before any data loading/scoring; mismatch =>
-    # exit 4) AND as a postcondition (after the sim and its outputs; mismatch
-    # => exit 6, execution-time input mutation). Flags absent = byte-identical
-    # legacy behavior.
+    # the launched command. When the bundle flags are given, the input-bundle
+    # guard runs as a precondition (before any data loading/scoring; mismatch
+    # => exit 4) AND as a postcondition (after the sim and its outputs;
+    # mismatch => exit 6, execution-time input mutation). Flags absent =
+    # byte-identical legacy behavior.
     p.add_argument("--input-bundle", default=None,
                    help="Frozen input bundle dir (contains MANIFEST.sha256). "
-                        "Requires --input-bundle-root. Verified against "
+                        "Requires --input-bundle-root and at least one "
+                        "--input-bundle-covered-root. Verified against "
                         "--repo-root before AND after the sim.")
     p.add_argument("--input-bundle-root", default=None,
                    help="Frozen 64-hex sha256 of the bundle's MANIFEST.sha256. "
                         "Requires --input-bundle.")
+    p.add_argument("--input-bundle-covered-root", action="append",
+                   default=None, metavar="RELPATH",
+                   help="Repo-root-relative directory swept recursively by "
+                        "the guard's bidirectional membership check; "
+                        "repeatable, at least one required with "
+                        "--input-bundle. Manifest entries outside every "
+                        "covered root are still digest-checked individually.")
     args = p.parse_args()
-    if (args.input_bundle is None) != (args.input_bundle_root is None):
-        p.error("--input-bundle and --input-bundle-root must be given together")
+    _bundle_flags = (args.input_bundle is not None,
+                     args.input_bundle_root is not None,
+                     bool(args.input_bundle_covered_root))
+    if any(_bundle_flags) and not all(_bundle_flags):
+        p.error("--input-bundle, --input-bundle-root and at least one "
+                "--input-bundle-covered-root must be given together")
 
     repo_root = Path(args.repo_root).expanduser().resolve() if args.repo_root else Path.cwd().resolve()
 

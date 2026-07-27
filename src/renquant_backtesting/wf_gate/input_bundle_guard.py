@@ -4,8 +4,9 @@ Generalized port of the model#79 amendment-1 checker
 (``verify_g4_input_bundle`` v1). codex's round-3 ruling on
 renquant-model#79 requires this run-integrity plumbing to live in the
 repo that OWNS the sim driver and to be enforced THROUGH the launched
-command (``wf_gate.sim_driver --input-bundle/--input-bundle-root``),
-not via an external wrapper-script convention.
+command (``wf_gate.sim_driver --input-bundle/--input-bundle-root/
+--input-bundle-covered-root``), not via an external wrapper-script
+convention.
 
 Bundle contract
 ---------------
@@ -26,33 +27,38 @@ Checks (ANY failure => nonzero mismatch list; one "VOID ..." line each):
    results meaningless, so the root-digest line is the only one
    returned.
 2. Every manifest-listed file exists under the target root with a
-   matching sha256.
-3. Bidirectional file-set membership inside the covered groups: any
-   file present under a covered directory of the target but absent
-   from the manifest is a mismatch.
+   matching sha256 — regardless of whether it lies inside a covered
+   root.
+3. Bidirectional file-set membership inside the EXPLICIT covered
+   roots: any file found under a covered root of the target but
+   absent from the manifest is a mismatch.
 
-Covered-groups derivation rule (BUNDLE-DERIVED, not hardcoded)
---------------------------------------------------------------
-The covered groups are derived from the manifest itself: for every
-manifest relpath, take its parent-directory path truncated to the top
-2 path levels. Examples::
+Covered roots (EXPLICIT, caller-frozen)
+---------------------------------------
+The membership sweep runs ONLY over the ``covered_roots`` the caller
+passes (target-relative directory paths, swept recursively). They are
+part of the frozen run definition — the prereg/launch command pins
+them next to the frozen root digest.
 
-    data/ohlcv/AAPL.parquet                 -> data/ohlcv
-    models/model.bin                        -> models
-    backtesting/renquant_104/models/m.json  -> backtesting/renquant_104
+An earlier revision DERIVED the covered set from manifest relpaths
+(parent dirs truncated to the top 2 path levels). Field-testing
+against the real G4 bundle + worktree falsified that rule: a
+root-level singleton (``data/<file>.parquet``, parent ``data``)
+claimed all of ``data/`` and 3-level-deep artifact dirs claimed all of
+``backtesting/renquant_104/``, flagging unrelated code files AND the
+sim's own outputs (``data/wf_provenance/*.jsonl``,
+``data/sim_runs_*.db``) as 735 false extras — the post-run check
+would have failed on every successful sim. Hence explicit roots.
 
-Root-level manifest entries (no parent directory) contribute NO
-covered group — they are digest-checked individually but do not sweep
-the target root into the membership check. Consequence of the rule: a
-manifest that lists ANY file under a two-level directory prefix claims
-that ENTIRE prefix — every file found under it at verify time must be
-listed, or it is reported as ``VOID extra file not in manifest``.
-Bundles must therefore be built over complete covered directories.
+A manifest entry OUTSIDE every covered root is fine: singleton files
+are digest-checked individually (check 2) without sweeping their
+parent directory. Consequence of the rule: every covered root must be
+completely listed in the manifest — any file found under one at verify
+time that is not listed is ``VOID extra file not in manifest``.
 
 The model#79 v1 checker's separate "derived config present" check is
 subsumed by the general checks: the derived config is a listed file,
-so a missing/mutated copy already fails check 2 and its group is
-membership-covered by check 3.
+so a missing/mutated copy already fails check 2.
 
 Deterministic (sorted output, sorted walks), stdlib-only, read-only,
 no network.
@@ -100,28 +106,26 @@ def load_manifest(bundle_dir: str | os.PathLike[str]) -> dict[str, str]:
     return listed
 
 
-def derive_covered_groups(relpaths) -> list[str]:
-    """Covered groups = manifest parent dirs truncated to top 2 levels.
-
-    See the module docstring for the full rule. Returns a sorted list;
-    nested duplicates are harmless (extras are deduplicated later).
-    """
-    groups: set[str] = set()
-    for rel in relpaths:
-        parts = rel.replace(os.sep, "/").split("/")
-        dir_parts = parts[:-1]
-        if not dir_parts:
-            continue  # root-level entry: no covered group
-        groups.add("/".join(dir_parts[:2]))
-    return sorted(groups)
+def _normalize_root(root: str) -> str:
+    root = root.replace(os.sep, "/").strip("/")
+    if root.startswith("./"):
+        root = root[2:]
+    return root
 
 
 def verify_input_bundle(
     bundle_dir: str | os.PathLike[str],
     target_root: str | os.PathLike[str],
     frozen_root_digest: str,
+    covered_roots: list[str],
 ) -> list[str]:
     """Verify ``target_root`` against the frozen bundle.
+
+    ``covered_roots`` are the target-relative directories the
+    membership sweep covers (recursive); manifest entries everywhere
+    are still digest-checked. Callers (CLI / sim_driver) require at
+    least one covered root — an empty list would silently disable the
+    bidirectional membership check.
 
     Returns the (deterministically ordered) list of ``VOID ...``
     mismatch lines; an empty list means the target matches the bundle
@@ -153,7 +157,7 @@ def verify_input_bundle(
             mismatches.append(f"VOID digest mismatch: {rel}")
 
     extras: set[str] = set()
-    for group in derive_covered_groups(listed):
+    for group in sorted({_normalize_root(r) for r in covered_roots}):
         root = os.path.join(target_root, group)
         for dirpath, dirs, files in os.walk(root):
             dirs.sort()
@@ -181,10 +185,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--frozen-root", required=True,
                     help="Frozen 64-hex sha256 of the bundle's "
                          "MANIFEST.sha256")
+    ap.add_argument("--covered-root", action="append", required=True,
+                    metavar="RELPATH",
+                    help="Target-relative directory swept recursively by "
+                         "the bidirectional membership check; repeatable, "
+                         "at least one required. Manifest entries outside "
+                         "every covered root are still digest-checked "
+                         "individually.")
     args = ap.parse_args(argv)
 
     mismatches = verify_input_bundle(
-        args.bundle_dir, args.target_root, args.frozen_root)
+        args.bundle_dir, args.target_root, args.frozen_root,
+        args.covered_root)
     for line in mismatches:
         print(line)
     if mismatches:

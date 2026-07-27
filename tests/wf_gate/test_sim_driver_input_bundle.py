@@ -8,8 +8,9 @@ wrapper convention:
 * postcondition: after the sim ran and outputs were written, a mutated
   covered input exits 6 (execution-time input mutation) — distinct
   from 4 so wrappers can tell "never ran" from "ran on mutated inputs";
-* ``--input-bundle`` / ``--input-bundle-root`` must be given together
-  (argparse error otherwise);
+* ``--input-bundle`` / ``--input-bundle-root`` / at least one
+  ``--input-bundle-covered-root`` must be given together (argparse
+  error otherwise);
 * both guard verdicts are echoed to stdout for the wrapper's tee.
 
 Reuses the fake ``sim.runner`` capture pattern from
@@ -70,6 +71,12 @@ def _repo_root_with_bundle(tmp_path: Path) -> tuple[Path, Path, str]:
     return repo_root, bundle, root
 
 
+def _bundle_argv(bundle: Path, root: str) -> list[str]:
+    return ["--input-bundle", str(bundle),
+            "--input-bundle-root", root,
+            "--input-bundle-covered-root", "data/ohlcv"]
+
+
 def _run_sim_driver(monkeypatch, repo_root: Path, argv: list[str]):
     from renquant_backtesting.wf_gate import sim_driver
 
@@ -95,8 +102,7 @@ def test_preflight_mismatch_exits_4_before_run_backtest(
     with pytest.raises(SystemExit) as exc:
         _run_sim_driver(
             monkeypatch, repo_root,
-            ["--input-bundle", str(bundle), "--input-bundle-root", root,
-             "--no-compare", "--no-persist"],
+            [*_bundle_argv(bundle, root), "--no-compare", "--no-persist"],
         )
 
     assert exc.value.code == 4
@@ -122,8 +128,7 @@ def test_post_run_mutation_exits_6_after_run_backtest(
     with pytest.raises(SystemExit) as exc:
         _run_sim_driver(
             monkeypatch, repo_root,
-            ["--input-bundle", str(bundle), "--input-bundle-root", root,
-             "--no-compare", "--no-persist"],
+            [*_bundle_argv(bundle, root), "--no-compare", "--no-persist"],
         )
 
     assert exc.value.code == 6
@@ -147,8 +152,7 @@ def test_clean_bundle_runs_and_echoes_both_verdicts(
 
     _run_sim_driver(
         monkeypatch, repo_root,
-        ["--input-bundle", str(bundle), "--input-bundle-root", root,
-         "--no-compare", "--no-persist"],
+        [*_bundle_argv(bundle, root), "--no-compare", "--no-persist"],
     )
 
     assert len(calls) == 1
@@ -157,13 +161,47 @@ def test_clean_bundle_runs_and_echoes_both_verdicts(
     assert f"INPUT BUNDLE POST-RUN OK: root={root}" in out
 
 
-@pytest.mark.parametrize("lone_flag_argv", [
+def test_sim_outputs_outside_covered_roots_do_not_void_post_run(
+    monkeypatch, tmp_path: Path, capsys,
+) -> None:
+    """The real-tree field-test scenario: a successful sim writes its own
+    outputs (provenance JSONL, per-seed DB) OUTSIDE the covered roots;
+    the post-run check must stay clean."""
+    repo_root, bundle, root = _repo_root_with_bundle(tmp_path)
+
+    def write_sim_outputs():
+        prov = repo_root / "data" / "wf_provenance"
+        prov.mkdir(parents=True)
+        (prov / "wfsim-run.jsonl").write_text("{}\n")
+        (repo_root / "data" / "sim_runs_101.db").write_bytes(b"sqlite")
+
+    calls: list[dict] = []
+    _install_fake_run_backtest(
+        monkeypatch, calls, SimpleNamespace(print_summary=lambda: None),
+        side_effect=write_sim_outputs,
+    )
+    _install_fake_fetch_ohlcv(monkeypatch)
+
+    _run_sim_driver(
+        monkeypatch, repo_root,
+        [*_bundle_argv(bundle, root), "--no-compare", "--no-persist"],
+    )
+
+    assert len(calls) == 1
+    assert f"INPUT BUNDLE POST-RUN OK: root={root}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("partial_argv", [
     ["--input-bundle", "somewhere"],
     ["--input-bundle-root", "0" * 64],
+    ["--input-bundle-covered-root", "data/ohlcv"],
+    ["--input-bundle", "somewhere", "--input-bundle-root", "0" * 64],
 ])
 def test_bundle_flags_must_be_given_together(
-    monkeypatch, tmp_path: Path, lone_flag_argv: list[str],
+    monkeypatch, tmp_path: Path, partial_argv: list[str],
 ) -> None:
+    """Any partial bundle-flag combination — including --input-bundle +
+    --input-bundle-root without a covered root — is an argparse error."""
     repo_root, _bundle, _root = _repo_root_with_bundle(tmp_path)
     calls: list[dict] = []
     _install_fake_run_backtest(
@@ -174,7 +212,7 @@ def test_bundle_flags_must_be_given_together(
     with pytest.raises(SystemExit) as exc:
         _run_sim_driver(
             monkeypatch, repo_root,
-            [*lone_flag_argv, "--no-compare", "--no-persist"],
+            [*partial_argv, "--no-compare", "--no-persist"],
         )
 
     assert exc.value.code == 2  # argparse error
