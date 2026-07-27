@@ -33,19 +33,21 @@ WHAT:      Raise the per-fold Modal timeout default from 3600s to 7200s in
            so this PR deliberately does NOT touch bundle_code. The
            uncommitted working tree was left untouched.
 WHY/DIR:   The 2026-07-27 staged-1 T4 probe (executor dispatch, 1 fold,
-           cutoff 2026-03-02) proved every fold dies at the old 3600s
+           cutoff 2026-03-02) shows the probed fold exceeded the old 3600s
            default: training alone took 2388.1s, the calibrator leg
            (`fit_calibrator`, mandatory for a usable corpus) had run
            ~1200s and was still running (right-censored) when Modal killed
-           the input at exactly 3600s. 3600 < 2388 + calibrator, so a full
-           43-fold dispatch at the default would burn the entire training
-           spend and return zero folds. 7200 gives the measured train time
-           ~2x headroom for the uncensored calibrator leg.
+           the input at exactly 3600s. This single fold is a hard lower
+           bound — the timeout is a kill switch, so one right-censored
+           observation suffices to show 3600s is below at least one
+           production-like T4 fold's true runtime (2388 + an uncensored
+           calibrator leg). At a full 43-fold dispatch, any fold at or
+           above this runtime would be killed. 7200 gives the measured
+           train time ~2x headroom for the uncensored calibrator leg.
 EVIDENCE:  artifact:      probe run log
-           `<scratchpad>/modal-probe/logs/pod-run2-full.log` + failed-fold
-           provenance
-           `<scratchpad>/modal-probe/repo-root/backtesting/renquant_104/
-           artifacts/walkforward_patchtst_manifest.json.provenance.json`
+           `/private/tmp/claude-502/-Users-renhao-git-github-renquant-orchestrator/428feb92-8ee7-4b4f-afed-1e4fa82ef367/scratchpad/modal-probe/logs/pod-run2-full.log`
+           + failed-fold provenance
+           `/private/tmp/claude-502/-Users-renhao-git-github-renquant-orchestrator/428feb92-8ee7-4b4f-afed-1e4fa82ef367/scratchpad/modal-probe/repo-root/backtesting/renquant_104/artifacts/walkforward_patchtst_manifest.json.provenance.json`
            (n_folds_requested=1, n_folds_succeeded=0).
            prod or exp:   experiment — staged-1 probe on the isolated
            Modal Volume; no production surface touched.

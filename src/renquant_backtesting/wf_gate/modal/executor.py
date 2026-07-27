@@ -1043,10 +1043,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "check, not calendar recency.")
     p.add_argument("--timeout-seconds", type=int, default=7200,
                    help="Per-fold Modal function timeout. The 2026-07-27 "
-                        "staged-1 T4 probe measured train=2388.1s and the "
-                        "calibrator leg still running when the old 3600s "
-                        "default killed the fold (FunctionTimeoutError) — "
-                        "every T4 fold dies at 3600s.")
+                        "staged-1 T4 probe (1 fold) measured train=2388.1s "
+                        "and the calibrator leg still running when the old "
+                        "3600s default killed the fold (FunctionTimeoutError) "
+                        "— 3600s is confirmed below at least one "
+                        "production-like T4 fold's true runtime.")
     p.add_argument("--retries", type=int, default=1)
     p.add_argument("--dry-run", action="store_true",
                    help="Plan only: print folds + recipe_id, make no cloud calls.")
