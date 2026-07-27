@@ -158,6 +158,18 @@ def test_gpu_timeout_retries_bake_into_decorator(monkeypatch):
     assert kw["volumes"]["/data"] is mod.data_volume
 
 
+def test_timeout_default_covers_measured_fold_runtime(monkeypatch):
+    # 2026-07-27 staged-1 T4 probe: train alone took 2388.1s and the calibrator
+    # leg was still running (right-censored) when the old 3600s default killed
+    # the fold with FunctionTimeoutError — every T4 fold dies at 3600s. The
+    # default must be 7200 in BOTH the driver CLI and the app-module fallback.
+    assert ex.parse_args([]).timeout_seconds == 7200
+    _install_fake_modal(monkeypatch)
+    mod = _reimport_app(monkeypatch)  # no env override → module defaults bake in
+    assert mod.DEFAULT_TIMEOUT_SECONDS == 7200
+    assert mod.WORKER_TIMEOUT_SECONDS == 7200
+
+
 def test_cpu_gpu_means_no_gpu_kwarg(monkeypatch):
     captured = _install_fake_modal(monkeypatch)
     _reimport_app(monkeypatch, gpu="cpu")
