@@ -48,6 +48,16 @@ def main() -> None:
     p.add_argument("--sim-db-path", default=None,
                    help="Override persistence.sim_db_path so parallel "
                         "multi-seed runs use isolated DBs.")
+    # 2026-07-27 (pipeline#215 §3, umbrella#531): the sim RNG seed. Passed
+    # straight to run_backtest, which pins NumPy/stdlib RNGs at sim entry
+    # AND records the seed in the WF sim-time provenance sink (one JSONL
+    # per sim run, sim_run_id minted inside run_backtest). Default None
+    # keeps the legacy non-deterministic behavior. The golden comparison
+    # leg gets the SAME seed so the A/B stays paired.
+    p.add_argument("--seed", type=int, default=None,
+                   help="RNG seed forwarded to run_backtest (pins RNGs and "
+                        "is recorded in the WF provenance sink; default: "
+                        "None = legacy non-deterministic).")
     p.add_argument("--no-persist", action="store_true",
                    help="Disable persistence entirely (fastest; no DB writes).")
     p.add_argument("--equity-json", default=None,
@@ -167,6 +177,7 @@ def main() -> None:
         spy_df        = spy_df,
         sector_etf_map = etf_map,
         snapshot      = False,
+        seed          = args.seed,
     )
     result.print_summary()
 
@@ -288,6 +299,9 @@ def main() -> None:
         golden_cfg["initial_cash"]   = args.initial_cash
         golden_cfg["backtest_start"] = args.start
         golden_cfg["backtest_end"]   = args.end
+        # Same seed as the candidate leg: identical RNG entry state keeps
+        # the comparison paired, and each leg still mints its own
+        # sim_run_id inside run_backtest for the provenance record.
         golden = run_backtest(
             config        = golden_cfg,
             strategy_dir  = strategy_dir,
@@ -295,6 +309,7 @@ def main() -> None:
             spy_df        = spy_df,
             sector_etf_map = etf_map,
             snapshot      = False,
+            seed          = args.seed,
         )
         r_apy = result.apy * 100
         g_apy = golden.apy  * 100

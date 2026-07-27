@@ -65,6 +65,12 @@ def main() -> None:
     config["initial_cash"] = args.initial_cash
     config["backtest_start"] = args.start
     config["backtest_end"]   = args.end
+    # Persistence stays OFF for this metrics dump. Per the WF sim-time
+    # provenance contract (pipeline#215 §2.1, umbrella#531) that is fine:
+    # when walkforward.enabled the sim adapter still emits the JSONL
+    # provenance records, with persisted:false on the score-committed leg.
+    # --seed below reaches run_backtest unmodified and is recorded in that
+    # sink (verified 2026-07-27: nothing on this path drops the kwarg).
     config["persistence"] = {"enabled": False}
 
     from renquant_pipeline.kernel.data import fetch_ohlcv          # noqa: PLC0415
