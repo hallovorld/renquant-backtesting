@@ -39,10 +39,18 @@ Usage::
 Bounded two-phase dispatch (model#82 P0 — a hard budget cap must be
 operationally enforceable, not a prose tripwire)::
 
-    # Phase 1 — pilot: dispatch EXACTLY three explicit folds into a named run
+    # Phase 1 — pilot: dispatch EXACTLY three explicit folds into a named run.
+    # --max-total-usd (+ --rate-usd-per-hour) is REQUIRED with
+    # --execute + --select-cutoffs. The gate bounds EVERY absent fold at the
+    # provider-enforced per-fold ceiling (--timeout-seconds) — a HARD upper
+    # bound, never a mean — and refuses (exit 4, before any Modal import)
+    # if that already breaches the cap. The first capped attempt also
+    # FREEZES the run's immutable budget_contract {cap, rate, pre-spend,
+    # overhead, timeout}; later capped executes must match it exactly.
     python -m renquant_backtesting.wf_gate.modal.executor \\
         --run-id wf-pt-pilot --select-cutoffs 2023-10-02,2024-12-02,2026-03-02 \\
-        --gpu T4 --execute
+        --gpu T4 --execute --max-total-usd 25 --rate-usd-per-hour 0.59 \\
+        --pre-spend-usd 1.45 --timeout-seconds 2900
 
     # Between phases — observed-cost projection (pure stdout, NO dispatch)
     python -m renquant_backtesting.wf_gate.modal.executor \\
@@ -52,9 +60,18 @@ operationally enforceable, not a prose tripwire)::
     # Phase 2 — resume INTO the same run: pilot folds that already exist and
     # pass integrity are SKIPPED (never retrained/overwritten); exactly the
     # remaining folds dispatch; ONE manifest is rebuilt over the union.
+    # Worked example (operator arithmetic, 2026-07-27 grant): cap $25
+    # (includes probe pre-spend $1.45), rate $0.59/h, overhead 0.15,
+    # --timeout-seconds 2900 (measured fold 2384s + ~21.6% headroom):
+    # projected_total = 1.45 + 3 measured pods (~$1.35) + 40x2900s hard
+    # bound (~$21.86) ≈ $24.66 ≤ $25 → GO. A fold that hits 2900s is
+    # provider-killed → failed_folds non-empty → the existing halt rule
+    # fires. Calculation + verdict persist to the audit record
+    # automatically (--dispatch-note stays optional context).
     python -m renquant_backtesting.wf_gate.modal.executor \\
-        --run-id wf-pt-pilot --gpu T4 --execute \\
-        --dispatch-note "projection $15.6 < remaining cap $18.55 -> GO"
+        --run-id wf-pt-pilot --select-cutoffs <all 43 dates> --gpu T4 \\
+        --execute --max-total-usd 25 --rate-usd-per-hour 0.59 \\
+        --pre-spend-usd 1.45 --timeout-seconds 2900
 """
 from __future__ import annotations
 
@@ -951,6 +968,194 @@ def project_cost_from_provenance(provenance: dict[str, Any], n_folds: int,
     }
 
 
+# ── Execute-time hard cost cap (model#82 P0 round 2) ─────────────────────────
+def compute_cost_gate(*, pod_facts: dict[str, Any], n_to_dispatch: int,
+                      rate_usd_per_hour: float, timeout_seconds: int,
+                      max_total_usd: float, pre_spend_usd: float = 0.0,
+                      overhead_frac: float = 0.15) -> dict[str, Any]:
+    """Pre-dispatch GO/REFUSED verdict against a hard all-in dollar cap.
+
+    HARD UPPER BOUND, not an expectation (#82 round-2 P0-1): every absent
+    fold is bounded at the provider-enforced per-fold ceiling — this
+    invocation's ``timeout_seconds`` (Modal kills any fold at the timeout, so
+    no fold can bill more). The mean of completed pods is NEVER used for the
+    bound; it is reported as an INFO-ONLY estimate in the returned record.
+
+    Formula (all GPU-time dollars carry ``(1 + overhead_frac)`` for the
+    observed non-GPU accrual — image build/pull, queue, Volume
+    storage/egress):
+
+        usd_per_sec     = rate_usd_per_hour / 3600 × (1 + overhead_frac)
+        measured_usd    = Σ completed pods' elapsed_seconds × usd_per_sec
+        remaining_usd   = n_to_dispatch × timeout_seconds × usd_per_sec
+        projected_total = pre_spend_usd + measured_usd + remaining_usd
+        verdict         = GO iff projected_total ≤ max_total_usd else REFUSED
+
+    Worked example (operator arithmetic, 2026-07-27 grant): cap $25
+    (includes probe pre-spend $1.45), rate $0.59/h, overhead 0.15, phase-2
+    ``--timeout-seconds 2900`` (measured fold 2384s + ~21.6% headroom),
+    3 pilot pods measured ~2384s each, 40 absent folds:
+    projected_total = 1.45 + 3×2384×0.59×1.15/3600 (≈$1.35)
+    + 40×2900×0.59×1.15/3600 (≈$21.86) ≈ $24.66 ≤ $25 → GO. A fold that
+    actually hits 2900s is provider-killed → lands in ``failed_folds`` →
+    the run's existing halt-on-failed-fold rule fires.
+
+    Pure math on the run's recorded ``pod_facts`` — no cloud calls. The full
+    calculation is returned (and persisted by the caller into the dispatch
+    audit record) so the verdict is auditable without re-deriving anything.
+    """
+    if int(n_to_dispatch) <= 0:
+        raise ValueError(f"n_to_dispatch must be > 0 (got {n_to_dispatch})")
+    if float(rate_usd_per_hour) <= 0:
+        raise ValueError(
+            f"rate_usd_per_hour must be > 0 (got {rate_usd_per_hour})")
+    if int(timeout_seconds) <= 0:
+        raise ValueError(f"timeout_seconds must be > 0 (got {timeout_seconds})")
+    if float(max_total_usd) <= 0:
+        raise ValueError(f"max_total_usd must be > 0 (got {max_total_usd})")
+    if float(pre_spend_usd) < 0:
+        raise ValueError(f"pre_spend_usd must be >= 0 (got {pre_spend_usd})")
+    if float(overhead_frac) < 0:
+        raise ValueError(f"overhead_frac must be >= 0 (got {overhead_frac})")
+    completed = [float(f["elapsed_seconds"])
+                 for f in (pod_facts or {}).values()
+                 if isinstance(f, dict)
+                 and isinstance(f.get("elapsed_seconds"), (int, float))
+                 and not isinstance(f.get("elapsed_seconds"), bool)]
+    usd_per_sec = float(rate_usd_per_hour) / 3600.0 * (1.0 + float(overhead_frac))
+    measured_usd = sum(completed) * usd_per_sec
+    # HARD bound: the provider-enforced per-fold ceiling, for EVERY absent fold.
+    per_fold_bound_seconds = float(timeout_seconds)
+    remaining_usd = per_fold_bound_seconds * int(n_to_dispatch) * usd_per_sec
+    projected_total = float(pre_spend_usd) + measured_usd + remaining_usd
+    verdict = "GO" if projected_total <= float(max_total_usd) else "REFUSED"
+    # INFO ONLY — never part of the bound: mean-based expectation.
+    mean_elapsed = (sum(completed) / len(completed)) if completed else None
+    info_mean_remaining = (mean_elapsed * int(n_to_dispatch) * usd_per_sec
+                           if mean_elapsed is not None else None)
+    summary = (
+        f"COST GATE {verdict}: projected_total ${projected_total:.2f} = "
+        f"pre_spend ${float(pre_spend_usd):.2f} + measured ${measured_usd:.2f} "
+        f"({len(completed)} completed pods, {sum(completed):.0f}s) + remaining "
+        f"${remaining_usd:.2f} ({int(n_to_dispatch)} folds x "
+        f"{per_fold_bound_seconds:.0f}s [hard per-fold timeout bound]) at "
+        f"${float(rate_usd_per_hour):.4f}/h x (1+{float(overhead_frac):.2f} "
+        f"overhead) vs --max-total-usd ${float(max_total_usd):.2f}"
+    )
+    if info_mean_remaining is not None:
+        summary += (f" | info-only mean estimate: {mean_elapsed:.0f}s/fold -> "
+                    f"remaining ~${info_mean_remaining:.2f} (NOT used for the "
+                    "bound)")
+    return {
+        "rate_usd_per_hour": float(rate_usd_per_hour),
+        "pre_spend_usd": float(pre_spend_usd),
+        "overhead_frac": float(overhead_frac),
+        "max_total_usd": float(max_total_usd),
+        "timeout_seconds": int(timeout_seconds),
+        "n_to_dispatch": int(n_to_dispatch),
+        "n_completed_pods": len(completed),
+        "sum_completed_elapsed_seconds": sum(completed),
+        "per_fold_bound_seconds": per_fold_bound_seconds,
+        "basis": "hard_timeout_bound",
+        "measured_cost_usd": measured_usd,
+        "projected_remaining_usd": remaining_usd,
+        "projected_total_usd": projected_total,
+        "info_mean_completed_elapsed_seconds": mean_elapsed,
+        "info_mean_remaining_usd_estimate": info_mean_remaining,
+        "verdict": verdict,
+        "summary": summary,
+    }
+
+
+#: The five frozen inputs of a capped run — persisted on the FIRST capped
+#: dispatch/refusal and immutable for the run's lifetime (#82 round-2 P0-2).
+BUDGET_CONTRACT_FIELDS = ("max_total_usd", "rate_usd_per_hour",
+                          "pre_spend_usd", "overhead_frac", "timeout_seconds")
+
+
+def budget_contract_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "max_total_usd": float(args.max_total_usd),
+        "rate_usd_per_hour": float(args.rate_usd_per_hour),
+        "pre_spend_usd": float(args.pre_spend_usd),
+        "overhead_frac": float(args.overhead_frac),
+        "timeout_seconds": int(args.timeout_seconds),
+    }
+
+
+def budget_contract_mismatches(prior_contract: dict[str, Any],
+                               contract: dict[str, Any]) -> dict[str, Any]:
+    """``{field: {"contract": prior, "invocation": new}}`` for every diff."""
+    return {k: {"contract": prior_contract.get(k), "invocation": contract[k]}
+            for k in BUDGET_CONTRACT_FIELDS
+            if prior_contract.get(k) != contract[k]}
+
+
+def persist_budget_contract(manifest_output: Path, plan: WfRescorePlan,
+                            prior_prov: dict[str, Any] | None,
+                            contract: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the run's budget contract into its provenance sidecar.
+
+    Called on the FIRST capped attempt (dispatch or refusal). Creates a
+    minimal identity-stamped sidecar when none exists yet (phase-1), exactly
+    like a refusal record does. Returns the updated provenance dict so the
+    caller keeps a consistent in-memory view.
+    """
+    prov = dict(prior_prov) if isinstance(prior_prov, dict) else {
+        "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
+        "run_id": plan.run_id,
+        "recipe_id": plan.recipe_id,
+        "recipe": plan.recipe,
+        "built_by": "renquant_backtesting.wf_gate.modal.executor",
+        "dispatches": [],
+        "pod_facts": {},
+    }
+    prov["budget_contract"] = {k: contract[k] for k in BUDGET_CONTRACT_FIELDS}
+    prov_path = Path(str(manifest_output) + ".provenance.json")
+    prov_path.parent.mkdir(parents=True, exist_ok=True)
+    prov_path.write_text(json.dumps(prov, indent=2, sort_keys=True))
+    return prov
+
+
+def persist_refused_cost_gate(manifest_output: Path, plan: WfRescorePlan,
+                              prior_prov: dict[str, Any] | None,
+                              dispatch_meta: dict[str, Any]) -> Path:
+    """Append a REFUSED cost-gate attempt to the run's dispatch audit history.
+
+    A refused dispatch never reaches ``collect_and_write``, but the attempt —
+    inputs, computed total, cap, verdict — must still be auditable in the
+    run's ONE provenance sidecar. When no sidecar exists yet (a phase-1
+    refusal), a minimal one is created carrying the run/recipe identity so the
+    later successful dispatch's rebuild inherits the refusal record (and the
+    one-run-one-recipe belts see the claimed recipe_id).
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    record = dict(dispatch_meta)
+    record.setdefault(
+        "dispatched_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    record.setdefault("gpu", plan.gpu)
+    # Nothing was dispatched: record the refused selection honestly.
+    record["refused_cutoffs"] = list(record.get("dispatched_cutoffs") or [])
+    record["dispatched_cutoffs"] = []
+    record["pod_facts"] = {}
+    record["failed_folds"] = []
+    prov = dict(prior_prov) if isinstance(prior_prov, dict) else {
+        "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
+        "run_id": plan.run_id,
+        "recipe_id": plan.recipe_id,
+        "recipe": plan.recipe,
+        "built_by": "renquant_backtesting.wf_gate.modal.executor",
+        "dispatches": [],
+        "pod_facts": {},
+    }
+    prov.setdefault("dispatches", []).append(record)
+    prov_path = Path(str(manifest_output) + ".provenance.json")
+    prov_path.parent.mkdir(parents=True, exist_ok=True)
+    prov_path.write_text(json.dumps(prov, indent=2, sort_keys=True))
+    return prov_path
+
+
 def assemble_manifest(entries: list[dict[str, Any]], cadence_days: int,
                       manifest_output: Path) -> Path:
     """Write the standard WF manifest via the reviewed writer (validates leakage)."""
@@ -1247,6 +1452,9 @@ def collect_and_write(plan: WfRescorePlan, results: list[dict[str, Any]], *,
         manifest_path=manifest_path, fold_validation=fold_validation,
         requested_cutoffs=requested_union, dispatches=dispatches,
         prior_pod_facts=prior.get("pod_facts") or {})
+    # The IMMUTABLE budget contract (#82 round-2 P0-2) survives every rebuild.
+    if prior.get("budget_contract"):
+        provenance["budget_contract"] = prior["budget_contract"]
     prov_path = Path(str(manifest_output) + ".provenance.json")
     prov_path.parent.mkdir(parents=True, exist_ok=True)
     prov_path.write_text(json.dumps(provenance, indent=2, sort_keys=True))
@@ -1384,9 +1592,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="N additional folds to project the cost of "
                         "(required with --print-cost-projection).")
     p.add_argument("--rate-usd-per-hour", type=float, default=None,
-                   help="GPU $/hour used for the projection — explicit on "
-                        "purpose, no baked-in price (required with "
-                        "--print-cost-projection).")
+                   help="GPU $/hour — explicit on purpose, no baked-in price. "
+                        "Required with --print-cost-projection AND with "
+                        "--max-total-usd (the execute-time cost gate).")
+    # ── Execute-time hard cost cap (model#82 P0 round 2) ─────────────────────
+    p.add_argument("--max-total-usd", type=float, default=None,
+                   help="HARD all-in dollar cap enforced at execute time, "
+                        "BEFORE any Modal import/dispatch. Required whenever "
+                        "--execute is combined with --select-cutoffs (both "
+                        "prereg phases). projected_total = --pre-spend-usd + "
+                        "measured completed-pod cost + n_absent x "
+                        "timeout_seconds (the provider-enforced per-fold "
+                        "ceiling — a HARD upper bound; the completed-pod mean "
+                        "is info-only, never the bound), all GPU-time at "
+                        "--rate-usd-per-hour x (1 + --overhead-frac). "
+                        "projection > cap => exit 4, nothing dispatched, "
+                        "verdict persisted to the audit record. The first "
+                        "capped attempt freezes the run's immutable "
+                        "budget_contract; later capped executes must match "
+                        "it exactly (else exit 4).")
+    p.add_argument("--pre-spend-usd", type=float, default=0.0,
+                   help="Dollars already spent against the cap outside this "
+                        "run's pod_facts (e.g. earlier probes billed to the "
+                        "same grant). Added to the projected total. Default 0.")
+    p.add_argument("--overhead-frac", type=float, default=0.15,
+                   help="Fractional overhead multiplier applied to every "
+                        "GPU-time dollar (default 0.15 = +15%%): covers the "
+                        "non-GPU accrual observed on real dispatches — image "
+                        "build/pull, queue time, Volume storage/egress — so "
+                        "the cap is compared against an ALL-IN projection, "
+                        "not bare GPU seconds.")
     p.add_argument("--code-root", default=None,
                    help="SINGLE pinned-assembly root holding <repo>/src for every "
                         "bundled repo (default: the assembly THIS executor runs "
@@ -1423,7 +1658,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Plan only: print folds + recipe_id, make no cloud calls.")
     p.add_argument("--execute", action="store_true",
                    help="Actually dispatch to Modal (default is plan-only).")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # Execute-time cost-cap requiredness (model#82 P0 round 2): a bounded
+    # (--select-cutoffs) execute — either prereg phase — MUST carry the hard
+    # cap, its rate, and an explicit run namespace, so both phases target ONE
+    # namespace and no capped dispatch can be launched uncapped by accident.
+    if args.execute and args.select_cutoffs:
+        if args.max_total_usd is None:
+            p.error("--max-total-usd is required when --execute is combined "
+                    "with --select-cutoffs (the model#82 hard cap must be "
+                    "enforced at execute time, both phases)")
+        if not args.run_id:
+            p.error("--run-id is required when --execute is combined with "
+                    "--select-cutoffs (both prereg phases must target one "
+                    "explicit run namespace)")
+    if args.max_total_usd is not None and args.rate_usd_per_hour is None:
+        p.error("--rate-usd-per-hour is required with --max-total-usd "
+                "(no baked-in GPU price)")
+    return args
 
 
 def resolve_repo_root(value: str | None) -> Path:
@@ -1558,6 +1810,58 @@ def main(argv: list[str] | None = None) -> int:
         "retries": int(args.retries),
         "note": args.dispatch_note,
     }
+
+    # ── Execute-time hard cost cap (model#82 P0 round 2) ────────────────────
+    # Runs BEFORE any Modal import/dispatch (and before the readiness/panel
+    # checks) whenever a cap is given and there are folds to dispatch. The
+    # full calculation + verdict is persisted into the dispatch audit record
+    # either way: GO rides the dispatch record via dispatch_meta; REFUSED is
+    # appended to the sidecar directly (creating a minimal one on a phase-1
+    # refusal) so refused attempts stay auditable. A no-op rebuild (nothing
+    # to dispatch) spends nothing and is not gated.
+    if to_dispatch and args.max_total_usd is not None:
+        # IMMUTABLE budget contract (#82 round-2 P0-2): the FIRST capped
+        # attempt freezes {cap, rate, pre-spend, overhead, timeout} into the
+        # run provenance; every later capped --execute on this run-id must
+        # match ALL fields exactly — compared here, BEFORE any modal import.
+        # Changing the budget mid-run = a new --run-id, on purpose.
+        contract = budget_contract_from_args(args)
+        prior_contract = (prior_prov or {}).get("budget_contract")
+        if prior_contract is not None:
+            diffs = budget_contract_mismatches(prior_contract, contract)
+            if diffs:
+                fields = ", ".join(
+                    f"{k} (contract={v['contract']!r}, "
+                    f"invocation={v['invocation']!r})"
+                    for k, v in sorted(diffs.items()))
+                print(f"\nBUDGET CONTRACT MISMATCH: run {plan.run_id!r} froze "
+                      f"its budget contract on the first capped attempt; this "
+                      f"invocation differs on: {fields}. The contract is "
+                      "immutable for the run's lifetime — re-freezing the "
+                      "budget requires a NEW --run-id.")
+                return 4
+        else:
+            prior_prov = persist_budget_contract(
+                _manifest_output_path(plan, strategy_artifacts), plan,
+                prior_prov, contract)
+            log.info("budget_contract frozen for run %s: %s",
+                     plan.run_id, contract)
+        gate = compute_cost_gate(
+            pod_facts=(prior_prov or {}).get("pod_facts") or {},
+            n_to_dispatch=len(to_dispatch),
+            rate_usd_per_hour=float(args.rate_usd_per_hour),
+            timeout_seconds=int(args.timeout_seconds),
+            max_total_usd=float(args.max_total_usd),
+            pre_spend_usd=float(args.pre_spend_usd),
+            overhead_frac=float(args.overhead_frac))
+        dispatch_meta["cost_gate"] = gate
+        print("\n" + gate["summary"])
+        if gate["verdict"] == "REFUSED":
+            prov_path = persist_refused_cost_gate(
+                _manifest_output_path(plan, strategy_artifacts), plan,
+                prior_prov, dispatch_meta)
+            print(f"  nothing dispatched; verdict persisted to {prov_path}")
+            return 4
 
     if not to_dispatch:
         print("\nRESUME: every selected fold already exists and passes "
