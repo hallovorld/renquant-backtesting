@@ -2008,6 +2008,30 @@ def _validate_static_wf_oos_contract(
     }
 
 
+def training_contract_dataset(artifact: dict) -> str | None:
+    """The dataset the artifact says it was trained on, wherever it is stamped.
+
+    2026-07-30 (issue #84). This used to read ``artifact["training_contract"]``
+    only. renquant-orchestrator#620 stamps the contract under ``metadata`` --- and
+    not by choice: a ROOT-level ``training_contract`` is UNCLASSIFIED in
+    ``renquant_common.model_fingerprint``, so ``model_content_sha256`` raises
+    (renquant-common#38). The root-only read therefore missed, and static sanity
+    silently fell back to the 292-ticker rawlabel corpus instead of the
+    candidate's own panel --- proven by ``sanity_eval_end`` 2026-04-28 (the
+    fallback's max date) against a training-panel max of 2026-05-01. That silent
+    fallback is why static scope could not see a universe extension even when it
+    ran.
+
+    Root wins when both are present, so an explicit top-level stamp is never
+    overridden by a nested one. Returns None when nothing is recorded, which the
+    caller treats as "no dataset declared" --- NOT as "use the fallback silently";
+    the fallback now refuses a corpus carrying an INVALID receipt.
+    """
+    root = artifact.get("training_contract") or {}
+    meta = (artifact.get("metadata") or {}).get("training_contract") or {}
+    return root.get("dataset") or meta.get("dataset") or artifact.get("dataset")
+
+
 def _load_sanity_panel(
     feat_cols: list[str],
     label: str,
@@ -2044,6 +2068,22 @@ def _load_sanity_panel(
     raw_path = REPO / "data/alpha158_291_fundamental_dataset_rawlabel.parquet"
     if not raw_path.exists():
         raise FileNotFoundError("panel missing — sanity unavailable")
+    # 2026-07-30 (issue #84): this fallback corpus carries an INVALID receipt
+    # written by the programme's own retrain_alpha158_fund.py (2026-07-29:
+    # "coverage != source panel, panel-only=432"). The sigma-head path already
+    # treats such a receipt as fail-closed; this path never consulted it, so a
+    # run could silently evaluate on a corpus another component considers
+    # invalid. Refusing is the safe direction: an unevaluated candidate is
+    # recoverable, a verdict computed on a disowned corpus is not.
+    for _receipt in (raw_path.with_suffix(raw_path.suffix + ".INVALID.json"),
+                     raw_path.with_suffix(".INVALID.json")):
+        if _receipt.exists():
+            raise FileNotFoundError(
+                f"sanity fallback corpus {raw_path.name} carries an INVALID "
+                f"receipt ({_receipt.name}) — refusing to evaluate on a corpus "
+                f"this programme has disowned. Supply the artifact's own "
+                f"training_contract.dataset instead."
+            )
     raw = pd.read_parquet(raw_path)
     raw["date"] = pd.to_datetime(raw["date"])
     if label not in raw.columns:
@@ -2482,7 +2522,16 @@ def run_sanity_battery(
     # 2026-06-09 false-negative: PatchTST trained on transformer_v4_wl200 scored
     # -0.017 on the hardcoded alpha158_291 panel vs its true +0.11). See
     # renquant-model doc #36.
-    _ds_raw = ((artifact.get("training_contract") or {}).get("dataset")) or artifact.get("dataset")
+    # 2026-07-30 (issue #84): read the contract at BOTH the root and under
+    # `metadata`. renquant-orchestrator#620 stamps it under `metadata` --- not by
+    # choice: a ROOT-level `training_contract` is UNCLASSIFIED in
+    # `renquant_common.model_fingerprint`, so `model_content_sha256` raises
+    # (renquant-common#38). Reading only the root meant the lookup missed and
+    # static sanity silently fell back to the 292-ticker rawlabel corpus instead
+    # of the candidate's own panel --- proven by sanity_eval_end 2026-04-28 (the
+    # fallback's max date) against a training-panel max of 2026-05-01. That is
+    # why static scope could not see a universe extension even when it ran.
+    _ds_raw = training_contract_dataset(artifact)
     _dataset_path = None
     if _ds_raw:
         _dp = Path(_ds_raw)
@@ -2604,7 +2653,14 @@ def run_sanity_battery(
                 source_space="panel",
             )
             mu = scorer.score(X).values
+            # 2026-07-30 (issue #84): the manifest branch does
+            # `sanity_meta.update(panel_meta)`; this one did not, so a static run
+            # never recorded WHICH panel it scored. Given defect 1 above, that is
+            # exactly the field that would have made the wrong-panel fallback
+            # visible in the record instead of requiring a date comparison to
+            # infer it. Merged first so explicit keys below still win.
             sanity_meta = {
+                **(panel_meta or {}),
                 "sanity_eval_scope": "static_artifact",
                 "sanity_eval_start": pd.Timestamp(eval_start).date().isoformat(),
                 "sanity_eval_end": pd.Timestamp(val["date"].max()).date().isoformat(),
