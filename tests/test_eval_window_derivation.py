@@ -175,3 +175,67 @@ def test_duplicate_dates_are_collapsed_before_the_fraction_is_taken():
     assert meta["eval_window_panel_dates"] == 10
     want, _ = _legacy(dates)
     assert got == want
+
+
+# --- codex BLOCKER on #87: an undeclared label horizon must NOT default to 0 ----
+# `int(artifact.get("lookahead_days") or 0)` makes the OOS boundary look safe for an
+# artifact whose horizon is unknown --- it manufactures a leakage-free appearance out
+# of missing information. Fourth instance of this shape tonight: a guard that passes
+# because its input is absent.
+
+@pytest.mark.parametrize("bad", [
+    None,                      # explicit null
+    "60",                      # string, the JSON-round-trip case
+    "",                        # empty string
+    -1,                        # negative
+    -60,
+    60.5,                      # non-integer float
+    True,                      # bool is an int subclass but is not a horizon
+    [],                        # wrong type entirely
+])
+def test_an_undeclared_or_malformed_horizon_yields_no_cutoff_window(bad):
+    art = {"effective_train_cutoff_date": "2025-06-02", "lookahead_days": bad}
+    got, meta = derive_static_eval_start(PANEL, artifact=art,
+                                         mode=EVAL_WINDOW_MODE_CUTOFF)
+    assert got is None, f"lookahead_days={bad!r} must not produce a window"
+    assert meta["eval_start_artifact_cutoff"] is None
+    assert "not an explicit non-negative integer horizon" in \
+        meta["eval_window_cutoff_reason"]
+
+
+def test_a_missing_lookahead_key_yields_no_cutoff_window():
+    art = {"effective_train_cutoff_date": "2025-06-02"}
+    got, meta = derive_static_eval_start(PANEL, artifact=art,
+                                         mode=EVAL_WINDOW_MODE_CUTOFF)
+    assert got is None
+    assert "not an explicit non-negative integer horizon" in \
+        meta["eval_window_cutoff_reason"]
+
+
+def test_an_EXPLICIT_zero_horizon_is_valid():
+    """A declared 0 is information; absence is not. Refusing an explicit 0 would be
+    the opposite error."""
+    art = {"effective_train_cutoff_date": "2025-06-02", "lookahead_days": 0}
+    got, meta = derive_static_eval_start(PANEL, artifact=art,
+                                         mode=EVAL_WINDOW_MODE_CUTOFF)
+    assert got is not None
+    assert meta["eval_window_lookahead_days"] == 0
+    assert meta["eval_window_safe_last_label"] == "2025-06-02"
+
+
+def test_an_integer_float_horizon_is_accepted():
+    """60.0 from a JSON round-trip is a declared integer horizon, not malformed."""
+    art = {"effective_train_cutoff_date": "2025-06-02", "lookahead_days": 60.0}
+    got, meta = derive_static_eval_start(PANEL, artifact=art,
+                                         mode=EVAL_WINDOW_MODE_CUTOFF)
+    assert got is not None and meta["eval_window_lookahead_days"] == 60
+
+
+def test_the_default_mode_is_unaffected_by_a_malformed_horizon():
+    """The refusal is scoped to cutoff mode. The historical path never read the
+    horizon to build its window, so it must keep working."""
+    art = {"effective_train_cutoff_date": "2025-06-02", "lookahead_days": None}
+    got, meta = derive_static_eval_start(PANEL, artifact=art)
+    legacy, _ = _legacy(PANEL)
+    assert got == legacy
+    assert meta["eval_start_chosen"] == legacy.date().isoformat()

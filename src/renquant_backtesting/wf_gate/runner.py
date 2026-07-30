@@ -2021,7 +2021,31 @@ def derive_static_eval_start(
                 "it; trained_date is wall-clock metadata and proves nothing about "
                 "label separation")
         else:
-            lookahead = int(artifact.get("lookahead_days") or 0)
+            # The horizon must be DECLARED, not defaulted. `int(x or 0)` turns a
+            # missing, null or unparseable lookahead into 0, which makes the OOS
+            # boundary look safe for an artifact whose label horizon is unknown ---
+            # i.e. it manufactures a leakage-free appearance out of missing
+            # information. An explicitly declared 0 is fine; absence is not.
+            raw_lookahead = artifact.get("lookahead_days")
+            lookahead = None
+            if isinstance(raw_lookahead, bool):
+                pass  # bool is an int subclass; a flag is not a horizon
+            elif isinstance(raw_lookahead, int):
+                lookahead = raw_lookahead
+            elif isinstance(raw_lookahead, float) and raw_lookahead.is_integer():
+                lookahead = int(raw_lookahead)
+            if lookahead is None or lookahead < 0:
+                meta["eval_window_cutoff_reason"] = (
+                    f"artifact declares lookahead_days={raw_lookahead!r}, which is "
+                    f"not an explicit non-negative integer horizon — refusing to "
+                    f"derive an OOS window, because defaulting an unknown label "
+                    f"horizon to 0 would make the boundary look safe when it is not")
+                meta["eval_start_artifact_cutoff"] = None
+                meta["eval_dates_artifact_cutoff"] = None
+                chosen = fixed_start if mode == EVAL_WINDOW_MODE_FIXED else None
+                meta["eval_start_chosen"] = (
+                    chosen.date().isoformat() if chosen is not None else None)
+                return chosen, meta
             safe_last_label = cutoff + pd.offsets.BDay(max(0, lookahead))
             after = [d for d in distinct if d > safe_last_label]
             cutoff_start = after[0] if after else None

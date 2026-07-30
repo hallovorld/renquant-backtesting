@@ -17,6 +17,23 @@ EVIDENCE:  §1 — the measured A/B, the default-equivalence proof, and a limita
 NEXT:      §3. This change alone does NOT unblock today's production artifacts, and
            the reason is a producer-side gap, not this one.
 
+CORRECTIONS: the first revision carried `int(artifact.get("lookahead_days") or 0)`
+into `artifact_cutoff` mode, so a missing, null or unparseable label horizon became
+**0** and the OOS boundary looked safe for an artifact whose horizon is unknown — it
+manufactured a leakage-free appearance out of missing information. Codex BLOCKER, and
+correctly. Cutoff mode now requires an **explicitly declared non-negative integer**
+horizon and returns no window with a fail-closed reason otherwise; an explicit `0` stays
+valid, because a declared zero is information and absence is not. Regressions cover a
+missing key, `None`, `"60"`, `""`, `-1`, `-60`, `60.5`, `True` (a bool is an int
+subclass but is not a horizon) and `[]`, plus `60.0` accepted as a JSON round-trip and a
+test that the default mode is unaffected. No measured figure changed.
+
+Note the expression was **copied from the pre-existing
+`_validate_static_sanity_oos_contract`**, which still contains it. That is a separate
+site with the same defect and is deliberately not changed here — altering the contract's
+own boundary is a behaviour change on the default path and needs its own A/B. Filed as
+a follow-up rather than smuggled in.
+
 ## §1 EVIDENCE
 
 Panel `2014-01-02 … 2026-05-01`, 3217 distinct business days, `lookahead_days = 60`
