@@ -1923,11 +1923,23 @@ def _effective_artifact_cutoff(artifact: dict) -> pd.Timestamp | None:
         "cutoff_date",
     ):
         value = artifact.get(key)
-        if value:
-            try:
-                return pd.Timestamp(value)
-            except Exception:  # noqa: BLE001
-                return None
+        if value is None or value == "":
+            continue
+        # 2026-07-30: reject NUMERIC stamps. pd.Timestamp(-1) is
+        # 1969-12-31T23:59:59.999999999 and pd.Timestamp(0) is 1970-01-01 --- pandas
+        # reads a bare int as a nanosecond epoch offset. A malformed integer stamp
+        # therefore resolved to a valid-looking cutoff near the epoch, which makes
+        # safe_last_label ~1970 and lets EVERY eval_start after 1970 satisfy the OOS
+        # contract. That is a fail-OPEN in the one guard that proves label separation:
+        # a garbage stamp bought admission rather than a refusal. A cutoff must be a
+        # date, expressed as a date.
+        if isinstance(value, (bool, int, float)):
+            return None
+        try:
+            stamped = pd.Timestamp(value)
+        except Exception:  # noqa: BLE001
+            return None
+        return None if pd.isna(stamped) else stamped
     return None
 
 
