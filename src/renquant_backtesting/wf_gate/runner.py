@@ -1931,6 +1931,134 @@ def _effective_artifact_cutoff(artifact: dict) -> pd.Timestamp | None:
     return None
 
 
+#: How the static sanity branch chooses where the evaluation window starts.
+#: ``fixed_fraction`` is the historical behaviour and remains the DEFAULT: the cut
+#: sits at the 80th percentile of the panel's distinct dates, chosen without any
+#: reference to the artifact being scored. ``artifact_cutoff`` derives the start from
+#: the artifact's own declared cutoff instead.
+EVAL_WINDOW_MODE_FIXED = "fixed_fraction"
+EVAL_WINDOW_MODE_CUTOFF = "artifact_cutoff"
+EVAL_WINDOW_MODE_ENV = "RQ_WF_EVAL_WINDOW_MODE"
+EVAL_WINDOW_FIXED_FRACTION = 0.8
+
+
+def eval_window_mode() -> str:
+    """The active mode. Defaults to the historical one; changing it is opt-in.
+
+    Deliberately NOT switched by default. The window decides which dates are scored,
+    so it decides the IC numbers, so it decides which fold walk-forward selection
+    picks. Flipping it without an A/B would silently move the gate.
+    """
+    mode = os.environ.get(EVAL_WINDOW_MODE_ENV, EVAL_WINDOW_MODE_FIXED)
+    return mode if mode in (EVAL_WINDOW_MODE_FIXED, EVAL_WINDOW_MODE_CUTOFF) else \
+        EVAL_WINDOW_MODE_FIXED
+
+
+def derive_static_eval_start(
+    panel_dates,
+    artifact: dict | None = None,
+    mode: str | None = None,
+) -> tuple[object, dict]:
+    """Where should the static evaluation window start? Returns (start, meta).
+
+    **Why this exists** (renquant-backtesting#84, remaining half). The historical rule
+    cuts at a fixed 80% of the panel's dates *with no reference to the artifact*.
+    ``_validate_static_sanity_oos_contract`` then requires
+    ``cutoff + lookahead_days < eval_start``. For a production full-panel artifact the
+    cutoff sits near the panel's end, so ``safe_last_label`` lands far past a start
+    fixed at 80%, and the contract refuses — measured: the latest admissible cutoff
+    was 2024-01-10 against a panel reaching 2026-05-01, i.e. **603 business days ≈
+    2.31 years** of otherwise-usable training data thrown away, and the gap widens
+    every day the panel grows. The refusal is not a bug in the contract; the contract
+    is right that labels must not overlap the evaluation window. The defect is that
+    the window is chosen without looking at the artifact it is supposed to be
+    out-of-sample *for*.
+
+    ``artifact_cutoff`` mode derives the start from the artifact: the first panel date
+    strictly after ``cutoff + lookahead_days`` business days. That makes the contract
+    satisfiable by construction whenever any panel tail remains, and it uses **all**
+    admissible dates rather than a fixed 20%.
+
+    **The comparability hazard, named up front.** Two artifacts with different cutoffs
+    get different windows under this mode, and comparing arms on different date
+    samples is precisely the era confound that voided a study on this programme. So a
+    candidate-vs-control comparison must use a window COMMON to both arms — see
+    :func:`common_eval_start`. This function answers the per-artifact question only.
+
+    Both candidate values are returned in ``meta`` regardless of the active mode, so
+    every run measures the A/B for free without changing behaviour.
+    """
+    mode = mode or eval_window_mode()
+    # normalised to Timestamp: pd.unique returns numpy.datetime64, which has no
+    # .date(), and mixing the two silently changes comparison semantics.
+    distinct = sorted(
+        pd.Timestamp(d)
+        for d in pd.unique(pd.to_datetime(pd.Series(list(panel_dates))))
+    )
+    meta: dict = {
+        "eval_window_mode": mode,
+        "eval_window_panel_dates": len(distinct),
+    }
+    if not distinct:
+        meta["eval_window_reason"] = "panel has no dates"
+        return None, meta
+
+    # Historical rule, reproduced exactly: cut index int(n * 0.8), keep dates
+    # STRICTLY after that date, start at the earliest kept date.
+    fixed_cut = distinct[int(len(distinct) * EVAL_WINDOW_FIXED_FRACTION)]
+    fixed_after = [d for d in distinct if d > fixed_cut]
+    fixed_start = fixed_after[0] if fixed_after else None
+    meta["eval_start_fixed_fraction"] = (
+        fixed_start.date().isoformat() if fixed_start is not None else None)
+    meta["eval_dates_fixed_fraction"] = len(fixed_after)
+
+    cutoff_start = None
+    if artifact is not None:
+        cutoff = _effective_artifact_cutoff(artifact)
+        if cutoff is None:
+            meta["eval_window_cutoff_reason"] = (
+                "artifact declares no effective cutoff — cannot derive a window from "
+                "it; trained_date is wall-clock metadata and proves nothing about "
+                "label separation")
+        else:
+            lookahead = int(artifact.get("lookahead_days") or 0)
+            safe_last_label = cutoff + pd.offsets.BDay(max(0, lookahead))
+            after = [d for d in distinct if d > safe_last_label]
+            cutoff_start = after[0] if after else None
+            meta["eval_window_cutoff"] = cutoff.date().isoformat()
+            meta["eval_window_lookahead_days"] = lookahead
+            meta["eval_window_safe_last_label"] = safe_last_label.date().isoformat()
+            meta["eval_dates_artifact_cutoff"] = len(after)
+            if cutoff_start is None:
+                meta["eval_window_cutoff_reason"] = (
+                    f"no panel date after safe_last_label "
+                    f"{safe_last_label.date().isoformat()} — the artifact's labels "
+                    f"cover the whole panel, so NO out-of-sample window exists")
+    meta["eval_start_artifact_cutoff"] = (
+        cutoff_start.date().isoformat() if cutoff_start is not None else None)
+
+    chosen = cutoff_start if mode == EVAL_WINDOW_MODE_CUTOFF else fixed_start
+    meta["eval_start_chosen"] = (
+        chosen.date().isoformat() if chosen is not None else None)
+    return chosen, meta
+
+
+def common_eval_start(starts) -> object:
+    """The latest of several arms' starts, so every arm is scored on ONE window.
+
+    Comparing a candidate and a control on different date samples reintroduces the era
+    confound: on this panel, lag-0 IC by score-date quartile ran
+    +0.0493 / +0.0032 / +0.0672 / +0.0043, so an offset window biases hard. Taking the
+    max is the only choice that keeps both arms out-of-sample AND on the same rows.
+    Returns None if any arm has no admissible window, because a comparison missing an
+    arm is not a comparison.
+    """
+    starts = list(starts)
+    if not starts or any(s is None for s in starts):
+        return None
+    return max(pd.Timestamp(s) for s in starts)
+
+
 def _validate_static_sanity_oos_contract(
     artifact: dict,
     eval_start: pd.Timestamp,
@@ -2540,11 +2668,20 @@ def run_sanity_battery(
             }
         val = panel[pd.to_datetime(panel["date"]).isin(safe_dates)].copy()
         eval_start = min(safe_dates)
+        # never left undefined: the shared sanity_meta literal below reads it
+        eval_window_meta = {"eval_window_mode": "walkforward_manifest_dates"}
     else:
-        distinct = sorted(panel.date.unique())
-        val_cut = distinct[int(len(distinct) * 0.8)]
-        val = panel[panel.date > val_cut].copy()
-        eval_start = pd.Timestamp(val["date"].min()) if not val.empty else None
+        # 2026-07-30 (issue #84, remaining half): the start is derived through
+        # derive_static_eval_start so that BOTH candidate values land in metadata on
+        # every run. The default mode reproduces the historical fixed-80% cut exactly;
+        # RQ_WF_EVAL_WINDOW_MODE=artifact_cutoff opts into deriving it from the
+        # artifact's own cutoff. Nothing about the default path changes.
+        eval_start, eval_window_meta = derive_static_eval_start(
+            panel["date"], artifact=artifact)
+        val = (panel[pd.to_datetime(panel["date"]) >= pd.Timestamp(eval_start)].copy()
+               if eval_start is not None else panel.iloc[0:0].copy())
+        if val.empty:
+            eval_start = None
     if eval_start is None:
         return {
             "passed": False,
@@ -2605,7 +2742,8 @@ def run_sanity_battery(
             )
             mu = scorer.score(X).values
             sanity_meta = {
-                "sanity_eval_scope": "static_artifact",
+        **(eval_window_meta or {}),
+        "sanity_eval_scope": "static_artifact",
                 "sanity_eval_start": pd.Timestamp(eval_start).date().isoformat(),
                 "sanity_eval_end": pd.Timestamp(val["date"].max()).date().isoformat(),
                 "n_oos_dates": int(val["date"].nunique()),
