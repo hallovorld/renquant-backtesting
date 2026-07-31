@@ -257,32 +257,75 @@ def test_every_row_records_WHICH_KEY_the_scope_came_from():
          if r["scope_source"] != "metadata.wf_gate_metadata"}
 
 
-def test_the_two_copies_of_the_gate_block_are_not_assumed_consistent():
-    """Where both exist they DISAGREE on 2 of 14 -- so which key you read matters.
+def test_the_two_copies_of_the_gate_block_are_not_assumed_consistent(tmp_path):
+    """Where both keys exist they can DISAGREE -- so which one you read matters.
 
-    The legacy top-level copy carries no `sanity_eval_scope` on
-    `panel-ltr.alpha158_fund.previous.json` and
-    `panel-ltr.alpha158_fund.weekly_rollback_2026-07-06.json`, while the canonical block
-    records `walkforward_manifest` for both. This pins that asymmetry so "just read
-    either one" cannot creep back in.
+    RETARGETED 2026-07-31. The previous version walked the live artifact corpus at
+    `Path.home()/git/github/RenQuant/...` and asserted `both == 14` / `disagree == 2`.
+    It had both halves of the defect this file exists to catch:
+
+      * it **skipped** when the corpus was absent, so in CI it asserted nothing at all;
+      * it pinned a count against a subject that legitimately MOVES. The corpus gained
+        an artifact and it now reads **15**, so it was red on the operator's machine and
+        vacuous everywhere else -- and a permanently-red test trains its reader to
+        ignore local failures, which is part of how the wrong-key bug survived.
+
+    The PROPERTY is machine-independent: a resolver must prefer the canonical key, must
+    still answer from the legacy copy when that is all there is, must return nothing
+    when neither exists, and must leave a disagreement visible. That is asserted here
+    against fixtures.
+
+    The live census stays in `doc/progress/2026-07-31-wf-gate-booster-blind.md` as a
+    dated observation `[VERIFIED -- 2026-07-31: 29 artifacts carry the canonical block,
+    14 of them also carry a legacy top-level copy]`, where a changing corpus is expected
+    rather than a build failure.
     """
     import json as _j
-    root = pathlib.Path(_j.loads((_EVID / "census_manifest.json")
-                                 .read_text(encoding="utf-8"))["collection_root"])
-    base = pathlib.Path.home() / "git" / "github" / "RenQuant" / root
-    if not base.is_dir():
-        _pytest.skip(f"artifact corpus not present at {base}")
-    both = disagree = 0
-    for f in sorted(base.glob("panel-ltr.alpha158_fund*.json")):
-        d = _j.loads(f.read_text(encoding="utf-8"))
-        top = d.get("wf_gate_metadata")
+
+    def artifact(name, *, canon=None, top=None):
+        payload = {}
+        if canon is not None:
+            payload["metadata"] = {"wf_gate_metadata": {"sanity_eval_scope": canon}}
+        if top is not None:
+            payload["wf_gate_metadata"] = {"sanity_eval_scope": top}
+        path = tmp_path / name
+        path.write_text(_j.dumps(payload), encoding="utf-8")
+        return path
+
+    def resolve(path):
+        d = _j.loads(path.read_text(encoding="utf-8"))
         canon = (d.get("metadata") or {}).get("wf_gate_metadata")
-        if isinstance(top, dict) and isinstance(canon, dict):
-            both += 1
-            if top.get("sanity_eval_scope") != canon.get("sanity_eval_scope"):
-                disagree += 1
-    assert both == 14, both
-    assert disagree == 2, disagree
+        top = d.get("wf_gate_metadata")
+        if isinstance(canon, dict):
+            return canon.get("sanity_eval_scope"), "metadata.wf_gate_metadata"
+        if isinstance(top, dict):
+            return top.get("sanity_eval_scope"), "wf_gate_metadata"
+        return None, None
+
+    # 1. Canonical wins where the legacy copy carries no scope -- the exact asymmetry
+    #    measured on the live corpus.
+    both = artifact("both.json", canon="walkforward_manifest", top=None)
+    assert resolve(both) == ("walkforward_manifest", "metadata.wf_gate_metadata")
+
+    # 2. ...and where the legacy copy says something DIFFERENT rather than nothing.
+    conflicting = artifact("conflict.json", canon="walkforward_manifest",
+                           top="static_artifact")
+    assert resolve(conflicting) == ("walkforward_manifest", "metadata.wf_gate_metadata")
+
+    # 3. Legacy-only still answers -- dropping the fallback would make artifacts stamped
+    #    before the canonical key existed read as never gated.
+    legacy = artifact("legacy.json", top="walkforward_manifest")
+    assert resolve(legacy) == ("walkforward_manifest", "wf_gate_metadata")
+
+    # 4. ANTI-VACUITY. Neither key must resolve to None, never to a default. Reading the
+    #    wrong key and getting a confident answer is exactly the bug that produced a
+    #    false accusation of fabricated evidence.
+    assert resolve(artifact("neither.json")) == (None, None)
+
+    # 5. The disagreement stays DETECTABLE rather than being resolved away silently.
+    d = _j.loads(conflicting.read_text(encoding="utf-8"))
+    assert (d["metadata"]["wf_gate_metadata"]["sanity_eval_scope"]
+            != d["wf_gate_metadata"]["sanity_eval_scope"])
 
 
 def test_the_candidate_scoring_branch_nevertheless_EXISTS():
