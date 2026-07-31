@@ -68,6 +68,42 @@ own verdict string. Both are design changes to a capital gate.
 
 ---
 
+## NARROWED AGAIN 2026-07-31 — the census measured ONE SCORER KIND, not the gate
+
+**Read this first.** The section below concludes the candidate-scoring branch "ran 0 of
+29 times in production" and calls that twin-registry **R7** (a branch no caller reaches).
+**Both are narrowed.**
+
+The reference config is chosen **by the candidate's scorer kind**
+(`RenQuant/scripts/run_wf_gate.py:107-110`):
+
+| candidate kind | reference config | `walkforward.enabled` | branch |
+|---|---|---|---|
+| **GBDT / `xgb`** | `strategy_config.shadow.json` | **true** | `walkforward_manifest` |
+| **PatchTST / `hf_patchtst`** | `strategy_config.json` | **absent → `False`** | **`static_artifact`** |
+
+`[本次实测 2026-07-31 — `bool(wf_cfg.get("enabled", False))` at runner.py:897; the
+`walkforward` block of both production configs contains only `manifest_path`]`
+
+**The 29 censused artifacts are all `panel-ltr.alpha158_fund*` — the GBDT family.** They
+stamp `walkforward_manifest` because GBDT candidates are gated against the shadow config.
+So the census measured **one lane**, not the gate.
+
+**Withdrawn:** the R7 framing. `static_artifact` is **the PatchTST path by design**, not
+dead code.
+
+**The accurate three-way statement:**
+
+* **GBDT candidate** — the gate scores it in **neither** arm (the finding below, which
+  stands for that lane);
+* **PatchTST candidate** — it *can* be scored, via `static_artifact`, where
+  `candidate_artifact_used` is `bool(used)` rather than hardcoded `False`;
+* **whether any PatchTST candidate has actually been gated** — **unmeasured.** The census
+  covered only the GBDT artifact family. Extending it to the PatchTST artifacts is the
+  next step and is not done here.
+
+---
+
 ## CORRECTION-OF-THE-CORRECTION 2026-07-31 — the section below OVER-corrected
 
 **Read this before the section that follows.** The correction below says *"the gate

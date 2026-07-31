@@ -74,8 +74,15 @@ def test_the_manifest_branch_scores_from_the_MANIFEST_uris():
     assert '"sanity_eval_scope": "walkforward_manifest"' in tail
 
 
-def test_the_census_still_shows_the_candidate_branch_never_ran():
-    """Anti-drift on the measurement the conclusion rests on."""
+def test_the_census_covers_the_GBDT_family_only():
+    """NARROWED 2026-07-31: the census measured one scorer kind, not the gate.
+
+    All 29 rows are `panel-ltr.alpha158_fund*` -- the GBDT family -- and GBDT candidates
+    are gated against `strategy_config.shadow.json`, whose `walkforward.enabled` is true.
+    A PatchTST candidate is gated against `strategy_config.json`, whose `walkforward`
+    block has NO `enabled` key, so it takes the `static_artifact` branch by design.
+    "0 of 29" is therefore a statement about the GBDT lane, not about the branch.
+    """
     import csv
     p = (pathlib.Path(__file__).resolve().parent.parent
          / "docs/research/evidence/2026-07-31-sanity-scope/sanity_scope_census.csv")
@@ -83,3 +90,5 @@ def test_the_census_still_shows_the_candidate_branch_never_ran():
     assert len(rows) == 29
     assert [r for r in rows if r["sanity_eval_scope"] == "static_artifact"] == []
     assert all(r["sanity_eval_scope"] == "walkforward_manifest" for r in rows)
+    # Every censused artifact is GBDT panel-LTR: the scope of the claim, made explicit.
+    assert all(r["artifact"].startswith("panel-ltr.alpha158_fund") for r in rows)
