@@ -1,23 +1,43 @@
-# The WF gate has issued zero unaided passes in 11 artifacts
+# The WF gate has issued zero unaided passes in 11 artifacts   (PR #91)
 
-**RELOCATED from `renquant-orchestrator#670`.** Codex on that PR: this evidence and its
-assertions belong here, because `renquant-backtesting` owns the WF gate, the
-candidate-versus-recipe admission semantics, and the referenced artifacts. The
-orchestrator should consume a gate verdict, not become a second frozen-data authority
-for backtesting behaviour. Agreed — the finding is about the gate, so it is filed
-against the gate's owner.
-
-**Bottom line.** The model trading the live book today was **not admitted by the gate**.
-An operator override dated **2026-06-22** admitted it, over its own sanity battery's
-`FAIL`. Across every `panel-ltr.alpha158_fund` artifact carrying `wf_gate_metadata`:
-**11 artifacts, 2 with `passed=True`, both overrides, zero unaided passes**
-`[VERIFIED — 本次实测 2026-07-31, evidence/2026-07-31-wf-gate-unaided-passes/gate_verdicts.csv]`.
-
-| artifact | `passed` | `diagnostic_only` | admitted by |
-|---|:--:|:--:|---|
-| **`panel-ltr.alpha158_fund.json` (DEPLOYED)** | True | True | **operator override 2026-06-22** |
-| `weekly_20260706T230931Z.staging` | True | False | **operator override 2026-07-06** |
-| `weekly_20260712` … `weekly_20260730` (9) | False | False | — |
+STATUS:    delivered
+WHAT:      Relocated from `renquant-orchestrator#670` (Codex boundary finding):
+           the evidence CSV and all 5 pinned tests move unchanged, only this
+           doc's header records the relocation. Nothing was re-measured or
+           re-worded in transit. Filed against `renquant-backtesting` because
+           this repo owns the WF gate, the candidate-versus-recipe admission
+           semantics, and the referenced artifacts.
+WHY/DIR:   GOAL-6 — is the WF gate measuring what it was built to measure?
+           Across every `panel-ltr.alpha158_fund` artifact carrying
+           `wf_gate_metadata` (11 total), 2 carry `passed=True` and **both are
+           operator overrides** — zero unaided passes. The artifact trading the
+           live book today is one of the two overrides, admitted 2026-06-22
+           over its own sanity battery's FAIL.
+EVIDENCE:  artifact:      doc/research/evidence/2026-07-31-wf-gate-unaided-passes/gate_verdicts.csv
+           prod or exp:   prod — audits `wf_gate_metadata` stamped on the
+                          production and staging `panel-ltr.alpha158_fund`
+                          artifacts already on disk; no new training run.
+           existing data: census of all 11 artifacts carrying `wf_gate_metadata`
+                          for this recipe: 2 rows `passed=True` (the deployed
+                          artifact, override dated 2026-06-22; one staging
+                          artifact, override dated 2026-07-06), 9 rows
+                          `passed=False` with `override_reason` empty.
+           best-known?:   n/a — this is a census of every scored artifact for
+                          this recipe, not a comparison against a better-known
+                          variant.
+           scope:         "this is gate_verdicts.csv, prod, 11/11 alpha158_fund
+                          artifacts audited: 2 passed (both operator overrides),
+                          9 rejected unaided, 0 unaided passes"
+           `[VERIFIED — measured 2026-07-31, gate_verdicts.csv;
+           tests/test_wf_gate_unaided_passes.py, 5 tests pinned to the frozen CSV]`
+NEXT:      Two findings compound and both need resolution before an unaided
+           pass can be trusted: (1) all 11 artifacts admit on
+           `recipe_validated=True` / `candidate_artifact_used=False`
+           (`renquant-backtesting#83`'s shape — the gate scores the recipe, not
+           the candidate's own booster); (2) the nine rejects are the gate
+           working as specified, but every admission to date has been manual.
+           Whether the gate's criteria need revision or the candidates really
+           are this bad is not decidable from this evidence alone.
 
 ## The deployed artifact's own testimony
 
@@ -60,5 +80,3 @@ yes.
 Whether the overrides were wrong. Both carry an explicit operator directive with a stated
 rationale — which is what the containment protocol asks for. This is a statement about the
 **gate's** state, not the operator's decisions.
-
-Filed: `renquant-backtesting#90`. Tests: 5, pinned to a frozen CSV.
