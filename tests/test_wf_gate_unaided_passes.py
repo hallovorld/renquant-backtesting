@@ -103,3 +103,36 @@ def test_the_rejects_carry_no_override():
     rejected = [r for r in _rows() if r["passed"] == "False"]
     assert len(rejected) == 11
     assert all(not r["override_reason"].strip() for r in rejected)
+
+
+# ============ the admission key takes exactly ONE value ======================
+# validation_scope_ok = candidate_artifact_used or recipe_validated. The first is
+# False on 29/29 (tested above), so admission rides entirely on the second — whose
+# key is `recipe_fingerprint`. Measured 2026-08-01 across the same 29 artifacts:
+# 1,247 occurrences, ONE distinct value. A key with one value cannot distinguish
+# two artifacts, so "recipe_validated" is not a discriminating condition here.
+
+def test_the_recipe_fingerprint_has_exactly_one_distinct_value():
+    vals = {r["recipe_fingerprint"] for r in _rows()}
+    assert vals == {"sha256:cfdd6cb8e950da0f"}, vals
+
+
+def test_it_is_present_on_every_artifact_not_merely_unopposed():
+    """A single value could also mean 'only one artifact carries the field'. It
+    does not: every one carries it, many times over."""
+    rows = _rows()
+    assert all(int(r["recipe_fingerprint_occurrences"]) > 0 for r in rows)
+    assert sum(int(r["recipe_fingerprint_occurrences"]) for r in rows) == 1247
+
+
+def test_the_anchor_count_of_four_is_superseded():
+    """The programme's status anchor has said 'four artifacts share the hash' every
+    round. Measured: 29 do, and there is no second value to share it WITH."""
+    assert len(_rows()) == 29
+
+
+def test_the_manifest_records_the_claim_and_the_values():
+    m = json.loads((DIR / "census_manifest.json").read_text(encoding="utf-8"))
+    assert m["recipe_fingerprint_distinct_values"] == ["sha256:cfdd6cb8e950da0f"]
+    assert m["recipe_fingerprint_total_occurrences"] == 1247
+    assert "cannot distinguish two artifacts" in m["recipe_fingerprint_claim"]

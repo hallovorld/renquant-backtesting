@@ -121,3 +121,31 @@ Every row carries the artifact's repo-relative **path**, its **sha256** and its 
 re-hashes the first rows against the umbrella tree to bind them to real files, and skips
 rather than fails where that tree is absent, so the suite does not measure one
 operator's disk.
+
+## Round 3 — the admission key takes exactly ONE value
+
+`validation_scope_ok = candidate_artifact_used or recipe_validated`. The first is
+**False on 29/29** (already pinned above), so admission rides entirely on the second —
+whose key is `recipe_fingerprint`. Measured across the same 29 artifacts
+`[本次实测 2026-08-01]`:
+
+| | |
+|---|---:|
+| artifacts carrying gate metadata | **29** |
+| `recipe_fingerprint` occurrences | **1 247** |
+| **distinct values** | **1** — `sha256:cfdd6cb8e950da0f` |
+| artifacts missing the field | **0** |
+| artifacts carrying more than one value | **0** |
+
+> **A key with one value cannot distinguish two artifacts.** So `recipe_validated`,
+> the sole surviving conjunct of the admission scope, is not a discriminating
+> condition on this population — it is a constant.
+
+**This supersedes the status anchor.** It has read *"four artifacts share the hash
+`cfdd6cb8e950da0f`"* every round. Measured: **29 do**, and there is no second value for
+them to be distinguished from. The single-value fact is also stronger than the
+four-artifact one — four colliding artifacts is a collision; **one value across the
+whole population is a key that was never a key.**
+
+A control is pinned alongside: a single value could also mean *"only one artifact
+carries the field"*. It does not — every one carries it, 1 247 times over.

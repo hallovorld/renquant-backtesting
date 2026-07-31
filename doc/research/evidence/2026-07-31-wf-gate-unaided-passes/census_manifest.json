@@ -8,6 +8,11 @@
   "n_excluded": 0,
   "n_files_matching_query": 29,
   "n_included": 29,
+  "recipe_fingerprint_claim": "the gate's admission key takes exactly ONE value across every artifact it has ever judged; a key with one value cannot distinguish two artifacts",
+  "recipe_fingerprint_distinct_values": [
+    "sha256:cfdd6cb8e950da0f"
+  ],
+  "recipe_fingerprint_total_occurrences": 1247,
   "row_digest_field": "content_sha256 (sha256 of the artifact FILE, not of the row)",
   "schema": "gate_artifact_census.v1"
 }
