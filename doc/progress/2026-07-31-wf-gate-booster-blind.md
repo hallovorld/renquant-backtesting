@@ -275,8 +275,21 @@ artifact and it read **15**, red locally, vacuous everywhere else. A permanently
 trains its reader to ignore local failures, which is part of how the wrong-key bug
 survived as long as it did.
 
-Retargeted onto fixtures. The property is machine-independent and now covers four cases
-the count never did: canonical wins over a legacy copy that is silent, canonical wins
+Retargeted onto fixtures — **twice**. The first replacement ran those fixtures through a
+resolver defined *inside the test*, so it proved a property of the test rather than of
+the code; reversing the real lookup would still have passed
+`[reviewed — codex on #93]`. That is the same shape as the machine-bound test it
+replaced: a guard validating the wrong object. It now imports
+`sanity_scope_census._gate_block`, the function the census actually uses.
+
+A second test asserts the invariant the whole incident turned on, **across the two
+files**: `runner.py` stamps into `artifact["metadata"]["wf_gate_metadata"]`, and the
+reader must look there **first**. When writer and reader disagree about where the block
+lives, the reader reports the corpus as unstamped and the natural conclusion is that the
+evidence was fabricated — which is exactly what happened. Neither file's own tests could
+catch it, because each was self-consistent.
+
+The property is machine-independent and now covers five cases the count never did: canonical wins over a legacy copy that is silent, canonical wins
 over a legacy copy that **conflicts**, legacy-only still answers, and **neither key
 resolves to `None` rather than to a default** — that last one being the anti-vacuity
 control for the original bug, where looking in the wrong place returned a confident
