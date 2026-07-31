@@ -1,0 +1,8 @@
+{
+  "claim": "sanity_eval_scope is the branch marker: the candidate-scoring branch sets 'static_artifact'; the manifest branch sets 'walkforward_manifest'. This census records which one RAN.",
+  "collection_root": "backtesting/renquant_104/artifacts/prod",
+  "inclusion_query": "panel-ltr.alpha158_fund*.json",
+  "inclusion_rule": "files whose JSON carries metadata.wf_gate_metadata",
+  "n_included": 29,
+  "schema": "sanity_scope_census.v1"
+}
