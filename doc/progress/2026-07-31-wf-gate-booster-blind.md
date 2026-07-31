@@ -56,3 +56,53 @@ It does not fix anything. Closing the gap needs a decision that is not mine to t
 alone: either the gate scores the candidate's booster on a leak-free window it *can*
 replay, or admission stops claiming to be about the candidate at all and says so in its
 own verdict string. Both are design changes to a capital gate.
+
+---
+
+## CORRECTION 2026-07-31 — "nothing scores the candidate's own weights" is FALSE
+
+Published above and repeated in the PR body. Half of it is wrong, and the half that is
+wrong is the more alarming half.
+
+**What is still true.** Admission *scope* on the production path rides entirely on the
+recipe: `candidate_artifact_used` is hardcoded `False` when `walkforward.enabled`, so
+`validation_scope_ok = False or recipe_validated`. Two artifacts differing only in their
+trained booster share a fingerprint — the tests in this PR measure exactly that and stand.
+
+**What is false.** `run_sanity_battery(artifact_path, …)` **does load and run the
+candidate's booster** `[VERIFIED — this session]`:
+
+```
+artifact = _load_artifact_payload(artifact_path)          # runner.py:2635
+scorer   = PanelScorer.load(artifact_path)                # the candidate's own weights
+mu       = scorer.score(X).values                         # its own predictions
+```
+
+It then measures IC against the real label, shuffled labels and time-shifted labels, on
+the **model's own** training dataset's validation partition — deliberately, because
+scoring a model on someone else's panel produced a documented false negative
+(PatchTST −0.017 on the wrong panel vs +0.11 on its own, renquant-model doc #36).
+
+And its verdict is **binding**: `_compute_overall_pass` requires
+`_sanity_result_passed(sanity_result)` alongside `validation_scope_ok`.
+
+**The precise statement, replacing the one above.**
+
+> The gate **does** score the candidate's booster — in the **sanity** arm, on its own
+> validation partition. What the candidate's booster never generates is the
+> **walk-forward economic evidence**: Sharpe/APY across cuts versus SPY comes from the
+> *manifest's* artifacts, not from the candidate.
+
+So the gate is not blind to the model. It is blind to **the candidate's economics**.
+
+**Why this matters for GOAL-6 and GOAL-4.** The blocker is narrower and more tractable
+than stated: a Stage-2 retrain or an ensemble *can* be discriminated on rank-IC and
+placebo behaviour today; what cannot be attributed to it is the traded, cost-aware arm.
+"The gate cannot tell an ensemble from the incumbent" was too strong — it cannot tell
+them apart *economically*.
+
+**How the error happened.** I read `candidate_artifact_used=False` plus the `or` in
+`validation_scope_ok` and generalised from the admission expression to the whole gate,
+without reading `run_sanity_battery`, whose parameter is literally `artifact_path`. The
+tests in this PR were never wrong — they only ever measured the recipe fingerprint and
+the scope expression. The over-claim was in the prose.
