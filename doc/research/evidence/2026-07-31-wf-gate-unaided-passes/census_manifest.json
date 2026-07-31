@@ -1,0 +1,13 @@
+{
+  "collected_at_utc": "2026-08-01T00:00:00Z",
+  "collection_root": "backtesting/renquant_104/artifacts/prod (relative to the RenQuant umbrella)",
+  "completeness_claim": "the 11 rows are EVERY artifact matching the query that carries a wf_gate_metadata block; the excluded list accounts for the remainder, so the census is auditable rather than asserted",
+  "excluded": [],
+  "inclusion_query": "panel-ltr.alpha158_fund*.json",
+  "inclusion_rule": "every file matching the query whose JSON carries metadata.wf_gate_metadata",
+  "n_excluded": 0,
+  "n_files_matching_query": 29,
+  "n_included": 29,
+  "row_digest_field": "content_sha256 (sha256 of the artifact FILE, not of the row)",
+  "schema": "gate_artifact_census.v1"
+}

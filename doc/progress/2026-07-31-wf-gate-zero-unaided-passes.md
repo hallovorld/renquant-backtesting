@@ -80,3 +80,44 @@ yes.
 Whether the overrides were wrong. Both carry an explicit operator directive with a stated
 rationale — which is what the containment protocol asks for. This is a statement about the
 **gate's** state, not the operator's decisions.
+
+## Round 2 — the census was under-specified, and correcting it enlarged the finding
+
+**The review:** *"the claimed census has no source-artifact provenance… without that, the
+tests only preserve a table that asserts completeness."* Correct — and acting on it
+**changed the census**.
+
+I reported **11** artifacts. That was the *deployed + staging* subset, and **the subset
+choice was never stated**. The stated inclusion query `panel-ltr.alpha158_fund*.json`
+matches **29** files and **all 29** carry a `wf_gate_metadata` block:
+
+| class | n |
+|---|---:|
+| deployed | 1 |
+| staging | 10 |
+| **rollback** | **16** |
+| previous | 1 |
+| restamp snapshot | 1 |
+
+So 18 artifacts were excluded without comment. **Completeness was asserted, and as stated
+it was false.**
+
+### The conclusion survives, on a larger set
+
+| | 11-row subset | **29-row census** |
+|---|---:|---:|
+| `passed = True` | 2 | **18** |
+| of those, overridden | 2 | **18** |
+| **unaided passes** | **0** | **0** |
+| `candidate_artifact_used = False` | 11/11 | **29/29** |
+
+`[VERIFIED — 本次实测 2026-08-01]`
+
+### What makes it auditable now
+
+Every row carries the artifact's repo-relative **path**, its **sha256** and its size, and
+`census_manifest.json` records the **collection root**, the **inclusion query**, the
+**inclusion rule**, and the **excluded list** (empty — 29 matched, 29 included). A test
+re-hashes the first rows against the umbrella tree to bind them to real files, and skips
+rather than fails where that tree is absent, so the suite does not measure one
+operator's disk.
