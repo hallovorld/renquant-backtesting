@@ -68,6 +68,50 @@ own verdict string. Both are design changes to a capital gate.
 
 ---
 
+## CORRECTION-OF-THE-CORRECTION 2026-07-31 — the section below OVER-corrected
+
+**Read this before the section that follows.** The correction below says *"the gate
+**does** load and run the candidate's booster"* in the sanity arm. **That is false on the
+production path**, and the original claim it retracted was closer to right.
+
+`PanelScorer.load(artifact_path)` — the candidate — is real, but it sits inside the
+branch that stamps `sanity_eval_scope: "static_artifact"`. **The census in this same PR
+measured that branch running 0 times across 29 production artifacts.** Citing a line
+inside a branch that never executes as proof the candidate is scored is twin-registry
+**R7**'s exact shape: *a branch no caller reaches is dead code wearing a docstring* — and
+I committed it while correcting a different error.
+
+**The chain, AST-verified** `[本次实测 2026-07-31, tests/test_sanity_arm_scope_on_the_production_path.py]`:
+
+| step | in `runner.py` |
+|---|---|
+| 1 | `walkforward.enabled = true` (production) → `inspect_artifact_usage` returns `eval_scope: "walkforward_manifest"` **and** `candidate_artifact_used: False` |
+| 2 | that dict is passed as `artifact_usage=` into `run_sanity_battery` |
+| 3 | `manifest_scope = artifact_usage["eval_scope"] == "walkforward_manifest"` → **True** |
+| 4 | the manifest branch loads its scorer from a **manifest URI** (`PanelScorer.load(uri_path)`), never from `artifact_path` |
+| 5 | `PanelScorer.load(artifact_path)` lives only in the `else` branch, which stamps `static_artifact` |
+| 6 | census: `static_artifact` **0 of 29**; `walkforward_manifest` **29 of 29** |
+
+**So the accurate statement is the narrow one:**
+
+> On the production path the gate **does not score the candidate's booster in either
+> arm**. The sanity arm scores the *manifest's* artifacts; the economic arm reads the
+> *manifest's* results. A capability to score the candidate exists in
+> `run_sanity_battery` and has never been reached in production.
+
+**What this does NOT say.** That the sanity battery is worthless — it is a real
+point-in-time label diagnostic, it is binding (`_compute_overall_pass` requires
+`_sanity_result_passed`), and it fails closed. It just is not evidence *about the
+candidate*. And nothing here says the `static_artifact` branch is broken; it is
+unreached, which is a different claim with a different remedy.
+
+**Consequence for GOAL-6 Stage 2.** I was about to design Stage 2's evaluation on the
+premise that a candidate *"can be discriminated statistically today"*. **It cannot**, on
+the production path, without either reaching the `static_artifact` branch or re-scoring.
+That premise is withdrawn before it was built on.
+
+---
+
 ## CORRECTION 2026-07-31 — "nothing scores the candidate's own weights" is FALSE
 
 Published above and repeated in the PR body. Half of it is wrong, and the half that is
