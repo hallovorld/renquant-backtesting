@@ -210,7 +210,7 @@ import csv as _csv
 import json as _json
 
 _EVID = (pathlib.Path(__file__).resolve().parent.parent
-         / "docs/research/evidence/2026-08-01-sanity-scope")
+         / "docs/research/evidence/2026-07-31-sanity-scope")
 
 
 def _census():
@@ -219,10 +219,33 @@ def _census():
 
 
 def test_the_candidate_scoring_branch_ran_ZERO_times_in_production():
+    """The denominator was wrong and is corrected here.
+
+    The hand-built census listed **29** artifacts and reported a scope for every one,
+    while only **14** carry the `wf_gate_metadata` a scope could be read from -- so 15
+    rows asserted an observation nobody made. `tools/sanity_scope_census.py` reads the
+    artifacts, so the census is now 14 rows, of which **12 record a scope** and 2 carry
+    gate metadata from an older stamp with no scope field at all.
+
+    The finding survives the correction: `static_artifact` appears **zero** times.
+    """
     rows = _census()
-    assert len(rows) == 29
+    assert len(rows) == 14
+    scoped = [r for r in rows if r["sanity_eval_scope"]]
+    assert len(scoped) == 12
     assert [r for r in rows if r["sanity_eval_scope"] == "static_artifact"] == []
-    assert all(r["sanity_eval_scope"] == "walkforward_manifest" for r in rows)
+    assert all(r["sanity_eval_scope"] == "walkforward_manifest" for r in scoped)
+
+
+def test_an_UNSCOPED_stamp_is_visible_as_unscoped_not_defaulted():
+    """Anti-vacuity for the test above. Two stamped artifacts predate the scope field.
+    Defaulting them to the majority value would manufacture two observations and is
+    exactly what the 29-row census did fifteen times."""
+    rows = _census()
+    unscoped = [r for r in rows if not r["sanity_eval_scope"]]
+    assert len(unscoped) == 2, [r["artifact"] for r in unscoped]
+    for r in unscoped:
+        assert r["wf_eval_scope"] == ""
 
 
 def test_the_candidate_scoring_branch_nevertheless_EXISTS():
@@ -242,6 +265,32 @@ def test_the_census_states_how_it_was_collected():
 
 
 def test_every_census_row_carries_a_path_and_a_digest():
+    """The path is relative to the collection root the manifest names -- an absolute
+    path would pin the census to one machine and make `--verify` read as "everything
+    is missing" anywhere else."""
     for r in _census():
-        assert r["artifact_path"].startswith("backtesting/renquant_104/artifacts/prod/")
+        assert r["artifact_path"] and not r["artifact_path"].startswith("/")
+        assert r["artifact_path"].endswith(".json")
         assert len(r["content_sha256"]) == 64
+
+
+def test_the_census_was_produced_by_the_COMMITTED_command():
+    """Codex's ask: a reproducible census command that reads the declared source
+    artifacts and verifies their digests. The manifest's schema and inclusion rule are
+    the tool's own constants, so a hand-edited CSV that drifts from the tool is
+    detectable here rather than by inspection."""
+    import importlib.util
+    import sys as _sys
+    root = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "_census_tool", root / "tools" / "sanity_scope_census.py")
+    tool = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = tool
+    spec.loader.exec_module(tool)
+    man = _json.loads((_EVID / "census_manifest.json").read_text(encoding="utf-8"))
+    assert man["schema"] == tool.SCHEMA
+    assert man["inclusion_query"] == tool.INCLUSION_QUERY
+    assert man["inclusion_rule"] == tool.INCLUSION_RULE
+    assert man["n_included"] == len(_census())
+    with (_EVID / tool.CSV_NAME).open() as fh:
+        assert _csv.DictReader(fh).fieldnames == tool.FIELDS
