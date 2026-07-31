@@ -208,6 +208,7 @@ def test_the_reported_fingerprint_is_the_candidates_own(tmp_path):
 import pathlib
 import csv as _csv
 import json as _json
+import pytest as _pytest
 
 _EVID = (pathlib.Path(__file__).resolve().parent.parent
          / "docs/research/evidence/2026-07-31-sanity-scope")
@@ -219,33 +220,69 @@ def _census():
 
 
 def test_the_candidate_scoring_branch_ran_ZERO_times_in_production():
-    """The denominator was wrong and is corrected here.
+    """29 artifacts, 29 scoped, `static_artifact` zero times.
 
-    The hand-built census listed **29** artifacts and reported a scope for every one,
-    while only **14** carry the `wf_gate_metadata` a scope could be read from -- so 15
-    rows asserted an observation nobody made. `tools/sanity_scope_census.py` reads the
-    artifacts, so the census is now 14 rows, of which **12 record a scope** and 2 carry
-    gate metadata from an older stamp with no scope field at all.
+    RETRACTED 2026-07-31: an earlier version of this test asserted **14** rows and
+    stated that the hand-built 29-row census had "asserted an observation nobody made"
+    fifteen times. **That was false, and it was an accusation of fabricated evidence.**
 
-    The finding survives the correction: `static_artifact` appears **zero** times.
+    The cause was in the tool, not the corpus. `_scopes` read `wf_gate_metadata` at the
+    TOP LEVEL of each artifact. Measured against the corpus: **all 29 artifacts carry
+    `metadata.wf_gate_metadata`**, and 14 of them ALSO carry a legacy top-level copy.
+    The tool was reading the legacy key, found it on 14, and called the other 15
+    invented. A checker looking in the wrong place does not discover that its subjects
+    are missing -- it discovers that it is looking in the wrong place.
+
+    The original 29-row census was RIGHT. The finding is unchanged and now rests on 29
+    measured observations rather than 12.
     """
     rows = _census()
-    assert len(rows) == 14
-    scoped = [r for r in rows if r["sanity_eval_scope"]]
-    assert len(scoped) == 12
+    assert len(rows) == 29
+    assert all(r["sanity_eval_scope"] == "walkforward_manifest" for r in rows), \
+        [r["artifact"] for r in rows if r["sanity_eval_scope"] != "walkforward_manifest"]
     assert [r for r in rows if r["sanity_eval_scope"] == "static_artifact"] == []
-    assert all(r["sanity_eval_scope"] == "walkforward_manifest" for r in scoped)
 
 
-def test_an_UNSCOPED_stamp_is_visible_as_unscoped_not_defaulted():
-    """Anti-vacuity for the test above. Two stamped artifacts predate the scope field.
-    Defaulting them to the majority value would manufacture two observations and is
-    exactly what the 29-row census did fifteen times."""
+def test_every_row_records_WHICH_KEY_the_scope_came_from():
+    """The duplication that caused the false accusation is now visible in the evidence.
+
+    Reading the canonical key silently would fix the count and hide the reason. Each row
+    names its source, so a reader can see that all 29 answered on
+    `metadata.wf_gate_metadata` -- and would see immediately if any row fell back to the
+    legacy top-level copy.
+    """
     rows = _census()
-    unscoped = [r for r in rows if not r["sanity_eval_scope"]]
-    assert len(unscoped) == 2, [r["artifact"] for r in unscoped]
-    for r in unscoped:
-        assert r["wf_eval_scope"] == ""
+    assert all(r["scope_source"] == "metadata.wf_gate_metadata" for r in rows), \
+        {r["artifact"]: r["scope_source"] for r in rows
+         if r["scope_source"] != "metadata.wf_gate_metadata"}
+
+
+def test_the_two_copies_of_the_gate_block_are_not_assumed_consistent():
+    """Where both exist they DISAGREE on 2 of 14 -- so which key you read matters.
+
+    The legacy top-level copy carries no `sanity_eval_scope` on
+    `panel-ltr.alpha158_fund.previous.json` and
+    `panel-ltr.alpha158_fund.weekly_rollback_2026-07-06.json`, while the canonical block
+    records `walkforward_manifest` for both. This pins that asymmetry so "just read
+    either one" cannot creep back in.
+    """
+    import json as _j
+    root = pathlib.Path(_j.loads((_EVID / "census_manifest.json")
+                                 .read_text(encoding="utf-8"))["collection_root"])
+    base = pathlib.Path.home() / "git" / "github" / "RenQuant" / root
+    if not base.is_dir():
+        _pytest.skip(f"artifact corpus not present at {base}")
+    both = disagree = 0
+    for f in sorted(base.glob("panel-ltr.alpha158_fund*.json")):
+        d = _j.loads(f.read_text(encoding="utf-8"))
+        top = d.get("wf_gate_metadata")
+        canon = (d.get("metadata") or {}).get("wf_gate_metadata")
+        if isinstance(top, dict) and isinstance(canon, dict):
+            both += 1
+            if top.get("sanity_eval_scope") != canon.get("sanity_eval_scope"):
+                disagree += 1
+    assert both == 14, both
+    assert disagree == 2, disagree
 
 
 def test_the_candidate_scoring_branch_nevertheless_EXISTS():

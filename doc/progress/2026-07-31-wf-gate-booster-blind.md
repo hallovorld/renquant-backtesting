@@ -137,27 +137,44 @@ python3 tools/sanity_scope_census.py --verify \
     --out  docs/research/evidence/2026-07-31-sanity-scope
 ```
 
-**Running it found the census wrong.** The hand-built CSV listed **29** artifacts and
-reported `sanity_eval_scope=walkforward_manifest` for **all 29** — while only **14**
-carry `wf_gate_metadata` at all `[VERIFIED — tools/sanity_scope_census.py --emit,
-2026-07-31]`. **Fifteen rows asserted an observation nobody made**, under a declared
-inclusion rule ("files whose JSON carries `wf_gate_metadata`") that does not select them.
+**RETRACTED 2026-07-31 — "fifteen rows asserted an observation nobody made" was FALSE.**
 
-The corrected census, read from the artifacts:
+An earlier version of this section reported that the hand-built CSV listed 29 artifacts
+while *"only 14 carry `wf_gate_metadata` at all"*, and concluded that fifteen rows were
+invented. **That was an accusation of fabricated evidence, and it was wrong.** It is
+retracted here rather than corrected quietly, because an unretracted fabrication claim
+against real evidence is worse than the miscount it was meant to fix.
+
+**The cause was in the tool, not the corpus.** `_scopes` read `wf_gate_metadata` at the
+**top level** of each artifact. Measured against the corpus
+`[本次实测 2026-07-31, direct JSON inspection of all 29 files]`:
 
 | | |
 |---|---:|
-| prod artifacts matching the inclusion query | 29 |
-| …carrying `wf_gate_metadata` (the census) | **14** |
-| …of those, recording a sanity scope | **12** |
-| …carrying gate metadata from an older stamp with **no scope field** | 2 |
+| prod artifacts matching the inclusion query | **29** |
+| carrying **`metadata.wf_gate_metadata`** (canonical) | **29** |
+| *also* carrying a **legacy top-level** `wf_gate_metadata` | 14 |
+| carrying neither | **0** |
+| recording `sanity_eval_scope = walkforward_manifest` | **29** |
 | recording `static_artifact` | **0** |
 
-**The finding survives the correction and the denominator does not change it:** the
-candidate-scoring branch ran **zero** times, on 12 scoped observations rather than 29
-asserted ones. The two unscoped rows are now visible *as* unscoped — defaulting them to
-the majority value is exactly what the 29-row census did fifteen times, and a test now
-fails if they are.
+The tool was reading the legacy key, found it on 14, and called the other 15 invented.
+**A checker looking in the wrong place does not discover that its subjects are missing —
+it discovers that it is looking in the wrong place.** The original 29-row census was
+right.
+
+**The two copies are not interchangeable, which is why this mattered.** Where both
+exist they agree on 12 artifacts and **disagree on 2**: on
+`panel-ltr.alpha158_fund.previous.json` and
+`panel-ltr.alpha158_fund.weekly_rollback_2026-07-06.json` the legacy block carries no
+`sanity_eval_scope` at all while the canonical one records `walkforward_manifest`. So
+the "2 unscoped stamps" reported earlier were an artifact of the wrong key, not an older
+stamp format. Every census row now records **which key answered** (`scope_source`), so
+the duplication is visible in the evidence instead of being silently preferred.
+
+**The finding is unchanged and now rests on more, not less:** the candidate-scoring
+branch ran **zero** times, on **29 measured observations** rather than the 12 the
+mistaken census left standing.
 
 **On "immutable source snapshot":** they are not one, and the tool says so. An artifact
 store is not content-addressed and a retrain can replace a file in place. The digest

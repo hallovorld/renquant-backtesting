@@ -1,8 +1,8 @@
 {
   "collection_root": "/Users/renhao/git/github/RenQuant/backtesting/renquant_104/artifacts/prod",
   "inclusion_query": "panel-ltr.alpha158_fund*.json",
-  "inclusion_rule": "files whose JSON carries wf_gate_metadata",
-  "n_included": 14,
-  "schema": "sanity_scope_census.v1",
+  "inclusion_rule": "files whose JSON carries a gate block at metadata.wf_gate_metadata (canonical) or, failing that, at the legacy top-level wf_gate_metadata",
+  "n_included": 29,
+  "schema": "sanity_scope_census.v2",
   "scope_note": "an artifact store is not content-addressed; a digest makes a change VISIBLE, it does not make the store immutable"
 }

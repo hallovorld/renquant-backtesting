@@ -42,12 +42,15 @@ import json
 import pathlib
 import sys
 
-SCHEMA = "sanity_scope_census.v1"
+SCHEMA = "sanity_scope_census.v2"
 INCLUSION_QUERY = "panel-ltr.alpha158_fund*.json"
-INCLUSION_RULE = "files whose JSON carries wf_gate_metadata"
+INCLUSION_RULE = ("files whose JSON carries a gate block at "
+                  "metadata.wf_gate_metadata (canonical) or, failing that, "
+                  "at the legacy top-level wf_gate_metadata")
 CSV_NAME = "sanity_scope_census.csv"
 MANIFEST_NAME = "census_manifest.json"
 FIELDS = ["artifact", "artifact_path", "content_sha256", "sanity_eval_scope",
+          "scope_source",
           "wf_eval_scope"]
 
 
@@ -59,20 +62,47 @@ def _sha256(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
-def _scopes(payload: dict) -> tuple[str, str] | None:
-    """(`sanity_eval_scope`, `wf_eval_scope`) if this artifact was stamped by the gate.
+def _gate_block(payload: dict) -> tuple[dict | None, str]:
+    """The gate block and WHICH KEY it came from.
 
-    An artifact with no `wf_gate_metadata` was never run through the gate, so it is not
-    evidence about which branch executed and is EXCLUDED rather than counted as a
-    missing value. That exclusion is the whole reason this is a tool: the hand-built
-    census it replaces listed 29 artifacts and reported a scope for all of them, while
-    only 14 carry the metadata a scope could have been read from. 15 rows asserted an
-    observation nobody made.
+    CORRECTION 2026-07-31. The first version of this function read
+    ``payload["wf_gate_metadata"]`` -- the TOP LEVEL -- and concluded that only 14 of 29
+    artifacts carried the block, hence that "15 rows asserted an observation nobody
+    made". That conclusion was FALSE and it was an accusation of fabricated evidence.
+
+    Measured against the corpus: **all 29 artifacts carry
+    ``metadata.wf_gate_metadata``**; 14 of them ALSO carry a legacy top-level copy. The
+    tool was reading the legacy key, so it saw the 14 and called the other 15 invented.
+    A checker that looks in the wrong place does not discover that its subjects are
+    missing -- it discovers that it is looking in the wrong place.
+
+    ``metadata.wf_gate_metadata`` is canonical. The top-level copy is read only as a
+    fallback, and the source is RECORDED, so a reader can see which key answered rather
+    than assuming. The two are not always consistent: where both exist they agree on 12
+    artifacts and disagree on 2, in which the legacy copy carries no
+    ``sanity_eval_scope`` at all while the canonical one records
+    ``walkforward_manifest``.
     """
+    md = (payload.get("metadata") or {}).get("wf_gate_metadata")
+    if isinstance(md, dict) and md:
+        return md, "metadata.wf_gate_metadata"
     md = payload.get("wf_gate_metadata")
-    if not isinstance(md, dict) or not md:
+    if isinstance(md, dict) and md:
+        return md, "wf_gate_metadata (legacy top-level)"
+    return None, ""
+
+
+def _scopes(payload: dict) -> tuple[str, str, str] | None:
+    """(`sanity_eval_scope`, `wf_eval_scope`, source key) if the gate stamped this.
+
+    An artifact with no gate block anywhere was never run through the gate, so it is
+    excluded rather than counted as a missing value.
+    """
+    md, source = _gate_block(payload)
+    if md is None:
         return None
-    return (str(md.get("sanity_eval_scope", "")), str(md.get("wf_eval_scope", "")))
+    return (str(md.get("sanity_eval_scope", "")),
+            str(md.get("wf_eval_scope", "")), source)
 
 
 def collect(root: pathlib.Path, query: str = INCLUSION_QUERY) -> list[dict]:
@@ -90,7 +120,8 @@ def collect(root: pathlib.Path, query: str = INCLUSION_QUERY) -> list[dict]:
         rows.append({"artifact": path.name,
                      "artifact_path": str(path.relative_to(root)),
                      "content_sha256": _sha256(path),
-                     "sanity_eval_scope": scopes[0], "wf_eval_scope": scopes[1]})
+                     "sanity_eval_scope": scopes[0], "wf_eval_scope": scopes[1],
+                     "scope_source": scopes[2]})
     return rows
 
 
