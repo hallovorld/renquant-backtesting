@@ -257,32 +257,110 @@ def test_every_row_records_WHICH_KEY_the_scope_came_from():
          if r["scope_source"] != "metadata.wf_gate_metadata"}
 
 
-def test_the_two_copies_of_the_gate_block_are_not_assumed_consistent():
-    """Where both exist they DISAGREE on 2 of 14 -- so which key you read matters.
+def _gate_block_resolver():
+    """The REAL resolver, imported — not a copy written inside a test.
 
-    The legacy top-level copy carries no `sanity_eval_scope` on
-    `panel-ltr.alpha158_fund.previous.json` and
-    `panel-ltr.alpha158_fund.weekly_rollback_2026-07-06.json`, while the canonical block
-    records `walkforward_manifest` for both. This pins that asymmetry so "just read
-    either one" cannot creep back in.
+    Reviewed `[codex on #93]`: *"this test defines resolve as a nested function and then
+    proves properties of that newly written function; deleting or reversing the real
+    canonical-versus-legacy lookup elsewhere would still pass."* Exactly right, and it is
+    the defect this file is named for: a guard that validates the wrong object. My
+    replacement for a test measuring the operator's disk was a test measuring itself.
+    """
+    import importlib.util
+    import sys as _sys
+    root = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "_sanity_scope_census_tool", root / "tools" / "sanity_scope_census.py")
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_two_copies_of_the_gate_block_are_not_assumed_consistent(tmp_path):
+    """Where both keys exist they can DISAGREE -- so which one you read matters.
+
+    RETARGETED TWICE. The original walked the live artifact corpus at
+    `Path.home()/git/github/RenQuant/...`, asserted `both == 14`, and SKIPPED when the
+    corpus was absent -- so it asserted nothing in CI and pinned a count against a
+    subject that moves (the corpus gained an artifact; it read 15). My first replacement
+    ran fixtures through a resolver defined inside the test, which proved a property of
+    the test rather than of the code.
+
+    This runs the same fixtures through `sanity_scope_census._gate_block` -- the
+    function the census actually uses -- so reversing or deleting the real
+    canonical-versus-legacy lookup fails here.
     """
     import json as _j
-    root = pathlib.Path(_j.loads((_EVID / "census_manifest.json")
-                                 .read_text(encoding="utf-8"))["collection_root"])
-    base = pathlib.Path.home() / "git" / "github" / "RenQuant" / root
-    if not base.is_dir():
-        _pytest.skip(f"artifact corpus not present at {base}")
-    both = disagree = 0
-    for f in sorted(base.glob("panel-ltr.alpha158_fund*.json")):
-        d = _j.loads(f.read_text(encoding="utf-8"))
-        top = d.get("wf_gate_metadata")
-        canon = (d.get("metadata") or {}).get("wf_gate_metadata")
-        if isinstance(top, dict) and isinstance(canon, dict):
-            both += 1
-            if top.get("sanity_eval_scope") != canon.get("sanity_eval_scope"):
-                disagree += 1
-    assert both == 14, both
-    assert disagree == 2, disagree
+    tool = _gate_block_resolver()
+
+    def artifact(name, *, canon=None, top=None):
+        payload = {}
+        if canon is not None:
+            payload["metadata"] = {"wf_gate_metadata": {"sanity_eval_scope": canon}}
+        if top is not None:
+            payload["wf_gate_metadata"] = {"sanity_eval_scope": top}
+        path = tmp_path / name
+        path.write_text(_j.dumps(payload), encoding="utf-8")
+        return _j.loads(path.read_text(encoding="utf-8"))
+
+    def resolve(payload):
+        md, source = tool._gate_block(payload)
+        return (None if md is None else md.get("sanity_eval_scope")), source
+
+    # 1. Canonical wins where the legacy copy carries no scope -- the asymmetry actually
+    #    measured on the corpus (they agree on 12 artifacts and disagree on 2).
+    scope, source = resolve(artifact("both.json", canon="walkforward_manifest", top=None))
+    assert scope == "walkforward_manifest"
+    assert source == "metadata.wf_gate_metadata"
+
+    # 2. ...and where the legacy copy says something DIFFERENT rather than nothing.
+    scope, source = resolve(artifact("conflict.json", canon="walkforward_manifest",
+                                     top="static_artifact"))
+    assert scope == "walkforward_manifest"
+    assert source == "metadata.wf_gate_metadata"
+
+    # 3. Legacy-only still answers, and SAYS SO -- dropping the fallback would make
+    #    artifacts stamped before the canonical key existed read as never gated.
+    scope, source = resolve(artifact("legacy.json", top="walkforward_manifest"))
+    assert scope == "walkforward_manifest"
+    assert "legacy" in source
+
+    # 4. ANTI-VACUITY. Neither key resolves to None, never to a default. Reading the
+    #    wrong key and getting a CONFIDENT answer is the bug that produced a false
+    #    accusation of fabricated evidence.
+    assert resolve(artifact("neither.json")) == (None, "")
+
+    # 5. An EMPTY block is not a present one: `{}` carries no scope and must not be
+    #    reported as though the gate had stamped it.
+    assert resolve({"metadata": {"wf_gate_metadata": {}}}) == (None, "")
+
+
+def test_the_WRITER_and_the_READER_use_the_same_key():
+    """The invariant the whole incident turned on, asserted across the two files.
+
+    `runner.py` stamps the block; `sanity_scope_census._gate_block` reads it. When those
+    two disagree about where it lives, the reader reports the corpus as unstamped and
+    the natural conclusion is that the evidence was fabricated -- which is what happened.
+    Neither file's own tests could catch it, because each was self-consistent.
+
+    Structural rather than behavioural: running the gate needs the artifact corpus.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    runner = (root / "src" / "renquant_backtesting" / "wf_gate" / "runner.py").read_text(
+        encoding="utf-8")
+    # The writer nests it under artifact["metadata"].
+    assert 'md = artifact.get("metadata") or {}' in runner
+    assert 'md["wf_gate_metadata"] = wf_meta' in runner
+    assert 'artifact["metadata"] = md' in runner
+    # ...and the reader looks there FIRST.
+    tool = _gate_block_resolver()
+    payload = {"metadata": {"wf_gate_metadata": {"sanity_eval_scope": "canonical"}},
+               "wf_gate_metadata": {"sanity_eval_scope": "legacy"}}
+    md, source = tool._gate_block(payload)
+    assert md["sanity_eval_scope"] == "canonical", \
+        "the reader is not looking where the writer stamps"
+    assert source == "metadata.wf_gate_metadata"
 
 
 def test_the_candidate_scoring_branch_nevertheless_EXISTS():

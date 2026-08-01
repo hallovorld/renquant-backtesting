@@ -223,6 +223,79 @@ mistaken census left standing.
 **On "immutable source snapshot":** they are not one, and the tool says so. An artifact
 store is not content-addressed and a retrain can replace a file in place. The digest
 makes that **visible** — `--verify` reports "these bytes changed", which is information —
-it does not make the store immutable, and nothing here claims otherwise. That distinction
-has already paid: the same weekly-staging artifacts turn up unstamped in orch#680, where
-ten of eleven cited artifacts could not be re-derived from the files they name.
+it does not make the store immutable, and nothing here claims otherwise.
+
+~~*That distinction has already paid: the same weekly-staging artifacts turn up unstamped
+in orch#680, where ten of eleven cited artifacts could not be re-derived from the files
+they name.*~~ **WITHDRAWN 2026-07-31.** That supporting example was **false, from the same
+key confusion this document already retracts one section above**: I read the legacy
+top-level `wf_gate_metadata` and concluded ten artifacts carried none. Re-measured at the
+canonical `metadata.wf_gate_metadata`, **all eleven carry it and all eleven regime blocks
+are re-derivable** `[VERIFIED — json read of the 11 artifacts named in orch#677's CSV,
+2026-07-31]`. orch#680 retracted it in `bf8eb40e`; this citation did not follow, which is
+how a correction lands in one repo and its supporting quote survives in another.
+
+The point about digests stands on its own without that example: an artifact store is not
+content-addressed, so a digest is what makes a change visible.
+
+---
+
+## ROUND 5 2026-07-31 — the retraction did not travel, and one test was measuring this laptop
+
+Two follow-ups to the round-4 retraction, both found by re-reading what the retraction
+left behind rather than by any check firing.
+
+**1. The retraction landed in `renquant-orchestrator`; the citation lived here.**
+`orch#680` withdrew ~~*"ten of eleven cited artifacts could not be re-derived"*~~ in
+`bf8eb40e` — the same wrong-key error round 4 retracts. (Struck here too: the guard
+below requires **every** occurrence of a withdrawn sentence to be marked, including one
+inside a paragraph reporting the withdrawal. It caught this one when I wrote it, which
+is the first time on this programme that the correction surface was policed by something
+other than a reviewer.) This document quoted that finding
+as supporting evidence and did not move. Struck through in place above.
+
+Re-measured `[VERIFIED — json read of the 11 artifacts named in orch#677's CSV,
+2026-07-31]`: **all 11 carry `metadata.wf_gate_metadata`, and all 11 regime blocks are
+re-derivable.** The supporting example was false; the point it supported (a digest makes
+a change visible; it does not make a store immutable) stands without it.
+
+This is the **sixth** instance on this programme of a claim outliving its own correction,
+and the first that **crosses a repository boundary** — which is exactly why neither
+repo's own review caught it. `tests/test_no_stale_cross_repo_citation.py` pins the two
+withdrawn sentences so they cannot return unmarked, and asserts the surviving argument is
+not deleted along with its example. It is deliberately narrow: this repo has no view of
+another repo's retractions, and a test claiming to detect the general case would be the
+over-claim this document is about.
+
+**2. `test_the_two_copies_of_the_gate_block_are_not_assumed_consistent` was measuring the
+operator's disk.** It walked `Path.home()/git/github/RenQuant/...` and asserted
+`both == 14`, with a `skip` when the corpus was absent. So it **asserted nothing in CI**
+and pinned a count against a subject that legitimately moves — the corpus gained an
+artifact and it read **15**, red locally, vacuous everywhere else. A permanently-red test
+trains its reader to ignore local failures, which is part of how the wrong-key bug
+survived as long as it did.
+
+Retargeted onto fixtures — **twice**. The first replacement ran those fixtures through a
+resolver defined *inside the test*, so it proved a property of the test rather than of
+the code; reversing the real lookup would still have passed
+`[reviewed — codex on #93]`. That is the same shape as the machine-bound test it
+replaced: a guard validating the wrong object. It now imports
+`sanity_scope_census._gate_block`, the function the census actually uses.
+
+A second test asserts the invariant the whole incident turned on, **across the two
+files**: `runner.py` stamps into `artifact["metadata"]["wf_gate_metadata"]`, and the
+reader must look there **first**. When writer and reader disagree about where the block
+lives, the reader reports the corpus as unstamped and the natural conclusion is that the
+evidence was fabricated — which is exactly what happened. Neither file's own tests could
+catch it, because each was self-consistent.
+
+The property is machine-independent and now covers five cases the count never did: canonical wins over a legacy copy that is silent, canonical wins
+over a legacy copy that **conflicts**, legacy-only still answers, and **neither key
+resolves to `None` rather than to a default** — that last one being the anti-vacuity
+control for the original bug, where looking in the wrong place returned a confident
+answer. Both mutations (drop the canonical branch; make the empty case return a default)
+fail the test.
+
+The live census stays here as a dated observation: **29 artifacts carry the canonical
+block, 14 of them also carry a legacy top-level copy** — where a changing corpus is
+expected rather than a build failure.
