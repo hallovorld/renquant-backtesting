@@ -118,3 +118,53 @@ def test_recipe_stamp_is_byte_unchanged_when_the_lane_is_unavailable(tmp_path):
                                      label_horizon_bdays=60)
     assert json.dumps(usage, sort_keys=True) == before   # input not mutated
     assert block["lineage_lane"] == "unavailable"
+
+
+def test_reordered_or_duplicated_ladder_and_cutoff_mismatch_are_unavailable(tmp_path):
+    """Review round 1 item 2: structural violations must stamp unavailable."""
+    # reordered ladder
+    man = _mk_manifest(tmp_path)
+    m = json.loads(man.read_text())
+    m["retrains"] = list(reversed(m["retrains"]))
+    man.write_text(json.dumps(m))
+    out = LL.attempt_lineage_stamp(
+        artifact_usage={"eval_scope": "walkforward_manifest",
+                        "manifest_path": str(man),
+                        "candidate_recipe_fingerprint": "x"},
+        strategy_dir=tmp_path, label_horizon_bdays=60)
+    assert out["lineage_lane"] == "unavailable" and "not chronologically ordered" in out["reason"]
+    # duplicate cutoffs
+    m["retrains"] = [m["retrains"][0], m["retrains"][0]]
+    man.write_text(json.dumps(m))
+    out2 = LL.attempt_lineage_stamp(
+        artifact_usage={"eval_scope": "walkforward_manifest",
+                        "manifest_path": str(man),
+                        "candidate_recipe_fingerprint": "x"},
+        strategy_dir=tmp_path, label_horizon_bdays=60)
+    assert out2["lineage_lane"] == "unavailable" and "duplicates" in out2["reason"]
+    # artifact cutoff != manifest cutoff (wrong artifact behind the window)
+    tmp2 = tmp_path / "second"
+    man2 = _mk_manifest(tmp2)
+    art_p = tmp2 / "artifacts" / "w0" / "panel.json"
+    art = json.loads(art_p.read_text())
+    art["cutoff_date"] = "1999-01-01"
+    art_p.write_text(json.dumps(art))
+    out3 = LL.attempt_lineage_stamp(
+        artifact_usage={"eval_scope": "walkforward_manifest",
+                        "manifest_path": str(man2),
+                        "candidate_recipe_fingerprint": "x"},
+        strategy_dir=tmp2, label_horizon_bdays=60)
+    assert out3["lineage_lane"] == "unavailable" and "wrong artifact" in out3["reason"]
+
+
+def test_runner_attaches_the_lane_only_as_a_sibling_output_key():
+    """Review round 1 item 1, pinned at source level: the runner must NEVER write
+    into artifact_usage (which flows through the WF and sanity paths); the lane
+    block appears exclusively as its own key in the output assembly. A full
+    end-to-end byte-diff needs a gate-run harness tests do not have — this guard
+    plus the input-never-mutated unit test above are the enforceable halves."""
+    src = (Path(__file__).resolve().parent.parent /
+           "src/renquant_backtesting/wf_gate/runner.py").read_text()
+    assert 'artifact_usage["lineage_stage1"]' not in src
+    assert "artifact_usage = dict(artifact_usage)" not in src
+    assert '"lineage_stage1":      lineage_stage1' in src

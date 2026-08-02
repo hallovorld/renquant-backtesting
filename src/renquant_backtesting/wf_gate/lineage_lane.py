@@ -57,6 +57,15 @@ def build_gbdt_lineage_view(manifest_path: Path, strategy_dir: Path,
     retrains = man.get("retrains") or []
     if not retrains:
         raise ValueError("WF manifest has no retrains")
+    # STRUCTURAL integrity (review round 1): the ladder must be unique and
+    # chronologically ordered, and every artifact's SELF-CARRIED cutoff must
+    # equal its manifest retrain cutoff — a reordered ladder or a wrong
+    # artifact_uri must not acquire an admissible root.
+    cutoffs = [str(r.get("cutoff_date", ""))[:10] for r in retrains]
+    if len(set(cutoffs)) != len(cutoffs):
+        raise ValueError("WF manifest cutoff ladder has duplicates")
+    if cutoffs != sorted(cutoffs):
+        raise ValueError("WF manifest cutoff ladder is not chronologically ordered")
     folds = []
     shas = []
     for r in retrains:
@@ -66,8 +75,14 @@ def build_gbdt_lineage_view(manifest_path: Path, strategy_dir: Path,
         p = Path(strategy_dir) / str(rel)
         if not p.is_file():
             raise FileNotFoundError(f"window artifact missing: {p}")
+        manifest_cut = str(r.get("cutoff_date", ""))[:10]
+        art_cut = str(json.loads(p.read_text()).get("cutoff_date", ""))[:10]
+        if art_cut != manifest_cut:
+            raise ValueError(
+                f"artifact cutoff {art_cut!r} != manifest retrain cutoff "
+                f"{manifest_cut!r} at {rel} — wrong artifact behind this window")
         sha = _sha256_file(p)
-        folds.append({"cutoff_date": str(r.get("cutoff_date", ""))[:10],
+        folds.append({"cutoff_date": manifest_cut,
                       "artifact_path": str(p), "artifact_sha256": sha})
         shas.append(sha)
     return {
