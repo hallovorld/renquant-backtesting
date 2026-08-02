@@ -137,18 +137,32 @@ def test_GOLDEN_default_factory_reproduces_the_committed_corpus_end_to_end():
     admissibility (corpus grid) → default (recipe-transform) scoring → the pooled
     scores must reproduce the committed corpus < 1e-6 on a sampled window. Loud
     skip where the model checkout/panel are absent."""
+    import io
+    import subprocess
+    import tempfile
     import pytest
-    candidates = [Path(__file__).resolve().parents[2] / "renquant-model",
-                  Path(__file__).resolve().parents[2] / "renquant-model-wt-clfrebuild"]
-    bundle = next((c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
-                   for c in candidates
-                   if (c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
-                       / "clf_lineage_manifest.json").is_file()), None)
+    # Anchor to renquant-model origin/main (review round: a mutable sibling worktree
+    # can vanish and silently skip the regression guard for the #182 corruption).
+    model_repo = Path(__file__).resolve().parents[2] / "renquant-model"
+    BUNDLE_REF = "origin/main:doc/research/data/2026-08-01-clf-wf-lineage-bundle"
+    def _show(rel: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(model_repo), "show", f"{BUNDLE_REF}/{rel}"],
+            capture_output=True, check=True).stdout
     panel_path = Path("/Users/renhao/git/github/RenQuant/data/alpha158_291_fundamental_dataset.parquet")
-    if bundle is None or not panel_path.is_file():
-        pytest.skip("model bundle or panel absent on this machine")
-    man = bundle / "clf_lineage_manifest.json"
-    corpus = pd.read_parquet(bundle / "clf_wf_scores.parquet")
+    if not panel_path.is_file():
+        pytest.skip("panel absent on this machine (the ONLY permitted skip)")
+    # bundle bytes come from the STABLE ref — materialized to a temp dir so the
+    # engine under test reads exactly what model main carries.
+    tmp = Path(tempfile.mkdtemp(prefix="lineage_golden_"))
+    lin = json.loads(_show("clf_lineage_manifest.json").decode())
+    (tmp / "clf_lineage_manifest.json").write_bytes(_show("clf_lineage_manifest.json"))
+    for f in lin["folds"]:
+        d = tmp / Path(f["artifact_path"]).parent
+        d.mkdir(parents=True, exist_ok=True)
+        (tmp / f["artifact_path"]).write_bytes(_show(f["artifact_path"]))
+    man = tmp / "clf_lineage_manifest.json"
+    corpus = pd.read_parquet(io.BytesIO(_show("clf_wf_scores.parquet")))
     corpus["date"] = pd.to_datetime(corpus["date"])
     corpus["cutoff"] = pd.to_datetime(corpus["cutoff"])
     first = {str(c.date()): d for c, d in corpus.groupby("cutoff")["date"].min().items()}
