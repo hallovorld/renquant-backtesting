@@ -37,9 +37,34 @@ When `walkforward.enabled`, AFTER the existing recipe validation:
 3. Compute the SAME gate statistics the recipe path already computes — aligned real
    IC, shift-placebo family, `genuine_ic`, benchmark/regime splits — on the
    CANDIDATE's own scores. No new thresholds; the existing bars apply unchanged.
-4. Stamp `candidate_artifact_used = true`, `eval_scope = "candidate_scored"`, the
-   candidate's content sha256, and the per-window statistics alongside the existing
-   recipe block. The stamp binds evidence to the booster it describes.
+4. Stamp the verdict at the honest level of evidence (see the identity model below):
+   `candidate_lineage_used = true`, `eval_scope = "candidate_scored"`,
+   `lineage_root_sha`, and the per-window statistics alongside the existing recipe
+   block. **`candidate_artifact_used` remains `false` and its meaning is documented:
+   this gate never direct-scores the served booster** — a truthful stamp, not a gap.
+
+### Identity model (review round 2 — the admission subject, made explicit)
+
+* **The admission subject is an immutable candidate LINEAGE manifest**:
+  `lineage_root_sha = sha256(recipe_fingerprint + the ORDERED list of per-window
+  snapshot content shas)`. The lineage manifest is content-addressed and append-only;
+  any change to any window snapshot changes the root.
+* **The deployable terminal artifact must carry an immutable link to that lineage**
+  (a `lineage_root_sha` field stamped at train time, plus binding conditions the gate
+  verifies: recipe fingerprint match, `trained_date`/cutoff consistent with the
+  lineage's final window, content sha recorded in the stamp). An artifact without the
+  link is REFUSED binding — no lineage evidence transfers to it.
+* **What this does and does not solve, stated plainly:** two terminal boosters of the
+  same recipe validly bound to the same lineage receive the SAME lineage verdict —
+  they are indistinguishable AT THE LINEAGE LEVEL by construction, because the
+  evidence genuinely is lineage-level. An artifact-specific admission claim would
+  require direct causal scoring of that artifact over history, which for a
+  just-trained booster is impossible (its training saw that history). Artifact-level
+  differences are covered only by (i) the descriptive final-booster sweep (labelled,
+  no admission weight) and (ii) the serving-side identity pins
+  (`expected_content_sha256` in the lane configs). The original
+  same-recipe/two-artifact indistinguishability is therefore NARROWED to
+  lineage-equivalence and made visible in the stamp — not silently claimed solved.
 
 ### Causal admissibility contract (review round 1 — fail-closed, before any verdict)
 
@@ -108,10 +133,12 @@ Each stage transition is operator-authorized; nothing in this design self-promot
 
 ## Acceptance criteria
 
-1. A real weekly candidate stamped `candidate_artifact_used = true` with its own
-   `genuine_ic`, every contributing window carrying recorded causal provenance
+1. A real weekly candidate LINEAGE stamped `candidate_lineage_used = true` with its
+   own `genuine_ic`, every contributing window carrying recorded causal provenance
    (`effective_train_cutoff + label_horizon < first OOS date`, embargo margin
-   stamped) — the first artifact-bound gate evidence in the deployment's history.
+   stamped), and the terminal artifact carrying a verified `lineage_root_sha`
+   binding — the first lineage-bound gate evidence in the deployment's history.
+   No stamp anywhere claims direct served-booster evidence.
 1b. A deliberately cutoff-violating window is REFUSED with `admissibility: refused`
    in the stamp (the fail-closed path exercised, not asserted).
 2. Divergence reports exist for ≥ 2 consecutive weekly runs before any Stage-2 ask.
