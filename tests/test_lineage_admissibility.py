@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -116,30 +117,112 @@ def test_too_few_windows_refuses_even_when_all_admissible(tmp_path):
     assert out["lineage_verdict"] == "refused" and out["n_admissible"] == 1
 
 
-def test_the_real_clf_lineage_bundle_if_present_evaluates_admissible():
-    """Integration against the model repo's committed lineage (model#181). Skips
-    loudly when the sibling checkout/branch is absent — never a silent pass.
+GRID = Path(__file__).resolve().parent / "data" / "clf_lineage_window_grid.json"
 
-    REVIEW ROUND 1: the grid comes from the COMMITTED SCORE CORPUS (per-cutoff
-    first scored date) — an independent caller-owned source — never from the
-    artifacts' own declared windows, which would be self-attestation."""
+
+def test_the_real_43_window_lineage_is_admissible_ON_A_REPO_CONTAINED_GRID():
+    """The real-lineage result, checked by a test that ACTUALLY RUNS in CI.
+
+    REVIEW ROUND 2, and it is round 1's own finding one repo downstream. The round-1
+    integration test read the bundle from
+    `/Users/renhao/git/github/renquant-model-wt-clfrebuild/...` and skipped when absent.
+    That path is a transient WORKTREE: the test ran on exactly one machine, in a
+    directory that disappears when the worktree is removed, and skipped silently
+    everywhere else — while "43/43 admissible" was quoted as a result of this suite.
+    A skipped test underwriting a published number is the shape this programme has now
+    caught six times (`tests-that-measure-the-operators-disk`).
+
+    Cross-repo integration genuinely cannot be repo-contained here: `evaluate_lineage`
+    hashes 43 fold artifacts that live in renquant-model. So the responsibility splits,
+    and each half runs where its inputs are:
+
+      * renquant-model#181 owns DIGEST + ROOT verification — it has the artifacts, and
+        it now has an in-repo verifier that recomputes all 43 digests and the
+        `lineage_root_sha` from committed bytes;
+      * this repo owns the ADMISSIBILITY CONTRACT, which needs only the per-window
+        provenance and the caller grid — both committed here, both small.
+
+    The grid is still corpus-derived (per cutoff, `min(date)` over the committed score
+    corpus), so it remains the independent source round 1 asked for: no window is
+    judged against its own declared bounds.
+    """
+    g = json.loads(GRID.read_text())
+    assert g["schema"] == "clf-lineage-window-grid-v1"
+    assert g["n_windows"] == len(g["windows"]) == 43
+    refused = []
+    margins = []
+    for w in g["windows"]:
+        v = L.check_window(w, pd.Timestamp(w["first_oos_date_from_corpus"]),
+                           w["cutoff_embargo_days"])
+        if not v.admissible:
+            refused.append((w["cutoff_date"], v.reason))
+        else:
+            margins.append(v.embargo_margin_bdays)
+    assert refused == [], refused
+    assert len(margins) == 43 and min(margins) >= 1
+
+
+def test_the_grid_says_WHERE_IT_CAME_FROM():
+    """A snapshot without provenance is a number someone typed. The fixture carries the
+    source repo/PR, the bundle path, the `lineage_root_sha` and the score corpus's
+    sha256 — so a later reader can tell a changed bundle from a changed fixture, and the
+    live cross-check below has something to compare against."""
+    g = json.loads(GRID.read_text())
+    assert g["source_repo"] == "renquant-model" and g["source_pr"] == 181
+    assert re.fullmatch(r"[0-9a-f]{64}", g["lineage_root_sha"])
+    assert re.fullmatch(r"[0-9a-f]{64}", g["score_corpus_sha256"])
+    assert g["grid_derivation"] == "per cutoff, min(date) over clf_wf_scores.parquet"
+
+
+def test_the_grid_is_NOT_the_artifacts_own_windows():
+    """ANTI-VACUITY, and the whole point of round 1's finding.
+
+    The fixture records each artifact's self-declared `oos_window` alongside the
+    corpus-derived date precisely so this test can prove they are two different objects
+    that happen to agree. If the grid were silently re-derived from the declared windows
+    the suite would keep passing and the self-attestation would be back — so the
+    admissibility check above must be fed the corpus column, and the declared column
+    must never be read by it.
+    """
+    g = json.loads(GRID.read_text())
+    for w in g["windows"]:
+        assert "artifact_declared_oos_window" in w and "first_oos_date_from_corpus" in w
+    src = Path(__file__).read_text()
+    body = src[src.index("def test_the_real_43_window_lineage_is_admissible"):
+               src.index("def test_the_grid_says_WHERE_IT_CAME_FROM")]
+    assert "artifact_declared_oos_window" not in body, \
+        "the admissibility check is reading the artifacts' own windows again"
+
+
+def test_the_grid_matches_the_LIVE_bundle_when_this_machine_has_one():
+    """Drift guard, and the only test here allowed to skip.
+
+    A committed snapshot can go stale against the bundle it was cut from. Where the
+    model checkout exists, the fixture is re-derived and must match byte-for-byte. This
+    one may skip because it adds nothing to the result above — it only detects staleness
+    — which is the difference between a skip that costs coverage and a skip that costs
+    the claim.
+    """
     import pytest
-    bundle = Path("/Users/renhao/git/github/renquant-model-wt-clfrebuild/doc/research/"
-                  "data/2026-08-01-clf-wf-lineage-bundle")
-    man = bundle / "clf_lineage_manifest.json"
-    corpus_path = bundle / "clf_wf_scores.parquet"
-    if not (man.is_file() and corpus_path.is_file()):
-        pytest.skip("clf lineage bundle not present on this machine")
-    corpus = pd.read_parquet(corpus_path, columns=["cutoff", "date"])
+    candidates = [Path(__file__).resolve().parents[2] / "renquant-model",
+                  Path(__file__).resolve().parents[2] / "renquant-model-wt-clfrebuild"]
+    bundle = next((c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
+                   for c in candidates
+                   if (c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
+                       / "clf_wf_scores.parquet").is_file()), None)
+    if bundle is None:
+        pytest.skip("no renquant-model checkout carrying the bundle on this machine")
+    g = json.loads(GRID.read_text())
+    corpus = pd.read_parquet(bundle / "clf_wf_scores.parquet", columns=["cutoff", "date"])
     corpus["cutoff"] = pd.to_datetime(corpus["cutoff"])
     corpus["date"] = pd.to_datetime(corpus["date"])
-    first = {str(c.date()): d for c, d in corpus.groupby("cutoff")["date"].min().items()}
-    out = L.evaluate_lineage(man, recipe_id_key="recipe_src_sha256",
-                             label_horizon_bdays=60, first_oos_dates=first)
-    assert out["lineage_verdict"] == "admissible"
-    assert out["n_admissible"] == 43
-    margins = [w["embargo_margin_bdays"] for w in out["windows"]]
-    assert min(margins) >= 1
+    live = {str(c.date()): str(d.date())
+            for c, d in corpus.groupby("cutoff")["date"].min().items()}
+    snap = {w["cutoff_date"]: w["first_oos_date_from_corpus"] for w in g["windows"]}
+    assert snap == live, "the committed grid has drifted from the live corpus"
+    man = json.loads((bundle / "clf_lineage_manifest.json").read_text())
+    assert g["lineage_root_sha"] == man["lineage_root_sha"], \
+        "the grid was cut from a different lineage than the one now committed upstream"
 
 
 def test_caller_grid_governs_over_artifact_declared_windows(tmp_path):
