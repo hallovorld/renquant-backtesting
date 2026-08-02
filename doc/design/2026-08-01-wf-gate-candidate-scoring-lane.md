@@ -71,6 +71,22 @@ this design fixes WHOSE scores are evaluated, not the placebo geometry (the 07-3
 L = h erratum's scope is the corrected-eval bundle's block inference, not the gate's
 difference bar; any bar recalibration is its own reviewed change).
 
+## Feasibility, measured `[本次实测 2026-08-01]`
+
+The per-window lineage the admissibility contract requires ALREADY EXISTS for the
+prod gbdt recipe: `walkforward_manifest_gbdt_prod_recipe_v2.calibrated.json` carries
+**43 retrains, 0 failed cutoffs** (cutoffs 2023-10-02 → 2026-03-02, lookahead 60d),
+and **43/43 per-window artifacts plus 43/43 per-window calibrators exist on disk**
+(relative `artifact_uri`/`calibrator_uri` under the strategy dir). Every window
+artifact self-carries the exact contract fields: `feature_cols/means/stds`,
+`cutoff_date`, `cutoff_embargo_days: 60`, `effective_train_cutoff_date`. Stage 1 for
+the gbdt recipe therefore needs ZERO new training runs.
+
+The genuinely uncovered case is the **clf recipe**: its 43-fold corpus persisted
+SCORES but not fold artifacts (gate-visible recipe match 0/85), so clf admissibility
+requires one corpus rebuild WITH artifact persistence — bounded cost (the corpus
+recipe is committed and reproducible), scheduled below as the clf on-ramp.
+
 ## Rollout: dual-read, no OR-accept (the M6 §2c pattern)
 
 - **Stage 1 — shadow:** stamp BOTH verdicts (recipe-level and candidate-scored);
@@ -80,6 +96,10 @@ difference bar; any bar recalibration is its own reviewed change).
 - **Stage 2 — conjunction:** admission requires BOTH; the incumbent's standing
   override gains an EXPIRY in the same change, so incumbent and challengers face the
   same criteria (the orch#744 asymmetry closes here).
+- **Stage 1b — clf on-ramp:** rebuild the clf WF corpus once WITH per-fold artifact
+  persistence and register those snapshots in a gate-visible manifest; the clf recipe
+  then enters the same Stage-1 shadow on equal terms. Until then the lane simply has
+  no clf verdict to offer — a stamped absence, not a silent pass.
 - **Stage 3 — cutover:** candidate-scored becomes THE admission; the recipe check
   remains as an identity precondition (an artifact from a foreign recipe never gets
   scored at all). Never OR-acceptable, per the M6 lesson.
