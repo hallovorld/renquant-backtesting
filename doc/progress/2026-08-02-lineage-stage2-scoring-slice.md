@@ -1,8 +1,15 @@
-# Stage-2 scoring lane: seam-separated pooling over the 125-window lineage (#94 slice 4, UNWIRED)
+# Stage-2 scoring lane: seam-separated pooling over the 125-window lineage (#94 slice 4, UNWIRED)   (PR #100)
 
-2026-08-02 · `feat/lineage-stage2-scoring` · DRAFT PR — **not to be merged until the
-operator posts stage-2 sign-off on #94** (the sign-off request is the latest #94
-comment; nothing here self-promotes).
+STATUS:    in-progress — DRAFT held for the operator's stage-2 sign-off on #94; UNWIRED, must not merge until sign-off lands
+WHAT:      adds `src/renquant_backtesting/wf_gate/lineage_stage2.py` (`attempt_lineage_scoring_stamp`) — a never-raising entry point that scores the 125-window extension lineage (43 production + 82 run-001) via the #96 engine, pooled per input-vintage segment only (`pre_seam` / `post_seam`, no cross-seam statistic). `runner.py` is untouched — a source-guard test pins it free of any `lineage_stage2` reference.
+WHY/DIR:   prepares the module that the #94 stage-2 sign-off request's three points (read-alongside digest-verified / seam-separated pooling / admission byte-identical) govern; slice 4 of #94, after #95 (admissibility), #96 (engine), #99 (Stage-1 stamp). Advances the WF-gate lineage-extension thread under `doc/memory/mid-term/model-edge.md`.
+EVIDENCE:
+  artifact:      `tests/test_lineage_stage2.py` + full repo suite
+  prod or exp:   experiment — module is UNWIRED, no `runner.py` path reaches it, nothing touches production
+  existing data: targeted file `[VERIFIED — pytest -q tests/test_lineage_stage2.py, 2026-08-02]`: 18 passed, 0 skipped, 1.49s. Full suite `[VERIFIED — pytest -q, 2026-08-02]`: 594 passed, 1 skipped, 2 failed — both failures are the pre-existing `test_byte_equivalent_to_umbrella` pair (`tests/forensics/test_b1_lift.py`, `tests/reconciliation/test_import_lift.py`), confirmed unrelated: this commit (`60b8cdc..37718c8`) touches only the new module, its tests, and this progress doc.
+  best-known?:   n/a — new module, no prior variant to compare against
+  scope:         this is `tests/test_lineage_stage2.py`, experiment/UNWIRED, vs no existing baseline (first slice of its kind)
+NEXT:      operator posts "approved stage 2" (or amendments) on #94; only then does the wiring PR (the `runner.py` touch) land as its own reviewed change
 
 ## What this slice is
 
