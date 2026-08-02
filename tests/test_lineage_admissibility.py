@@ -117,7 +117,14 @@ def test_too_few_windows_refuses_even_when_all_admissible(tmp_path):
     assert out["lineage_verdict"] == "refused" and out["n_admissible"] == 1
 
 
-GRID = Path(__file__).resolve().parent / "data" / "clf_lineage_window_grid.json"
+# `tests/fixtures/`, NOT `tests/data/`: `.gitignore` line 12 is an unanchored `data/`,
+# which matches ANY directory of that name. My first push put the fixture there, `git
+# add -A` silently dropped it, the suite was green locally and CI failed with
+# FileNotFoundError -- the exact "runs on one machine only" defect this test exists to
+# end, committed by the test itself. The ignore rule is left alone: it is what keeps
+# production parquet out of the repo, and narrowing it to win an argument with a
+# fixture path would be the worse trade.
+GRID = Path(__file__).resolve().parent / "fixtures" / "clf_lineage_window_grid.json"
 
 
 def test_the_real_43_window_lineage_is_admissible_ON_A_REPO_CONTAINED_GRID():
