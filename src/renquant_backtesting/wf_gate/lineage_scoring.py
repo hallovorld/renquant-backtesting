@@ -34,12 +34,43 @@ ScorerFactory = Callable[[dict, Path], Callable[[pd.DataFrame], pd.Series]]
 
 
 def _default_scorer_factory(artifact: dict, artifact_path: Path):
-    """Load the window snapshot via the SAME single-sourced machinery the gate's
-    sanity path uses (PanelScorer + transform_feature_frame). Kept lazy so tests
-    with injected factories never import heavyweight dependencies."""
+    """The NORMATIVE lineage scorer: the RECIPE transform (renquant_model_gbdt's
+    panel_training_matrix + raw booster predict), which reproduces the committed
+    evidence corpus at < 1e-6 — measured 2026-08-01 on the repaired clf bundle,
+    fold 5's whole OOS window. The serving path (PanelScorer) diverges from the
+    same corpus by mean ~1.2e-2 on clf probabilities (±5 post-z clip + fill
+    policy; renquant-pipeline#248), so it is NOT the default here: the lineage
+    claim is 'this lineage produced THAT evidence', and the evidence was produced
+    by the recipe transform. Serving parity is a separate stamped diagnostic
+    (``serving_parity_scorer_factory``). Lazy imports keep injected-factory tests
+    dependency-free."""
+    import numpy as np  # noqa: PLC0415
+    import xgboost as xgb  # noqa: PLC0415
+    from renquant_model_gbdt.panel_trainer import panel_training_matrix  # noqa: PLC0415
+
+    feat_cols = list(artifact["feature_cols"])
+    mu = np.array([artifact["feature_means"][c] for c in feat_cols])
+    sd = np.array([artifact["feature_stds"][c] for c in feat_cols])
+    norm_kind = artifact["feature_norm_kind"]
+    booster = xgb.Booster()
+    booster.load_model(bytearray(artifact["booster_raw_json"].encode("utf-8")))
+
+    def _score(sub: pd.DataFrame) -> pd.Series:
+        frame = sub.reset_index()
+        X = panel_training_matrix(frame, feat_cols, mu, sd, norm_kind)
+        prob = booster.predict(xgb.DMatrix(X.values.astype(np.float64)))
+        return pd.Series(prob, index=sub.index, dtype=float)
+
+    return _score
+
+
+def serving_parity_scorer_factory(artifact: dict, artifact_path: Path):
+    """The SERVING path (PanelScorer → transform_feature_frame), for the stamped
+    parity diagnostic ONLY — measures the live serving skew vs the recipe
+    transform (renquant-pipeline#248); never feeds a lineage verdict."""
     from renquant_pipeline.kernel.panel_pipeline.panel_scorer import PanelScorer  # noqa: PLC0415
 
-    scorer = PanelScorer(artifact)
+    scorer = PanelScorer.load(artifact_path)
 
     def _score(sub: pd.DataFrame) -> pd.Series:
         return scorer.score(sub)
