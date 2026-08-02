@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -128,6 +129,11 @@ def _model_in_assembly() -> bool:
 
 @pytest.mark.skipif(not _model_in_assembly(),
                     reason="renquant-model not present in resolved subrepo assembly")
+@pytest.mark.skipif(importlib.util.find_spec("torch") is None,
+                    reason="torch unavailable — hf_trainer imports it at module "
+                           "level; the multi-repo CI env installs renquant-model "
+                           "for fold_scoring (torch-free) without the patchtst "
+                           "training stack")
 def test_subprocess_imports_model_pkg_against_pinned_assembly() -> None:
     """The subprocess env must let a fresh interpreter import BOTH model
     entrypoints from the pinned assembly (proves the invocation the driver
