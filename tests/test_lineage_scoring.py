@@ -48,7 +48,8 @@ def _panel(cutoffs: list[str]) -> pd.DataFrame:
 
 
 def _ok_factory(artifact, path):
-    return lambda sub: pd.Series(range(len(sub)), index=sub["ticker"], dtype=float)
+    # factory contract: sub is TICKER-INDEXED with feature columns
+    return lambda sub: pd.Series(range(len(sub)), index=sub.index, dtype=float)
 
 
 def test_scores_every_admissible_window_and_pools(tmp_path):
@@ -129,3 +130,49 @@ def test_summarize_lineage_scores_uses_only_caller_labels(tmp_path):
     # a date with NO caller label contributes nothing (never invented)
     summ2 = LS.summarize_lineage_scores(out["scores"], {})
     assert summ2["n_dates_with_labels"] == 0 and summ2["mean_ic"] is None
+
+
+def test_GOLDEN_default_factory_reproduces_the_committed_corpus_end_to_end():
+    """The whole slice-2 pipeline against the REAL repaired lineage (model#182):
+    admissibility (corpus grid) → default (recipe-transform) scoring → the pooled
+    scores must reproduce the committed corpus < 1e-6 on a sampled window. Loud
+    skip where the model checkout/panel are absent."""
+    import pytest
+    candidates = [Path(__file__).resolve().parents[2] / "renquant-model",
+                  Path(__file__).resolve().parents[2] / "renquant-model-wt-clfrebuild"]
+    bundle = next((c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
+                   for c in candidates
+                   if (c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
+                       / "clf_lineage_manifest.json").is_file()), None)
+    panel_path = Path("/Users/renhao/git/github/RenQuant/data/alpha158_291_fundamental_dataset.parquet")
+    if bundle is None or not panel_path.is_file():
+        pytest.skip("model bundle or panel absent on this machine")
+    man = bundle / "clf_lineage_manifest.json"
+    corpus = pd.read_parquet(bundle / "clf_wf_scores.parquet")
+    corpus["date"] = pd.to_datetime(corpus["date"])
+    corpus["cutoff"] = pd.to_datetime(corpus["cutoff"])
+    first = {str(c.date()): d for c, d in corpus.groupby("cutoff")["date"].min().items()}
+    adm = LA.evaluate_lineage(man, recipe_id_key="recipe_src_sha256",
+                              label_horizon_bdays=60, first_oos_dates=first)
+    assert adm["lineage_verdict"] == "admissible"
+    # one sampled window end-to-end through score_lineage with the DEFAULT factory
+    cut = "2024-04-08"
+    dates = sorted(corpus[corpus["cutoff"] == cut]["date"].unique())
+    panel = pd.read_parquet(panel_path)
+    panel["date"] = pd.to_datetime(panel["date"])
+    panel = panel[panel["date"].isin(dates)].set_index("ticker")
+    out = LS.score_lineage(
+        lineage_manifest=man,
+        admissibility={**adm, "windows": [w for w in adm["windows"]
+                                          if w["cutoff_date"] == cut]},
+        panel=panel.reset_index(),
+        oos_dates_by_cutoff={cut: list(dates)},
+        min_admissible_windows=1)
+    assert out["lineage_scoring_verdict"] == "scored"
+    got = out["scores"].set_index(["date", "ticker"])["score"]
+    exp_rows = corpus[corpus["cutoff"] == cut]
+    expect = exp_rows.set_index(["date", "ticker"])["cal"]
+    j = pd.DataFrame({"e": expect, "g": got}).dropna()
+    assert len(j) > 3000
+    max_d = float((j["e"] - j["g"]).abs().max())
+    assert max_d < 1e-6, f"default-factory lineage scoring diverges: {max_d}"

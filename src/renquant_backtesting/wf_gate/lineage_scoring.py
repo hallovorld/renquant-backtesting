@@ -123,6 +123,8 @@ def score_lineage(*, lineage_manifest: Path, admissibility: dict,
                 sub = by_date.get(pd.Timestamp(d))
                 if sub is None or sub.empty:
                     continue
+                # factory contract: a TICKER-INDEXED frame with feature columns
+                sub = sub.set_index("ticker")
                 s = score(sub)
                 frames.append(pd.DataFrame({
                     "date": pd.Timestamp(d), "ticker": s.index, "score": s.values,
