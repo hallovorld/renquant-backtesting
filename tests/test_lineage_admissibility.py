@@ -118,22 +118,46 @@ def test_too_few_windows_refuses_even_when_all_admissible(tmp_path):
 
 def test_the_real_clf_lineage_bundle_if_present_evaluates_admissible():
     """Integration against the model repo's committed lineage (model#181). Skips
-    loudly when the sibling checkout/branch is absent — never a silent pass."""
+    loudly when the sibling checkout/branch is absent — never a silent pass.
+
+    REVIEW ROUND 1: the grid comes from the COMMITTED SCORE CORPUS (per-cutoff
+    first scored date) — an independent caller-owned source — never from the
+    artifacts' own declared windows, which would be self-attestation."""
     import pytest
-    man = Path("/Users/renhao/git/github/renquant-model-wt-clfrebuild/doc/research/"
-               "data/2026-08-01-clf-wf-lineage-bundle/clf_lineage_manifest.json")
-    if not man.is_file():
+    bundle = Path("/Users/renhao/git/github/renquant-model-wt-clfrebuild/doc/research/"
+                  "data/2026-08-01-clf-wf-lineage-bundle")
+    man = bundle / "clf_lineage_manifest.json"
+    corpus_path = bundle / "clf_wf_scores.parquet"
+    if not (man.is_file() and corpus_path.is_file()):
         pytest.skip("clf lineage bundle not present on this machine")
-    lin = json.loads(man.read_text())
-    # first OOS date per window = the artifact's own recorded oos_window[0] — used
-    # here as the CALLER's grid (the runner will supply the corpus grid instead).
-    first = {}
-    for f in lin["folds"]:
-        art = json.loads((man.parent / f["artifact_path"]).read_text())
-        first[f["cutoff_date"]] = pd.Timestamp(art["oos_window"][0])
+    corpus = pd.read_parquet(corpus_path, columns=["cutoff", "date"])
+    corpus["cutoff"] = pd.to_datetime(corpus["cutoff"])
+    corpus["date"] = pd.to_datetime(corpus["date"])
+    first = {str(c.date()): d for c, d in corpus.groupby("cutoff")["date"].min().items()}
     out = L.evaluate_lineage(man, recipe_id_key="recipe_src_sha256",
                              label_horizon_bdays=60, first_oos_dates=first)
     assert out["lineage_verdict"] == "admissible"
     assert out["n_admissible"] == 43
     margins = [w["embargo_margin_bdays"] for w in out["windows"]]
     assert min(margins) >= 1
+
+
+def test_caller_grid_governs_over_artifact_declared_windows(tmp_path):
+    """Regression (review round 1): when the caller's grid and an artifact's own
+    declared window conflict, the CALLER'S date decides — an artifact whose
+    self-declared window would pass cannot rescue itself from a grid date that
+    violates the causal contract."""
+    win = _win("2024-06-03", "2024-03-01")
+    # the artifact ALSO self-declares a comfortable window (ignored by design)
+    win["oos_window"] = ["2024-06-04", "2024-06-24"]
+    man = _mk_lineage(tmp_path, [win])
+    # caller grid says this window's first OOS date is much EARLIER — a causal
+    # violation under etc=2024-03-01 + 60 BDays (~2024-05-24)
+    out = L.evaluate_lineage(
+        man, recipe_id_key="recipe_src_sha256", label_horizon_bdays=60,
+        first_oos_dates={"2024-06-03": pd.Timestamp("2024-04-01")},
+        min_admissible_windows=1)
+    by = out["windows"][0]
+    assert by["admissibility"] == "refused"
+    assert "causal violation" in by["reason"]
+    assert out["lineage_verdict"] == "refused"
