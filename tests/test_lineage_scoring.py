@@ -104,3 +104,28 @@ def test_inadmissible_windows_are_never_scored(tmp_path):
     assert calls == []                       # never loaded, never scored
     assert out["windows"][0]["scoring"] == "skipped_inadmissible"
     assert out["lineage_scoring_verdict"] == "refused"
+
+
+def test_summarize_lineage_scores_uses_only_caller_labels(tmp_path):
+    import numpy as np
+    cutoffs = ["2024-01-15"]
+    man, ctx = _bundle(tmp_path, cutoffs)
+    panel = _panel(cutoffs)
+    # widen the cross-section so the >= 20-name floor is satisfiable
+    rows = []
+    d = pd.Timestamp("2024-01-15") + pd.offsets.BDay(1)
+    for i in range(25):
+        rows.append({"date": d, "ticker": f"T{i:02d}", "f1": 1.0})
+    panel = pd.DataFrame(rows)
+    out = LS.score_lineage(lineage_manifest=man, admissibility=ctx["adm"],
+                           panel=panel, oos_dates_by_cutoff=ctx["grid"],
+                           min_admissible_windows=1,
+                           scorer_factory=_ok_factory)
+    labels = {d: pd.Series(np.arange(25, dtype=float),
+                           index=[f"T{i:02d}" for i in range(25)])}
+    summ = LS.summarize_lineage_scores(out["scores"], labels)
+    assert summ["n_dates_with_labels"] == 1
+    assert summ["mean_ic"] == 1.0            # monotone fake scorer vs monotone labels
+    # a date with NO caller label contributes nothing (never invented)
+    summ2 = LS.summarize_lineage_scores(out["scores"], {})
+    assert summ2["n_dates_with_labels"] == 0 and summ2["mean_ic"] is None

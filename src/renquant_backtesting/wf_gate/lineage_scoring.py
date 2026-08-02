@@ -125,3 +125,34 @@ def score_lineage(*, lineage_manifest: Path, admissibility: dict,
         "windows": windows_out,
         "scores": scores,
     }
+
+
+def summarize_lineage_scores(scores: pd.DataFrame,
+                             labels_by_date: dict) -> dict:
+    """Stamp-level descriptive summary of pooled lineage scores.
+
+    ``labels_by_date`` maps date -> ``pd.Series`` (label by ticker), supplied by
+    the CALLER (the gate's label contract) — never derived from the lineage.
+    Inference (bars, placebo, genuine_ic) belongs to the runner slice; this
+    summary records per-date rank ICs and coverage so the stamp is auditable
+    on its own.
+    """
+    from scipy import stats as _st
+    per_date = []
+    for d, g in scores.groupby("date"):
+        lab = labels_by_date.get(pd.Timestamp(d))
+        if lab is None:
+            continue
+        j = pd.DataFrame({"s": g.set_index("ticker")["score"], "y": lab}).dropna()
+        if len(j) < 20:
+            continue
+        per_date.append({"date": str(pd.Timestamp(d).date()),
+                         "ic": float(_st.spearmanr(j["s"], j["y"]).statistic),
+                         "n": int(len(j))})
+    ics = [r["ic"] for r in per_date]
+    return {
+        "n_dates_scored": int(scores["date"].nunique()) if len(scores) else 0,
+        "n_dates_with_labels": len(per_date),
+        "mean_ic": (float(np.mean(ics)) if ics else None),
+        "per_date": per_date,
+    }
