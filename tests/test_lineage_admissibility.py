@@ -175,7 +175,12 @@ def test_the_grid_says_WHERE_IT_CAME_FROM():
     sha256 — so a later reader can tell a changed bundle from a changed fixture, and the
     live cross-check below has something to compare against."""
     g = json.loads(GRID.read_text())
-    assert g["source_repo"] == "renquant-model" and g["source_pr"] == 181
+    # `source_pr` is asserted to EXIST, not to equal 181. Pinning the number made this
+    # go red on the #182 regeneration while nothing was wrong -- a proxy for the claim
+    # rather than the claim, and it adds no safety over `lineage_root_sha`, which the
+    # drift guard below checks against upstream directly.
+    assert g["source_repo"] == "renquant-model"
+    assert isinstance(g["source_pr"], int) and g["source_pr"] > 0
     assert re.fullmatch(r"[0-9a-f]{64}", g["lineage_root_sha"])
     assert re.fullmatch(r"[0-9a-f]{64}", g["score_corpus_sha256"])
     assert g["grid_derivation"] == "per cutoff, min(date) over clf_wf_scores.parquet"
@@ -201,35 +206,56 @@ def test_the_grid_is_NOT_the_artifacts_own_windows():
         "the admissibility check is reading the artifacts' own windows again"
 
 
-def test_the_grid_matches_the_LIVE_bundle_when_this_machine_has_one():
+def test_the_grid_matches_the_UPSTREAM_REF_when_this_machine_has_the_repo():
     """Drift guard, and the only test here allowed to skip.
 
-    A committed snapshot can go stale against the bundle it was cut from. Where the
-    model checkout exists, the fixture is re-derived and must match byte-for-byte. This
-    one may skip because it adds nothing to the result above — it only detects staleness
-    — which is the difference between a skip that costs coverage and a skip that costs
-    the claim.
+    A committed snapshot goes stale the moment upstream regenerates, and it did:
+    `renquant-model#182` found that all 43 fold artifacts had been persisted with
+    `feature_norm_kind` stringified, regenerated them, and moved
+    `lineage_root_sha` from `e9eefe8137…` to `1da510478e…`. This guard caught it, which
+    is the only reason the pin below is current.
+
+    READ FROM `origin/main`, NOT FROM THE WORKING TREE. The first version resolved the
+    bundle by looking for the file on disk, so what it compared against depended on which
+    branch a sibling checkout happened to be sitting on — it found the bundle in a
+    throwaway worktree during the incident and would have found nothing at all had that
+    worktree been removed. A guard whose subject changes with someone else's `git
+    checkout` is not measuring upstream; it is measuring the machine. `git show
+    origin/main:…` is branch-independent, which is what "upstream" has to mean here.
     """
+    import io
+    import subprocess
+
     import pytest
-    candidates = [Path(__file__).resolve().parents[2] / "renquant-model",
-                  Path(__file__).resolve().parents[2] / "renquant-model-wt-clfrebuild"]
-    bundle = next((c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
-                   for c in candidates
-                   if (c / "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
-                       / "clf_wf_scores.parquet").is_file()), None)
-    if bundle is None:
-        pytest.skip("no renquant-model checkout carrying the bundle on this machine")
+    repo = Path(__file__).resolve().parents[2] / "renquant-model"
+    if not (repo / ".git").exists():
+        pytest.skip("no renquant-model checkout on this machine")
+    sub = "doc/research/data/2026-08-01-clf-wf-lineage-bundle"
+
+    def _show(rel: str) -> bytes:
+        r = subprocess.run(["git", "-C", str(repo), "show", f"origin/main:{sub}/{rel}"],
+                           capture_output=True)
+        return r.stdout if r.returncode == 0 else b""
+
+    raw_corpus, raw_man = _show("clf_wf_scores.parquet"), _show("clf_lineage_manifest.json")
+    if not raw_corpus or not raw_man:
+        pytest.skip("renquant-model has no origin/main carrying the bundle (unfetched?)")
+
     g = json.loads(GRID.read_text())
-    corpus = pd.read_parquet(bundle / "clf_wf_scores.parquet", columns=["cutoff", "date"])
+    corpus = pd.read_parquet(io.BytesIO(raw_corpus), columns=["cutoff", "date"])
     corpus["cutoff"] = pd.to_datetime(corpus["cutoff"])
     corpus["date"] = pd.to_datetime(corpus["date"])
     live = {str(c.date()): str(d.date())
             for c, d in corpus.groupby("cutoff")["date"].min().items()}
     snap = {w["cutoff_date"]: w["first_oos_date_from_corpus"] for w in g["windows"]}
-    assert snap == live, "the committed grid has drifted from the live corpus"
-    man = json.loads((bundle / "clf_lineage_manifest.json").read_text())
-    assert g["lineage_root_sha"] == man["lineage_root_sha"], \
-        "the grid was cut from a different lineage than the one now committed upstream"
+    assert snap == live, "the committed grid has drifted from the upstream corpus"
+    man = json.loads(raw_man)
+    assert g["lineage_root_sha"] == man["lineage_root_sha"], (
+        "the grid was cut from a different lineage than upstream's current one: "
+        f"fixture {g['lineage_root_sha'][:12]}… vs origin/main {man['lineage_root_sha'][:12]}…")
+    assert {w["cutoff_date"]: w["artifact_sha256"] for w in g["windows"]} == \
+        {f["cutoff_date"]: f["artifact_sha256"] for f in man["folds"]}, \
+        "per-fold digests disagree with upstream even though the root matched"
 
 
 def test_caller_grid_governs_over_artifact_declared_windows(tmp_path):
