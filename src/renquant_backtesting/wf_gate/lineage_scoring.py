@@ -44,24 +44,12 @@ def _default_scorer_factory(artifact: dict, artifact_path: Path):
     by the recipe transform. Serving parity is a separate stamped diagnostic
     (``serving_parity_scorer_factory``). Lazy imports keep injected-factory tests
     dependency-free."""
-    import numpy as np  # noqa: PLC0415
-    import xgboost as xgb  # noqa: PLC0415
-    from renquant_model_gbdt.panel_trainer import panel_training_matrix  # noqa: PLC0415
+    # The PUBLIC pinned contract (model#183): the one supported external scoring
+    # API, fail-closed at load (incl. the stringified-norm_kind incident shape).
+    # No training-internal import remains here.
+    from renquant_model_gbdt.fold_scoring import load_fold_scorer  # noqa: PLC0415
 
-    feat_cols = list(artifact["feature_cols"])
-    mu = np.array([artifact["feature_means"][c] for c in feat_cols])
-    sd = np.array([artifact["feature_stds"][c] for c in feat_cols])
-    norm_kind = artifact["feature_norm_kind"]
-    booster = xgb.Booster()
-    booster.load_model(bytearray(artifact["booster_raw_json"].encode("utf-8")))
-
-    def _score(sub: pd.DataFrame) -> pd.Series:
-        frame = sub.reset_index()
-        X = panel_training_matrix(frame, feat_cols, mu, sd, norm_kind)
-        prob = booster.predict(xgb.DMatrix(X.values.astype(np.float64)))
-        return pd.Series(prob, index=sub.index, dtype=float)
-
-    return _score
+    return load_fold_scorer(artifact)
 
 
 def serving_parity_scorer_factory(artifact: dict, artifact_path: Path):

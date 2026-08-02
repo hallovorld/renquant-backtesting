@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 dependencies = [
   "renquant-common>=0.10,<1.0",  # market_calendar (campaign B5)
   "renquant-pipeline>=0.4,<0.5",
+  # the PUBLIC fold-scoring contract (model#183) consumed by the lineage lane;
+  # 0.2.0 is the version that ships renquant_model_gbdt.fold_scoring
+  "renquant-model>=0.2.0,<0.3",
 ]
 
 [tool.setuptools.packages.find]
@@ -23,5 +26,6 @@ pythonpath = [
   "../renquant-base-data/src",
   "../renquant-artifacts/src",
   "../renquant-pipeline/src",
+  "../renquant-model/src",
 ]
 testpaths = ["tests"]

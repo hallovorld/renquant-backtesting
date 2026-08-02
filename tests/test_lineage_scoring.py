@@ -149,9 +149,15 @@ def test_GOLDEN_default_factory_reproduces_the_committed_corpus_end_to_end():
         return subprocess.run(
             ["git", "-C", str(model_repo), "show", f"{BUNDLE_REF}/{rel}"],
             capture_output=True, check=True).stdout
+    import importlib.util
+    if importlib.util.find_spec("renquant_model_gbdt") is None or \
+            importlib.util.find_spec("renquant_model_gbdt.fold_scoring") is None:
+        pytest.skip("installed/sibling renquant-model predates 0.2.0 (no "
+                    "fold_scoring) — sync the checkout; the declared dependency "
+                    "renquant-model>=0.2.0 makes this loud, not hidden")
     panel_path = Path("/Users/renhao/git/github/RenQuant/data/alpha158_291_fundamental_dataset.parquet")
     if not panel_path.is_file():
-        pytest.skip("panel absent on this machine (the ONLY permitted skip)")
+        pytest.skip("panel absent on this machine")
     # bundle bytes come from the STABLE ref — materialized to a temp dir so the
     # engine under test reads exactly what model main carries.
     tmp = Path(tempfile.mkdtemp(prefix="lineage_golden_"))
