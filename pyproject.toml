@@ -13,7 +13,7 @@ dependencies = [
   "renquant-pipeline>=0.4,<0.5",
   # the PUBLIC fold-scoring contract (model#183) consumed by the lineage lane;
   # 0.2.0 is the version that ships renquant_model_gbdt.fold_scoring
-  "renquant-model>=0.2.0,<0.3",
+  "renquant-model[gbdt]>=0.2.0,<0.3",
 ]
 
 [tool.setuptools.packages.find]

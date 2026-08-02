@@ -226,3 +226,33 @@ def test_partial_scorer_output_is_a_stamped_scoring_error(tmp_path):
     w = out["windows"][0]
     assert w["scoring"] == "scoring_error" and "output index != input index" in w["scoring_reason"]
     assert out["lineage_scoring_verdict"] == "refused"
+
+
+def test_public_contract_loads_and_scores_WITHOUT_the_panel():
+    """Review round 4: verify the declared renquant-model[gbdt] dependency chain
+    (xgboost included) in CI, independently of the panel-gated golden. Loads a real
+    committed artifact from model origin/main and scores a synthetic ticker-indexed
+    frame — no external data anywhere."""
+    import importlib.util
+    import subprocess
+    import numpy as np
+    import pytest
+    if importlib.util.find_spec("renquant_model_gbdt.fold_scoring") is None:
+        pytest.skip("resolvable renquant-model predates 0.2.0 on this machine "
+                    "(sibling checkout stale — orch#747 item 6); CI checks out "
+                    "model main and RUNS this test")
+    from renquant_model_gbdt.fold_scoring import load_fold_scorer
+    model_repo = Path(__file__).resolve().parents[2] / "renquant-model"
+    raw = subprocess.run(
+        ["git", "-C", str(model_repo), "show",
+         "origin/main:doc/research/data/2026-08-01-clf-wf-lineage-bundle/"
+         "fold_artifacts/2024-01-15/panel-clf.top-decile.json"],
+        capture_output=True, check=True).stdout
+    art = json.loads(raw.decode())
+    score = load_fold_scorer(art)
+    frame = pd.DataFrame(np.zeros((6, len(art["feature_cols"]))),
+                         columns=art["feature_cols"],
+                         index=pd.Index([f"T{i}" for i in range(6)], name="ticker"))
+    s = score(frame)
+    assert list(s.index) == list(frame.index)
+    assert s.between(0, 1).all()
