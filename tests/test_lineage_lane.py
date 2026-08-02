@@ -168,3 +168,78 @@ def test_runner_attaches_the_lane_only_as_a_sibling_output_key():
     assert 'artifact_usage["lineage_stage1"]' not in src
     assert "artifact_usage = dict(artifact_usage)" not in src
     assert '"lineage_stage1":      lineage_stage1' in src
+
+
+# --- delta, second session ------------------------------------------------------------
+# The round-1 fix above is the concurrent session's and is the substantive work. Three
+# gaps, each of which lets a real regression through the tests as written.
+
+
+def test_the_AVAILABLE_path_also_leaves_artifact_usage_byte_identical(tmp_path):
+    """Anti-vacuity pair for `test_recipe_stamp_is_byte_unchanged_when_the_lane_is_
+    unavailable`, which exercises only a `manifest_path: None` early return.
+
+    Non-mutation on a path that returns before doing anything proves very little. The
+    AVAILABLE path is the one that reads the manifest, hashes nine artifacts and builds
+    a view — the only path with something to mutate — and it was untested.
+    """
+    man = _mk_manifest(tmp_path)
+    usage = {"eval_scope": "walkforward_manifest", "manifest_path": str(man),
+             "candidate_recipe_fingerprint": "x", "recipe_validated": True,
+             "manifest_rows_checked": 5}
+    before = json.dumps(usage, sort_keys=True)
+    block = LL.attempt_lineage_stamp(artifact_usage=usage, strategy_dir=tmp_path,
+                                     label_horizon_bdays=60)
+    assert block["lineage_lane"] == "stage1", block   # the path really did run
+    assert json.dumps(usage, sort_keys=True) == before
+    assert "lineage_stage1" not in usage
+
+
+def test_EVERY_unavailable_branch_leaves_it_byte_identical(tmp_path):
+    """...and the other three early returns, not just the one. Each is a separate
+    branch, and a future edit that starts annotating `artifact_usage` with a reason
+    would be caught by exactly one of them."""
+    cases = [
+        {"eval_scope": "static_artifact"},                       # wrong scope
+        {"eval_scope": "walkforward_manifest"},                  # no manifest_path
+        {"eval_scope": "walkforward_manifest",                   # no recipe identity
+         "manifest_path": str(tmp_path / "wf.json"),
+         "candidate_recipe_fingerprint": ""},
+        {"eval_scope": "walkforward_manifest",                   # manifest absent
+         "manifest_path": str(tmp_path / "absent.json"),
+         "candidate_recipe_fingerprint": "x"},
+    ]
+    for usage in cases:
+        before = json.dumps(usage, sort_keys=True)
+        block = LL.attempt_lineage_stamp(artifact_usage=usage, strategy_dir=tmp_path,
+                                         label_horizon_bdays=60)
+        assert block["lineage_lane"] == "unavailable", block
+        assert json.dumps(usage, sort_keys=True) == before, usage
+
+
+def test_the_runner_mutates_artifact_usage_by_NO_subscript_at_all():
+    """Strengthens the source guard above from a literal to the property.
+
+    `test_runner_attaches_the_lane_only_as_a_sibling_output_key` pins the exact string
+    `artifact_usage["lineage_stage1"]`. The claim is not "that one line is gone" — it is
+    "this dict is not written into". `artifact_usage["lineage_v2"] = ...`, or an alias
+    (`au = artifact_usage; au["x"] = ...`), passes the literal check and reintroduces the
+    defect verbatim. An AST walk asserts the property instead of one of its instances.
+    """
+    import ast
+    src = (Path(__file__).resolve().parent.parent
+           / "src/renquant_backtesting/wf_gate/runner.py").read_text()
+    offenders = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if (isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name)
+                        and tgt.value.id == "artifact_usage"):
+                    offenders.append(tgt.lineno)
+        # an alias is the same defect wearing another name
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) \
+                and node.value.id == "artifact_usage":
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    offenders.append(f"aliased to {tgt.id!r} at line {node.lineno}")
+    assert offenders == [], offenders
