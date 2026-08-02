@@ -3490,6 +3490,14 @@ def main():
 
     artifact_usage = inspect_artifact_usage(args.strategy_config, artifact_path)
     log.info("Artifact usage: %s", artifact_usage)
+    # Stage-1 lineage lane (#94 slice 3): a SEPARATE top-level sibling output.
+    # artifact_usage stays IMMUTABLE for every existing path — attempt_lineage_stamp
+    # NEVER raises, and any lane failure yields {"lineage_lane": "unavailable", ...}
+    # while the recipe path's stamps stay byte-identical (regression-tested).
+    from renquant_backtesting.wf_gate.lineage_lane import attempt_lineage_stamp
+    lineage_stage1 = attempt_lineage_stamp(
+        artifact_usage=artifact_usage, strategy_dir=STRATEGY_DIR,
+        label_horizon_bdays=60)
     cfg_path = STRATEGY_DIR / args.strategy_config
     gate_config = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     evaluate_wf_config_parity = _load_qp_helper("wf_config_parity").evaluate_wf_config_parity
@@ -3683,6 +3691,7 @@ def main():
         "candidate_recipe_fingerprint": artifact_usage.get("candidate_recipe_fingerprint"),
         "wf_eval_scope":       artifact_usage.get("eval_scope"),
         "artifact_usage":      artifact_usage,
+        "lineage_stage1":      lineage_stage1,
         "config_parity":       parity_result,
         "qp_contract":         (
             {
