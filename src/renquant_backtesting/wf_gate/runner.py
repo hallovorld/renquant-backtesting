@@ -3490,6 +3490,15 @@ def main():
 
     artifact_usage = inspect_artifact_usage(args.strategy_config, artifact_path)
     log.info("Artifact usage: %s", artifact_usage)
+    # Stage-1 lineage lane (#94 slice 3): a SIBLING stamp block, dual-read only.
+    # attempt_lineage_stamp NEVER raises — any lane failure stamps
+    # {"lineage_lane": "unavailable", ...} and the recipe path's stamps and
+    # admission are byte-unchanged in every case.
+    from renquant_backtesting.wf_gate.lineage_lane import attempt_lineage_stamp
+    artifact_usage = dict(artifact_usage)
+    artifact_usage["lineage_stage1"] = attempt_lineage_stamp(
+        artifact_usage=artifact_usage, strategy_dir=STRATEGY_DIR,
+        label_horizon_bdays=60)
     cfg_path = STRATEGY_DIR / args.strategy_config
     gate_config = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     evaluate_wf_config_parity = _load_qp_helper("wf_config_parity").evaluate_wf_config_parity
