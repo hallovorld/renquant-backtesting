@@ -1,6 +1,6 @@
 {
   "grid_derivation": "per cutoff, min(date) over clf_wf_scores.parquet",
-  "lineage_root_sha": "e9eefe813785ca719e0b7e1fc40ae96488dee42102a9e98eb6e3954db601606b",
+  "lineage_root_sha": "1da510478eda48cdaa6500b86c4f809b99470a9708f4acca7adb03470576bac3",
   "n_windows": 43,
   "recipe_src_sha256": "04cba8a424290acc8c7866df621bc3c8b8bc98a84777e5cec92bb2701e964e05",
   "schema": "clf-lineage-window-grid-v1",
@@ -10,477 +10,477 @@
   "source_repo": "renquant-model",
   "windows": [
     {
+      "cutoff_date": "2023-10-02",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-07-07",
+      "first_oos_date_from_corpus": "2023-10-03",
       "artifact_declared_oos_window": [
         "2023-10-03",
         "2023-10-23"
       ],
-      "artifact_sha256": "eb4924a3cc9b16bb6cfd9def280f3ab88f93f053f1a49b14f5a322418c240a2c",
-      "cutoff_date": "2023-10-02",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-07-07",
-      "first_oos_date_from_corpus": "2023-10-03"
+      "artifact_sha256": "835aecf8f1d1c6a9bff2b666852f1aa83cd2f5424573b54ba62bcbda689889f1"
     },
     {
+      "cutoff_date": "2023-10-23",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-07-28",
+      "first_oos_date_from_corpus": "2023-10-24",
       "artifact_declared_oos_window": [
         "2023-10-24",
         "2023-11-13"
       ],
-      "artifact_sha256": "ee6bb1db820964b65ffb493a6702778f1bbc88685bcf67f739c553d8ef40148b",
-      "cutoff_date": "2023-10-23",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-07-28",
-      "first_oos_date_from_corpus": "2023-10-24"
+      "artifact_sha256": "f88aab17e04be929f5832c44830b667700c7e74f3e3ec591af3fc415f98e905c"
     },
     {
+      "cutoff_date": "2023-11-13",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-08-18",
+      "first_oos_date_from_corpus": "2023-11-14",
       "artifact_declared_oos_window": [
         "2023-11-14",
         "2023-12-04"
       ],
-      "artifact_sha256": "34240cfe6a55d414fa1f8944ddddce0c92653c81f0ea07c3955fc3a7af50fde8",
-      "cutoff_date": "2023-11-13",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-08-18",
-      "first_oos_date_from_corpus": "2023-11-14"
+      "artifact_sha256": "c776646fc356eddf68b1a3578c0230f3822bbdb14c525afb0d663bfb5fcd5e94"
     },
     {
+      "cutoff_date": "2023-12-04",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-09-08",
+      "first_oos_date_from_corpus": "2023-12-05",
       "artifact_declared_oos_window": [
         "2023-12-05",
         "2023-12-22"
       ],
-      "artifact_sha256": "ddc3732e5dacf20e90fa853fbf4f0424d513e87d5922aa4c6ff684aa478503f2",
-      "cutoff_date": "2023-12-04",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-09-08",
-      "first_oos_date_from_corpus": "2023-12-05"
+      "artifact_sha256": "c42d76e44e51c227aa3e037367029621a38d41a62496f409e82cf47b64432e5a"
     },
     {
+      "cutoff_date": "2023-12-25",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-09-29",
+      "first_oos_date_from_corpus": "2023-12-26",
       "artifact_declared_oos_window": [
         "2023-12-26",
         "2024-01-12"
       ],
-      "artifact_sha256": "9261be8233b3afa38d6d82dfcf32bb7f5116fabcca2ecf865af791f2081c2247",
-      "cutoff_date": "2023-12-25",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-09-29",
-      "first_oos_date_from_corpus": "2023-12-26"
+      "artifact_sha256": "25da0b750fd482ba4b8b0f98bb9fe227c5979ec21ba645f130e0e4fd5078e917"
     },
     {
+      "cutoff_date": "2024-01-15",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-10-20",
+      "first_oos_date_from_corpus": "2024-01-16",
       "artifact_declared_oos_window": [
         "2024-01-16",
         "2024-02-05"
       ],
-      "artifact_sha256": "594e017c4ae0f45f8c3d49e00c50c335e30f3832138efd13adcc3bafd347acca",
-      "cutoff_date": "2024-01-15",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-10-20",
-      "first_oos_date_from_corpus": "2024-01-16"
+      "artifact_sha256": "168ddcfa6c31d9f2e21346724df6f6475e0f4e756c0c84dff78ceac1ca11d289"
     },
     {
+      "cutoff_date": "2024-02-05",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-11-10",
+      "first_oos_date_from_corpus": "2024-02-06",
       "artifact_declared_oos_window": [
         "2024-02-06",
         "2024-02-26"
       ],
-      "artifact_sha256": "8556adce1f500c1516884417169bbf96fd5914dd22777dbb52c868d5adacddaa",
-      "cutoff_date": "2024-02-05",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-11-10",
-      "first_oos_date_from_corpus": "2024-02-06"
+      "artifact_sha256": "768b72887b3f8e56b7a82ef782c25b457450d5ba2f7212056965c1e26c5dd493"
     },
     {
+      "cutoff_date": "2024-02-26",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-12-01",
+      "first_oos_date_from_corpus": "2024-02-27",
       "artifact_declared_oos_window": [
         "2024-02-27",
         "2024-03-18"
       ],
-      "artifact_sha256": "7e872efdb25d5872923f6d6353787cb974f4866fc65c1bd19b5f35f684645bb9",
-      "cutoff_date": "2024-02-26",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-12-01",
-      "first_oos_date_from_corpus": "2024-02-27"
+      "artifact_sha256": "ce34aee0bfc9f3b65c9446abe6e8959cc4d274e138851e8cadfeaf277b3e84e6"
     },
     {
+      "cutoff_date": "2024-03-18",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2023-12-22",
+      "first_oos_date_from_corpus": "2024-03-19",
       "artifact_declared_oos_window": [
         "2024-03-19",
         "2024-04-08"
       ],
-      "artifact_sha256": "8f4962cb7911975cd05efe0d598d28ba6f3980ca195c55f40f2a8a0959da006c",
-      "cutoff_date": "2024-03-18",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2023-12-22",
-      "first_oos_date_from_corpus": "2024-03-19"
+      "artifact_sha256": "aa1107c9f529127df304a662b9ef00a30c761bf697315364bde1650a4e21bea2"
     },
     {
+      "cutoff_date": "2024-04-08",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-01-12",
+      "first_oos_date_from_corpus": "2024-04-09",
       "artifact_declared_oos_window": [
         "2024-04-09",
         "2024-04-29"
       ],
-      "artifact_sha256": "80d304b64164291a6b753bec892e47cf96f61b58ef9cbcb16c268344f7a54796",
-      "cutoff_date": "2024-04-08",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-01-12",
-      "first_oos_date_from_corpus": "2024-04-09"
+      "artifact_sha256": "2f36b6b76fa8d4dffd135206c7249e4ba8db44a3bcb39fd02ebf3a662626aa93"
     },
     {
+      "cutoff_date": "2024-04-29",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-02-02",
+      "first_oos_date_from_corpus": "2024-04-30",
       "artifact_declared_oos_window": [
         "2024-04-30",
         "2024-05-20"
       ],
-      "artifact_sha256": "f7f23ed8b1e7b5ba9ecb1779a35af5e62685f5d095bb2b38752789500e147ee8",
-      "cutoff_date": "2024-04-29",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-02-02",
-      "first_oos_date_from_corpus": "2024-04-30"
+      "artifact_sha256": "5876e27723a4e58c5c5f6d3de27db30e2ab7127d6f08ea76380540db48a20495"
     },
     {
+      "cutoff_date": "2024-05-20",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-02-23",
+      "first_oos_date_from_corpus": "2024-05-21",
       "artifact_declared_oos_window": [
         "2024-05-21",
         "2024-06-10"
       ],
-      "artifact_sha256": "c4765934efe01c07c5c9ac46b19dbdc4d4d015d9e6b02ea5e9c9d1538e7cec9b",
-      "cutoff_date": "2024-05-20",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-02-23",
-      "first_oos_date_from_corpus": "2024-05-21"
+      "artifact_sha256": "6a9a9cf68a1bde0c64659e89004c977571fa5e61ecbeb97828c749d0a050030c"
     },
     {
+      "cutoff_date": "2024-06-10",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-03-15",
+      "first_oos_date_from_corpus": "2024-06-11",
       "artifact_declared_oos_window": [
         "2024-06-11",
         "2024-07-01"
       ],
-      "artifact_sha256": "46e995eafdd1e64d9e4c273462535c318e96e282ea9623d18bb0472c487d117c",
-      "cutoff_date": "2024-06-10",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-03-15",
-      "first_oos_date_from_corpus": "2024-06-11"
+      "artifact_sha256": "21a0adc23223bd3e628c338b40cfdad1138ef1469292e348596204b5fee17ffb"
     },
     {
+      "cutoff_date": "2024-07-01",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-04-05",
+      "first_oos_date_from_corpus": "2024-07-02",
       "artifact_declared_oos_window": [
         "2024-07-02",
         "2024-07-22"
       ],
-      "artifact_sha256": "b5036f6bc8fe86203307a6978400b05fcea9b79ad54d29b7273bd9aba9a43b92",
-      "cutoff_date": "2024-07-01",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-04-05",
-      "first_oos_date_from_corpus": "2024-07-02"
+      "artifact_sha256": "42dd7145bb518fe53660d2dac8e8056430fb4808af410c2f3a9a311423bab4f5"
     },
     {
+      "cutoff_date": "2024-07-22",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-04-26",
+      "first_oos_date_from_corpus": "2024-07-23",
       "artifact_declared_oos_window": [
         "2024-07-23",
         "2024-08-12"
       ],
-      "artifact_sha256": "fc520efeb24dcf6f1852917acb34a03c4c9cb2ab77855d172a09c8c1a2f5dc7f",
-      "cutoff_date": "2024-07-22",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-04-26",
-      "first_oos_date_from_corpus": "2024-07-23"
+      "artifact_sha256": "edab7fc408e59af48793abaabcc7f52d4330acc076ad9c6e3ba95503dbb205c8"
     },
     {
+      "cutoff_date": "2024-08-12",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-05-17",
+      "first_oos_date_from_corpus": "2024-08-13",
       "artifact_declared_oos_window": [
         "2024-08-13",
         "2024-08-30"
       ],
-      "artifact_sha256": "83968baaa8df838f564ed8184d89b1c1dbffd9f34a3504292bc752c1f8cb684d",
-      "cutoff_date": "2024-08-12",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-05-17",
-      "first_oos_date_from_corpus": "2024-08-13"
+      "artifact_sha256": "f27732cfd7f2bc361dced3404755688ada96fc6758e2f3dc746cbeb4ec8570d6"
     },
     {
+      "cutoff_date": "2024-09-02",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-06-07",
+      "first_oos_date_from_corpus": "2024-09-03",
       "artifact_declared_oos_window": [
         "2024-09-03",
         "2024-09-23"
       ],
-      "artifact_sha256": "e49a9e469767c1d879bc9492b49f574f2ca5696bb1b1e7cd5e184f3408fc5d50",
-      "cutoff_date": "2024-09-02",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-06-07",
-      "first_oos_date_from_corpus": "2024-09-03"
+      "artifact_sha256": "bbae92e11dcdf494ce5dadb9a79964bd71611c7517cfe46dc3af24164e60767a"
     },
     {
+      "cutoff_date": "2024-09-23",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-06-28",
+      "first_oos_date_from_corpus": "2024-09-24",
       "artifact_declared_oos_window": [
         "2024-09-24",
         "2024-10-14"
       ],
-      "artifact_sha256": "a0f4497f1eb1245fcdd6e837c501096fd1635a7c8dd37aa5f1263bca10d733b8",
-      "cutoff_date": "2024-09-23",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-06-28",
-      "first_oos_date_from_corpus": "2024-09-24"
+      "artifact_sha256": "55bb992a4411741d30ab2d482157b2d2db433af40236aa3da95527fd1a0a7f48"
     },
     {
+      "cutoff_date": "2024-10-14",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-07-19",
+      "first_oos_date_from_corpus": "2024-10-15",
       "artifact_declared_oos_window": [
         "2024-10-15",
         "2024-11-04"
       ],
-      "artifact_sha256": "3d17d3fdddf7b81465db5b119356270f33527ddf50de096e0605337c55f56a73",
-      "cutoff_date": "2024-10-14",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-07-19",
-      "first_oos_date_from_corpus": "2024-10-15"
+      "artifact_sha256": "383a7fad2ef33e4d269b2bb2199edc631b1119d6d2e70d009555141d8f901f91"
     },
     {
+      "cutoff_date": "2024-11-04",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-08-09",
+      "first_oos_date_from_corpus": "2024-11-05",
       "artifact_declared_oos_window": [
         "2024-11-05",
         "2024-11-25"
       ],
-      "artifact_sha256": "f3d73a54bfcfabc5e80cef39e8c22c78385a32ca7c77314bbd6539f2dc66500f",
-      "cutoff_date": "2024-11-04",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-08-09",
-      "first_oos_date_from_corpus": "2024-11-05"
+      "artifact_sha256": "c12ac321fe62ddca272b8233b23db010c61c5b3085d2f842cea1565b857cd4bb"
     },
     {
+      "cutoff_date": "2024-11-25",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-08-30",
+      "first_oos_date_from_corpus": "2024-11-26",
       "artifact_declared_oos_window": [
         "2024-11-26",
         "2024-12-16"
       ],
-      "artifact_sha256": "0487f78f930c05dff7a634f5d6e7924e3cadc7d7e36000e262a648e94824634f",
-      "cutoff_date": "2024-11-25",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-08-30",
-      "first_oos_date_from_corpus": "2024-11-26"
+      "artifact_sha256": "59398744f44e68bc298603ecb482e80d3546d8f4beca78f9f4865cc371d647cb"
     },
     {
+      "cutoff_date": "2024-12-16",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-09-20",
+      "first_oos_date_from_corpus": "2024-12-17",
       "artifact_declared_oos_window": [
         "2024-12-17",
         "2025-01-06"
       ],
-      "artifact_sha256": "b80a47fdf8b1379a13d4ef794bc5ef8709b2e1991dd56d6fa7b78d14069c58ef",
-      "cutoff_date": "2024-12-16",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-09-20",
-      "first_oos_date_from_corpus": "2024-12-17"
+      "artifact_sha256": "c079c8b6fac4ec0b3e0787a9b45b662db66b8f7e44b17776edb163c43d8458d9"
     },
     {
+      "cutoff_date": "2025-01-06",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-10-11",
+      "first_oos_date_from_corpus": "2025-01-07",
       "artifact_declared_oos_window": [
         "2025-01-07",
         "2025-01-27"
       ],
-      "artifact_sha256": "ca86f1694a20b84d92b5feaad276d4f9a41e3f43deb55cce3d332e0c56afdba7",
-      "cutoff_date": "2025-01-06",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-10-11",
-      "first_oos_date_from_corpus": "2025-01-07"
+      "artifact_sha256": "63c80838a44df8a30bc4ac8c5a6dfaf248ea861b7b42d201a0235f0a6cb88d6d"
     },
     {
+      "cutoff_date": "2025-01-27",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-11-01",
+      "first_oos_date_from_corpus": "2025-01-28",
       "artifact_declared_oos_window": [
         "2025-01-28",
         "2025-02-14"
       ],
-      "artifact_sha256": "175efeebd7a8193256938c8cbc10a1405da3b374179edd5d0137f3626196c1c1",
-      "cutoff_date": "2025-01-27",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-11-01",
-      "first_oos_date_from_corpus": "2025-01-28"
+      "artifact_sha256": "c605b91fa50a2995747bb33c88efe2b445aae011f591a1bd4179aca84d55fede"
     },
     {
+      "cutoff_date": "2025-02-17",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-11-22",
+      "first_oos_date_from_corpus": "2025-02-18",
       "artifact_declared_oos_window": [
         "2025-02-18",
         "2025-03-10"
       ],
-      "artifact_sha256": "01c0dceb1901641e2de0b25bc856f657b3ee2acbee00075415fc244abd5f4441",
-      "cutoff_date": "2025-02-17",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-11-22",
-      "first_oos_date_from_corpus": "2025-02-18"
+      "artifact_sha256": "fddc0f7e0638398a53131f7d0503581fdc457aeb1e1dd50dc757c504da42508c"
     },
     {
+      "cutoff_date": "2025-03-10",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2024-12-13",
+      "first_oos_date_from_corpus": "2025-03-11",
       "artifact_declared_oos_window": [
         "2025-03-11",
         "2025-03-31"
       ],
-      "artifact_sha256": "4ef908a146e6a1c5b88c565398df461d7a177a15c5311eeb27f7eec49ce62608",
-      "cutoff_date": "2025-03-10",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2024-12-13",
-      "first_oos_date_from_corpus": "2025-03-11"
+      "artifact_sha256": "cb283b16958b7ce3f2e24146cfe152467a4aa9f8a2a7cbd1b262624c7b9234c9"
     },
     {
+      "cutoff_date": "2025-03-31",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-01-03",
+      "first_oos_date_from_corpus": "2025-04-01",
       "artifact_declared_oos_window": [
         "2025-04-01",
         "2025-04-21"
       ],
-      "artifact_sha256": "8d939cee7d1fa04c18bc8b60a63383049326662315dfdfc85ffe9631426364e9",
-      "cutoff_date": "2025-03-31",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-01-03",
-      "first_oos_date_from_corpus": "2025-04-01"
+      "artifact_sha256": "2b66e930e4e00ded4f04a22d338b22e5063c2b1297e7de7cd5280331fe5f7dda"
     },
     {
+      "cutoff_date": "2025-04-21",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-01-24",
+      "first_oos_date_from_corpus": "2025-04-22",
       "artifact_declared_oos_window": [
         "2025-04-22",
         "2025-05-12"
       ],
-      "artifact_sha256": "10e0117556dce74474c650d071cf0900885c918653e38fe0e1734f69162e92cf",
-      "cutoff_date": "2025-04-21",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-01-24",
-      "first_oos_date_from_corpus": "2025-04-22"
+      "artifact_sha256": "140cba57b129f13408c42588d32808b916aa536b6303f1157648395b77bcaab6"
     },
     {
+      "cutoff_date": "2025-05-12",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-02-14",
+      "first_oos_date_from_corpus": "2025-05-13",
       "artifact_declared_oos_window": [
         "2025-05-13",
         "2025-06-02"
       ],
-      "artifact_sha256": "064af66cf2e3d29d1aa4f55f1ae8b984f91738d1475595a17ac0b647af787562",
-      "cutoff_date": "2025-05-12",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-02-14",
-      "first_oos_date_from_corpus": "2025-05-13"
+      "artifact_sha256": "fdac10f11c732007004f0cccaa0ca59880ff743739d3015fe1e0a23eb32670b2"
     },
     {
+      "cutoff_date": "2025-06-02",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-03-07",
+      "first_oos_date_from_corpus": "2025-06-03",
       "artifact_declared_oos_window": [
         "2025-06-03",
         "2025-06-23"
       ],
-      "artifact_sha256": "913becb64f5f469b6876a6606ad3a3d6f49d2f80cdded0b8a9a6c8383c50dfe7",
-      "cutoff_date": "2025-06-02",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-03-07",
-      "first_oos_date_from_corpus": "2025-06-03"
+      "artifact_sha256": "d78ef4ecafd4e354c19a9fba9c6ee4c871f7f199a8d988ad4a849fc06e9fd0ff"
     },
     {
+      "cutoff_date": "2025-06-23",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-03-28",
+      "first_oos_date_from_corpus": "2025-06-24",
       "artifact_declared_oos_window": [
         "2025-06-24",
         "2025-07-14"
       ],
-      "artifact_sha256": "aceaf8d663c2d051aeb3df75c47795ccd5b407ee4f1f0e1333002dc0be2397ad",
-      "cutoff_date": "2025-06-23",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-03-28",
-      "first_oos_date_from_corpus": "2025-06-24"
+      "artifact_sha256": "9dfdcf86a3030fda2864999d104af667859c35dd222cbc7d3d19e4939b6500b8"
     },
     {
+      "cutoff_date": "2025-07-14",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-04-17",
+      "first_oos_date_from_corpus": "2025-07-15",
       "artifact_declared_oos_window": [
         "2025-07-15",
         "2025-08-04"
       ],
-      "artifact_sha256": "0ce6e7796c64547aacf627a80f7a6f4923fa8a2f4d998a76bd9c35d15e3c2436",
-      "cutoff_date": "2025-07-14",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-04-17",
-      "first_oos_date_from_corpus": "2025-07-15"
+      "artifact_sha256": "4e7c75b86fe4f8083e12084b2a42381abd3758563c9e8d88f1ea4d5fb0f9b143"
     },
     {
+      "cutoff_date": "2025-08-04",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-05-09",
+      "first_oos_date_from_corpus": "2025-08-05",
       "artifact_declared_oos_window": [
         "2025-08-05",
         "2025-08-25"
       ],
-      "artifact_sha256": "1c0a33c4255e207dc641f436ae87cd46b15bbbf38d32cef0eda00768868c70c8",
-      "cutoff_date": "2025-08-04",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-05-09",
-      "first_oos_date_from_corpus": "2025-08-05"
+      "artifact_sha256": "df576e551d7aa4fef5210f5c46a36129383110107be2f8f227bec6432dfd2301"
     },
     {
+      "cutoff_date": "2025-08-25",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-05-30",
+      "first_oos_date_from_corpus": "2025-08-26",
       "artifact_declared_oos_window": [
         "2025-08-26",
         "2025-09-15"
       ],
-      "artifact_sha256": "06bdedc706a1fa7d250ec910fcfe0ae6e2140164396a7edd5a69441b99be9f14",
-      "cutoff_date": "2025-08-25",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-05-30",
-      "first_oos_date_from_corpus": "2025-08-26"
+      "artifact_sha256": "0581232e9e7ddfdcb3ecda15a0baead9d166f78ddd1327ed90b44985790cd473"
     },
     {
+      "cutoff_date": "2025-09-15",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-06-20",
+      "first_oos_date_from_corpus": "2025-09-16",
       "artifact_declared_oos_window": [
         "2025-09-16",
         "2025-10-06"
       ],
-      "artifact_sha256": "9b380e570d7cfa4d89e830aa6c92422f4c8b061830acde095f900240854a95d1",
-      "cutoff_date": "2025-09-15",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-06-20",
-      "first_oos_date_from_corpus": "2025-09-16"
+      "artifact_sha256": "c253c338b60d792987bf5c250b659ce1def38b2b3037060c27fdb4298d71aac5"
     },
     {
+      "cutoff_date": "2025-10-06",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-07-11",
+      "first_oos_date_from_corpus": "2025-10-07",
       "artifact_declared_oos_window": [
         "2025-10-07",
         "2025-10-27"
       ],
-      "artifact_sha256": "797a8a10022d4d427394b276455613b8dedb3eaa9e9c8ad7ea7cae8ce5220046",
-      "cutoff_date": "2025-10-06",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-07-11",
-      "first_oos_date_from_corpus": "2025-10-07"
+      "artifact_sha256": "ec8d70f4e49a609e01b1df552d454d835a11ad65cfdac8fa15254b90955b3089"
     },
     {
+      "cutoff_date": "2025-10-27",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-08-01",
+      "first_oos_date_from_corpus": "2025-10-28",
       "artifact_declared_oos_window": [
         "2025-10-28",
         "2025-11-17"
       ],
-      "artifact_sha256": "467ece29cc06459ff0f1b6fa0a93280b64466571c58097d74d645e17ddab8acb",
-      "cutoff_date": "2025-10-27",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-08-01",
-      "first_oos_date_from_corpus": "2025-10-28"
+      "artifact_sha256": "b5921315faf940c152ad32817c364cc2097ffd22391ae75824d5e8882cef7399"
     },
     {
+      "cutoff_date": "2025-11-17",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-08-22",
+      "first_oos_date_from_corpus": "2025-11-18",
       "artifact_declared_oos_window": [
         "2025-11-18",
         "2025-12-08"
       ],
-      "artifact_sha256": "5a4a810e74f8463deebd700a6ad9b4a1fa36a6d7fb23ea8041fdba40982275ad",
-      "cutoff_date": "2025-11-17",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-08-22",
-      "first_oos_date_from_corpus": "2025-11-18"
+      "artifact_sha256": "6b701302f2260206afc287084cd35e46e88825745591f9fee8f7a8fa1578e517"
     },
     {
+      "cutoff_date": "2025-12-08",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-09-12",
+      "first_oos_date_from_corpus": "2025-12-09",
       "artifact_declared_oos_window": [
         "2025-12-09",
         "2025-12-29"
       ],
-      "artifact_sha256": "e8131c546d1cd0531ba4d8f5597b2d69444d51ab4244eef6d755d262f41cd48c",
-      "cutoff_date": "2025-12-08",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-09-12",
-      "first_oos_date_from_corpus": "2025-12-09"
+      "artifact_sha256": "1f70de745a17ca1f51b206c661342593ac7aad93d15ad0d6465d35dd3d4a7718"
     },
     {
+      "cutoff_date": "2025-12-29",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-10-03",
+      "first_oos_date_from_corpus": "2025-12-30",
       "artifact_declared_oos_window": [
         "2025-12-30",
         "2026-01-16"
       ],
-      "artifact_sha256": "c087656b02489ffae75957b8e911b31314e268a7efac5510cccb8f0e568bc6b8",
-      "cutoff_date": "2025-12-29",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-10-03",
-      "first_oos_date_from_corpus": "2025-12-30"
+      "artifact_sha256": "4efddd671b5c0659cdec248d1d47ee56c27e154c9d13193de5e6393abf780d15"
     },
     {
+      "cutoff_date": "2026-01-19",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-10-24",
+      "first_oos_date_from_corpus": "2026-01-20",
       "artifact_declared_oos_window": [
         "2026-01-20",
         "2026-02-09"
       ],
-      "artifact_sha256": "a41939f3155cb5dfd342a01320f783be915f4daeacdfab449a92d68232fe7cdc",
-      "cutoff_date": "2026-01-19",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-10-24",
-      "first_oos_date_from_corpus": "2026-01-20"
+      "artifact_sha256": "79396192be702961da9f0649b32390e401ec6ca7cc337f27a9e6f3ce4581d520"
     },
     {
+      "cutoff_date": "2026-02-09",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-11-14",
+      "first_oos_date_from_corpus": "2026-02-10",
       "artifact_declared_oos_window": [
         "2026-02-10",
         "2026-03-02"
       ],
-      "artifact_sha256": "7e8281236df83318aca0b1815e25114689abb6639175159ecb8e9722e04c186a",
-      "cutoff_date": "2026-02-09",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-11-14",
-      "first_oos_date_from_corpus": "2026-02-10"
+      "artifact_sha256": "981a594eabffb35c446daed88032e159ee288b22201456d0306b1b7e2471bfc7"
     },
     {
+      "cutoff_date": "2026-03-02",
+      "cutoff_embargo_days": 60,
+      "effective_train_cutoff_date": "2025-12-05",
+      "first_oos_date_from_corpus": "2026-03-03",
       "artifact_declared_oos_window": [
         "2026-03-03",
         "2026-03-31"
       ],
-      "artifact_sha256": "313a783b5adf8b91151a97ea1b9cf03bd8dc2e1948567aed1f76d11d42a605cc",
-      "cutoff_date": "2026-03-02",
-      "cutoff_embargo_days": 60,
-      "effective_train_cutoff_date": "2025-12-05",
-      "first_oos_date_from_corpus": "2026-03-03"
+      "artifact_sha256": "20ea181723d235304cea3b7e823cd0c8d28a77c772685b1b0b4ad45ea55c5938"
     }
   ]
 }
