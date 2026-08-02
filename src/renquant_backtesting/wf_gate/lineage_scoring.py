@@ -122,10 +122,19 @@ def score_lineage(*, lineage_manifest: Path, admissibility: dict,
             for d in dates:
                 sub = by_date.get(pd.Timestamp(d))
                 if sub is None or sub.empty:
-                    continue
+                    # a REQUESTED grid date with no panel rows is missing data,
+                    # never a silent skip (review round 2)
+                    raise ValueError(f"caller-grid date {pd.Timestamp(d).date()} "
+                                     "has no panel rows")
                 # factory contract: a TICKER-INDEXED frame with feature columns
                 sub = sub.set_index("ticker")
                 s = score(sub)
+                if not s.index.equals(sub.index):
+                    # partial or reordered scorer output silently narrows the
+                    # evidence — refuse (review round 2)
+                    raise ValueError(
+                        f"scorer output index != input index on "
+                        f"{pd.Timestamp(d).date()}: {len(s)} vs {len(sub)} rows")
                 frames.append(pd.DataFrame({
                     "date": pd.Timestamp(d), "ticker": s.index, "score": s.values,
                     "cutoff_date": cutoff}))

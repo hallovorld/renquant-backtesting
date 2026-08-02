@@ -190,3 +190,33 @@ def test_GOLDEN_default_factory_reproduces_the_committed_corpus_end_to_end():
     assert len(j) > 3000
     max_d = float((j["e"] - j["g"]).abs().max())
     assert max_d < 1e-6, f"default-factory lineage scoring diverges: {max_d}"
+
+
+def test_griddate_without_panel_rows_is_a_stamped_scoring_error(tmp_path):
+    """Review round 2: a requested date with no rows must refuse, never skip."""
+    cutoffs = ["2024-01-15"]
+    man, ctx = _bundle(tmp_path, cutoffs)
+    grid = {"2024-01-15": [pd.Timestamp("2024-01-16"), pd.Timestamp("2024-01-17")]}
+    panel = _panel(cutoffs)                     # rows only for 01-16
+    out = LS.score_lineage(lineage_manifest=man, admissibility=ctx["adm"],
+                           panel=panel, oos_dates_by_cutoff=grid,
+                           min_admissible_windows=1, scorer_factory=_ok_factory)
+    w = out["windows"][0]
+    assert w["scoring"] == "scoring_error" and "no panel rows" in w["scoring_reason"]
+    assert out["lineage_scoring_verdict"] == "refused"
+
+
+def test_partial_scorer_output_is_a_stamped_scoring_error(tmp_path):
+    """Review round 2: a scorer returning a subset (or reorder) must refuse."""
+    cutoffs = ["2024-01-15"]
+    man, ctx = _bundle(tmp_path, cutoffs)
+
+    def _partial(artifact, path):
+        return lambda sub: pd.Series([0.1], index=[sub.index[0]], dtype=float)
+
+    out = LS.score_lineage(lineage_manifest=man, admissibility=ctx["adm"],
+                           panel=_panel(cutoffs), oos_dates_by_cutoff=ctx["grid"],
+                           min_admissible_windows=1, scorer_factory=_partial)
+    w = out["windows"][0]
+    assert w["scoring"] == "scoring_error" and "output index != input index" in w["scoring_reason"]
+    assert out["lineage_scoring_verdict"] == "refused"
