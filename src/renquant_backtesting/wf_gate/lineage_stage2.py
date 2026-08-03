@@ -23,7 +23,12 @@ is ``gbdt_window_scorer_factory`` — a fail-closed re-keying adapter over the
 #96 normative ``load_fold_scorer`` path (gbdt window artifacts carry
 list-shaped feature stats; the public contract wants dicts) — guarded by a
 bounded time budget: exceeding the budget is a STAMPED refusal, never an
-unbounded gate slowdown.
+unbounded gate slowdown. The deadline is enforced at every boundary — before
+each scoring call, immediately after each scoring call, and once more before
+the successful return — so no stamp ever leaves this module with
+``elapsed_seconds`` over budget (the scorer calls are the only long
+operations; a hard wall-clock containment boundary was considered and
+deferred — see the review round-2 record).
 
 Pooling rule (the stage-2 sign-off's point 2, mechanical here): statistics are
 pooled PER input-vintage segment only — the 2026-08-01-rebuild extension
@@ -86,6 +91,22 @@ POOLING_RULE = (
 
 def _unavailable(reason: str) -> dict:
     return {"lineage_stage2": "unavailable", "reason": reason[:300]}
+
+
+def _budget_guard(*, t0: float, budget: float, where: str) -> None:
+    """The whole-pass deadline, enforced at EVERY boundary — before each
+    scoring call, immediately after each scoring call, and once more before
+    the successful return. (Review round 2: the pre-window poll alone let a
+    slow FINAL ``LS.score_lineage`` call — one with no subsequent pre-check —
+    ride out of this lane inside a normal stage-2 stamp with
+    ``elapsed_seconds`` over budget.) Raises TimeoutError; the lane entry
+    point converts it into the one stamped-unavailable budget shape."""
+    elapsed = time.monotonic() - t0
+    if elapsed > budget:
+        raise TimeoutError(
+            f"time budget exceeded: {elapsed:.1f}s > {budget:.1f}s "
+            f"(detected {where}) — stamped refusal, never an unbounded "
+            "gate slowdown")
 
 
 def gbdt_window_scorer_factory(artifact: dict, artifact_path: Path):
@@ -218,13 +239,11 @@ def _score_segment(*, seg_name: str, rows: list[dict], input_vintage: str | None
             if w["admissibility"] != "admissible":
                 outcomes.append({**w, "scoring": "skipped_inadmissible"})
                 continue
-            elapsed = time.monotonic() - t0
-            if elapsed > budget:
-                raise TimeoutError(
-                    f"time budget exceeded: {elapsed:.1f}s > {budget:.1f}s "
-                    f"after {sum(1 for o in outcomes if o.get('scoring') == 'scored')} "
-                    f"scored windows in segment {seg_name!r} — stamped refusal, "
-                    "never an unbounded gate slowdown")
+            _budget_guard(
+                t0=t0, budget=budget,
+                where=f"before scoring window {cut} in segment {seg_name!r}, "
+                      f"after {sum(1 for o in outcomes if o.get('scoring') == 'scored')} "
+                      "scored windows")
             # None = derived grid found no closing edge (final ladder window);
             # a missing key (caller-grid case) is an EMPTY grid, not None.
             dates = grid.get(cut, [])
@@ -248,6 +267,13 @@ def _score_segment(*, seg_name: str, rows: list[dict], input_vintage: str | None
                                    panel=sub,
                                    oos_dates_by_cutoff={cut: dates},
                                    min_admissible_windows=1, **factory_kw)
+            # Post-call enforcement (review round 2): the scoring call is the
+            # long operation — a slow FINAL eligible call has no subsequent
+            # pre-window check, so the deadline must bite HERE too.
+            _budget_guard(
+                t0=t0, budget=budget,
+                where=f"after scoring window {cut} in segment {seg_name!r} "
+                      "— the scoring call itself crossed the budget")
             outcomes.extend(out["windows"])
             if len(out["scores"]):
                 frames.append(out["scores"])
@@ -387,6 +413,12 @@ def attempt_lineage_scoring_stamp(*, stage1: dict,
                               "input rebuild; the manifest stamps no "
                               "input_vintage on these rows by design"),
                 **common)
+        # Successful-return boundary (review round 2): segment post-processing
+        # (label summaries, frame concat) runs AFTER the last scoring call —
+        # a stamp that leaves this function over budget is a refusal, always.
+        _budget_guard(t0=t0, budget=float(time_budget_seconds),
+                      where="at the successful-return boundary, after all "
+                            "segment scoring")
         return {
             "lineage_stage2": "stage2",
             "candidate_lineage_used": True,

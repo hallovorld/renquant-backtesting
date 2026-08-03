@@ -345,6 +345,68 @@ def test_time_budget_exceeded_is_a_stamped_unavailable(tmp_path):
     assert "time budget exceeded" in out["reason"]
 
 
+def test_slow_FINAL_scoring_call_is_stamped_unavailable(tmp_path, monkeypatch):
+    """Review round 2 regression: the budget used to be polled only BEFORE
+    each window, so when the FINAL eligible window's scoring call crossed the
+    budget there was no subsequent pre-check and the lane returned a NORMAL
+    stage-2 stamp with elapsed_seconds over budget. The deadline must bite
+    immediately AFTER the call. Fake clock: only the final call advances it,
+    so every pre-window check passes deterministically (no sleep flakiness)."""
+    mpath, man, s1 = _mk_bundle(tmp_path)
+    last_cut = man["existing_windows"][-1]["cutoff_date"]
+    # explicit caller grid: the FINAL ladder window is eligible and scored
+    # LAST — the exact no-subsequent-pre-check position the review names
+    grid = {w["cutoff_date"]: [pd.Timestamp(w["cutoff_date"])
+                               + pd.offsets.BDay(1)]
+            for w in man["new_windows"] + man["existing_windows"]}
+    clock = {"t": 0.0}
+    monkeypatch.setattr(L2.time, "monotonic", lambda: clock["t"])
+
+    def _slow_only_final(artifact, path):
+        if artifact["cutoff_date"] == last_cut:
+            clock["t"] += 999.0        # the call itself crosses the budget
+        return _ok_factory(artifact, path)
+
+    out = _attempt(mpath, man, s1, _panel_for(man), oos_dates_by_cutoff=grid,
+                   scorer_factory=_slow_only_final, time_budget_seconds=300.0)
+    assert out["lineage_stage2"] == "unavailable"
+    assert "time budget exceeded" in out["reason"]
+    assert "after scoring window" in out["reason"]       # post-call detection
+    # never a normal stamp: no elapsed_seconds, no segments, nothing scored
+    assert "elapsed_seconds" not in out
+    assert "segments" not in out
+
+
+def test_budget_crossed_after_the_last_call_caught_at_return_boundary(
+        tmp_path, monkeypatch):
+    """Segment post-processing (the label summary) runs AFTER the last
+    scoring call; a budget crossed there has no per-window check left, so the
+    successful-return boundary check must convert it into the same stamped
+    unavailable."""
+    mpath, man, s1 = _mk_bundle(tmp_path)
+    panel = _panel_for(man)
+    labels = {pd.Timestamp(d): pd.Series([0.0, 1.0, 2.0],
+                                         index=["AAA", "BBB", "CCC"])
+              for d in panel["date"].unique()}
+    clock = {"t": 0.0}
+    monkeypatch.setattr(L2.time, "monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+
+    def _slow_summary(scores, labels_by_date):
+        calls["n"] += 1
+        if calls["n"] == 2:            # post_seam's summary: the LAST work
+            clock["t"] += 999.0
+        return {"stub": True}
+
+    monkeypatch.setattr(L2.LS, "summarize_lineage_scores", _slow_summary)
+    out = _attempt(mpath, man, s1, panel, labels_by_date=labels,
+                   time_budget_seconds=300.0)
+    assert out["lineage_stage2"] == "unavailable"
+    assert "time budget exceeded" in out["reason"]
+    assert "successful-return boundary" in out["reason"]
+    assert "elapsed_seconds" not in out
+
+
 # --------------------------------------------------------------------------
 # admission untouched: behavioural + source-level guards
 # --------------------------------------------------------------------------

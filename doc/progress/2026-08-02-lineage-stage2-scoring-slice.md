@@ -98,3 +98,40 @@ and carries the manifest's golden-evidence digest.
   failures are the pre-existing `test_byte_equivalent_to_umbrella` pair
   (repo-vs-live-umbrella byte drift in `model_acceptance.py`, present on
   origin/main, files this slice never touches).
+
+## Review round 2 (2026-08-02): budget enforced at every boundary
+
+Codex finding: the 300 s whole-pass budget was polled only BEFORE each window,
+so a slow `LS.score_lineage` call could cross the budget and — when it was the
+last eligible call, or the next segment was refused — the lane returned a
+NORMAL stage-2 stamp with `elapsed_seconds` over budget.
+
+Fix (`lineage_stage2.py`): one `_budget_guard` helper enforcing the deadline at
+EVERY boundary — before each scoring call (the existing poll), immediately
+AFTER each scoring call, and once more at the successful-return boundary (label
+summaries / frame concat run after the last call). Every breach is the same
+stamped-unavailable shape; the reason now names the detection point
+(`before scoring window …` / `after scoring window … — the scoring call itself
+crossed the budget` / `at the successful-return boundary`). A hard wall-clock
+containment boundary (thread/subprocess timeout) was considered and DEFERRED:
+the scorer calls are the only long operations, the module has no such machinery
+today, and the reviewed fix (deadline-after-each-call) covers every escape path
+the finding names.
+
+Regressions (`tests/test_lineage_stage2.py`, both fail on the pre-fix module —
+verified by stashing the src change: normal `stage2` stamp escapes; both pass
+with the fix):
+
+* `test_slow_FINAL_scoring_call_is_stamped_unavailable` — fake-clock
+  monkeypatch; ONLY the final eligible window's scorer (final ladder window,
+  eligible via an explicit caller grid, so no subsequent pre-check exists)
+  advances the clock past budget → must be the stamped unavailable with
+  post-call detection in the reason, never a normal stamp.
+* `test_budget_crossed_after_the_last_call_caught_at_return_boundary` — the
+  budget crosses inside the post-seam label summary (after the LAST scoring
+  call) → caught by the successful-return boundary check.
+
+Counts `[本次实测 2026-08-02]`: targeted file **20 passed** (was 18, +2
+regressions); full suite **596 passed, 1 skipped, 2 failed** — the same
+pre-existing `test_byte_equivalent_to_umbrella` pair, re-verified failing on
+the base commit (`839c0b4`) with this fix stashed (594 passed there).
