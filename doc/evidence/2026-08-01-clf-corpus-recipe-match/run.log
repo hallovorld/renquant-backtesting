@@ -1,0 +1,13 @@
+  candidate panel-clf.top-decile.fwd60.json
+    recipe fingerprint a4141c076b6b9591
+    corpus folds 85   MATCHING 0
+
+  fields that broke the match:
+      82 fold(s)   params
+       2 fold(s)   kind,feature_norm_kind,params
+       1 fold(s)   feature_cols,feature_norm_kind,label_col,params
+
+  projection fields: kind, feature_cols, feature_norm_kind, label_col, lookahead_days, params
+  NOT checked here : feature_source_contract_keys
+
+  Match is the gate's own recipe projection. Directory name is NOT used: attaching one lane's corpus to another by folder name is an error this programme has already made and retracted.
