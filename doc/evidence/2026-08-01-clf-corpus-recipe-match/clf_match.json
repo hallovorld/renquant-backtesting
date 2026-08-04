@@ -1,0 +1,25 @@
+{
+  "candidate": "/Users/renhao/git/github/RenQuant/backtesting/renquant_104/artifacts/shadow/panel-clf.top-decile.fwd60.json",
+  "candidate_recipe_fingerprint": "a4141c076b6b9591",
+  "differing_field_sets": {
+    "feature_cols,feature_norm_kind,label_col,params": 1,
+    "kind,feature_norm_kind,params": 2,
+    "params": 82
+  },
+  "n_folds": 85,
+  "n_matching": 0,
+  "n_unreadable": 0,
+  "not_checked": [
+    "feature_source_contract_keys"
+  ],
+  "note": "Match is the gate's own recipe projection. Directory name is NOT used: attaching one lane's corpus to another by folder name is an error this programme has already made and retracted.",
+  "projection_fields": [
+    "kind",
+    "feature_cols",
+    "feature_norm_kind",
+    "label_col",
+    "lookahead_days",
+    "params"
+  ],
+  "status": "checked"
+}
