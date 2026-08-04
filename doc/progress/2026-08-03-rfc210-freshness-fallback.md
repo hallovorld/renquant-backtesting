@@ -31,15 +31,17 @@ scope:     "new module + tests only; no runner change, no script change,
             nothing consumes this yet."
 ```
 
-## Honest design note for review
+## Review round 1 resolution (the design note above, resolved better than drafted)
 
-`gate_verdict_before_override` on REAL stamps is None (not False); the check
-refuses only a POSITIVE True (gate passed → use the normal path) because the
-script-flow (REJECT branch) is the primary signal and a None-stamped
-candidate is measurably the real REJECT shape. The stamped value is recorded
-in the verdict either way. If review prefers fail-closed-on-None, the runner
-must first start stamping an explicit False — flagging rather than hiding
-the choice.
+Codex required an explicit rejected value and refusal of None/missing/
+non-boolean. Investigating the producer revealed the first draft read the
+WRONG KEY: `gate_verdict_before_override` is an ORCHESTRATOR promotion-time
+provenance field, absent from staging stamps — while the runner's own
+contract ALREADY stamps `passed: False` (explicit bool, verified on the real
+2026-08-02 reject). The consumer now reads `passed`, only an explicit False
+proceeds, and None/missing/"False"/0/1 each refuse with regressions. The
+producer needed no repair; the real-artifact dry-run still yields
+FALLBACK_PROMOTE with `stamped_verdict: False` recorded.
 
 ## Revert
 

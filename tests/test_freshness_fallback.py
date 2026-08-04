@@ -36,7 +36,7 @@ def _staging(tmp_path, trained="2026-08-02", genuine=0.0029, verdict=False,
              stamp=True):
     wf = {}
     if stamp:
-        wf = {"gate_verdict_before_override": verdict,
+        wf = {"passed": verdict,
               "sanity_placebo_genuine_ic": genuine}
     return _write(tmp_path / "staging.json",
                   {"trained_date": trained,
@@ -170,3 +170,36 @@ def test_verdict_names_every_check_with_values(tmp_path):
     names = [c["check"] for c in v["checks"]]
     assert names == ["gate_rejected", "prod_stale", "candidate_recent",
                      "genuine_ic_nonnegative", "ratchet_up_only"]
+
+
+
+@pytest.mark.parametrize("bad", [None, "False", 0, 1, "rejected"])
+def test_non_boolean_stamped_verdict_refuses_not_permits(tmp_path, bad):
+    """[codex on #102] an absent/corrupted/never-recorded gate decision must
+    never become permission for a production promotion — only an explicit
+    boolean False proceeds. (None here means the producer stamped the key as
+    null; a MISSING key is the unstamped case covered above.)"""
+    staging = _write(tmp_path / "staging.json",
+                     {"trained_date": "2026-08-02",
+                      "metadata": {"wf_gate_metadata": {
+                          "passed": bad,
+                          "sanity_placebo_genuine_ic": 0.0029}}})
+    v = F.decide(_prod(tmp_path), staging, AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "gate_rejected"
+
+
+def test_missing_passed_key_refuses(tmp_path):
+    staging = _write(tmp_path / "staging.json",
+                     {"trained_date": "2026-08-02",
+                      "metadata": {"wf_gate_metadata": {
+                          "sanity_placebo_genuine_ic": 0.0029}}})
+    v = F.decide(_prod(tmp_path), staging, AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "gate_rejected"
+
+
+def test_the_REAL_rejected_artifact_shape_still_promotes(tmp_path):
+    """The 2026-08-02 staging stamp carries passed=False explicitly (bool) —
+    the producer contract was already correct; the fix was the consumer's
+    key. This pins the real shape end-to-end."""
+    v = F.decide(_prod(tmp_path), _staging(tmp_path, verdict=False), AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"

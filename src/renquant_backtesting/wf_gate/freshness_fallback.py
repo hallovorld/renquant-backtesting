@@ -116,7 +116,20 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
         return refuse("staging_gate_stamp",
                       "staging artifact carries no metadata.wf_gate_metadata — "
                       "the gate never evaluated it; nothing to fall back from")
-    gate_verdict = wf.get("gate_verdict_before_override")
+    # The runner's OWN stamped verdict is ``passed`` (an explicit bool at the
+    # head of wf_gate_metadata). [codex on backtesting#102]: an absent,
+    # corrupted, or never-recorded decision must never become permission —
+    # only an explicit False proceeds. (The first draft read
+    # ``gate_verdict_before_override``, an ORCHESTRATOR promotion-time
+    # provenance field absent from staging stamps — the read-the-contract
+    # class; the producer contract needed no repair, the consumer did.)
+    gate_verdict = wf.get("passed")
+    if not isinstance(gate_verdict, bool):
+        return refuse("gate_rejected",
+                      f"stamped gate verdict `passed` is not an explicit "
+                      f"boolean (got {gate_verdict!r}) — an absent or "
+                      f"corrupted decision is not permission; re-run the gate",
+                      stamped_verdict=gate_verdict)
     if gate_verdict is True:
         return refuse("gate_rejected",
                       "the gate PASSED this candidate — use the normal promote "
