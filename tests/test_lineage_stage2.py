@@ -422,16 +422,25 @@ def test_inputs_are_never_mutated(tmp_path):
     pd.testing.assert_frame_equal(panel, panel_before)
 
 
-def test_runner_carries_NO_reference_to_stage2_until_signoff():
-    """This slice ships the module UNWIRED (#94: per-stage operator sign-off;
-    the wiring lands as its own reviewed change after 'approved stage 2').
-    The wiring PR must consciously delete this assertion — severability is
-    mechanical, not a promise."""
+def test_runner_wires_stage2_as_a_sibling_stamp_only():
+    """POST-SIGN-OFF replacement for the runner-free guard (deleted
+    consciously in the wiring change, per bt#100's severability note; the
+    operator's stage-2 sign-off is recorded on #94, 2026-08-04). The
+    wiring must stay a SIBLING stamp: the setup envelope + module call
+    exist, the output carries lineage_stage2 beside lineage_stage1, the
+    declared pin comes from RUN_CLAIM.json (never recomputed from the
+    manifest), and NO admission surface reads the stamp."""
     src = (Path(__file__).resolve().parent.parent /
            "src/renquant_backtesting/wf_gate/runner.py").read_text()
-    assert "lineage_stage2" not in src
-    assert "attempt_lineage_scoring_stamp" not in src
-
+    assert "_attempt_stage2_stamp(lineage_stage1, artifact)" in src
+    assert '"lineage_stage2":      lineage_stage2,' in src
+    assert 'RUN_CLAIM.json' in src
+    assert "manifest_sha256" in src
+    # the stamp must not be consulted by any pass/fail path: no comparison
+    # or branch on the stage2 result anywhere in the runner.
+    import re
+    assert not re.search(r'if\s+lineage_stage2', src)
+    assert not re.search(r'lineage_stage2\[.{0,40}\]\s*(==|!=|and|or)', src)
 
 def test_module_touches_no_admission_surface():
     """Source-level guard in the Stage-1 style: the module never references
@@ -547,3 +556,59 @@ def test_adapter_refuses_misaligned_stats_before_any_import():
            "feature_stds": [1.0, 1.0, 1.0]}
     with pytest.raises(ValueError, match="refusing to guess"):
         L2.gbdt_window_scorer_factory(art, Path("x"))
+
+
+def test_runner_helper_produces_a_real_stage2_stamp(tmp_path, monkeypatch):
+    """[codex on bt#104] EXECUTION-level runner/helper integration: a
+    minimal valid extension bundle + RUN_CLAIM content pin + a
+    deterministic scorer must yield a REAL lineage_stage2 stamp through
+    runner._attempt_stage2_stamp (env-located bundle, DECLARED pin
+    handoff, sanity-panel construction, module call), and the helper's
+    inputs — the admission-side objects — must be UNMUTATED."""
+    import copy
+    from renquant_backtesting.wf_gate import runner as runner_mod
+    from renquant_backtesting.wf_gate import lineage_stage2 as l2
+
+    mpath, man, stage1 = _mk_bundle(tmp_path)
+    bundle_dir = mpath.parent
+    claim_sha = hashlib.sha256(mpath.read_bytes()).hexdigest()
+    (bundle_dir / "RUN_CLAIM.json").write_text(
+        json.dumps({"manifest_sha256": claim_sha}))
+    monkeypatch.setenv("RQ_LINEAGE_EXTENSION_DIR", str(bundle_dir))
+
+    panel = _panel_for(man)
+    monkeypatch.setattr(runner_mod, "_load_sanity_panel",
+                        lambda cols, label, dataset_path=None: (panel, {}))
+    monkeypatch.setattr(runner_mod, "_sanity_model_label_col",
+                        lambda artifact: "label")
+    monkeypatch.setattr(runner_mod, "training_contract_dataset",
+                        lambda artifact: None)
+    # deterministic scorer: the module's default factory is golden-covered
+    # in this suite; the runner integration injects the deterministic one.
+    monkeypatch.setattr(l2, "gbdt_window_scorer_factory", _ok_factory)
+
+    artifact = {"feature_cols": ["f1"], "kind": "panel_ltr_xgboost"}
+    stage1_before = copy.deepcopy(stage1)
+    artifact_before = copy.deepcopy(artifact)
+
+    stamp = runner_mod._attempt_stage2_stamp(stage1, artifact)
+
+    assert stamp.get("lineage_stage2") == "stage2", stamp
+    assert stamp.get("extension_manifest_sha256") == claim_sha
+    assert {"pre_seam", "post_seam"} <= set(stamp.get("segments", {})), stamp
+    # admission-side inputs untouched (the stamp is a SIBLING, never a gate)
+    assert stage1 == stage1_before
+    assert artifact == artifact_before
+
+
+def test_runner_helper_stamps_unavailable_when_bundle_missing(tmp_path, monkeypatch):
+    """The never-raise envelope: a missing bundle dir yields a stamped
+    unavailable, never an exception into the gate run."""
+    from renquant_backtesting.wf_gate import runner as runner_mod
+    monkeypatch.setenv("RQ_LINEAGE_EXTENSION_DIR", str(tmp_path / "nowhere"))
+    stamp = runner_mod._attempt_stage2_stamp(
+        {"lineage_lane": "stage1", "lineage_admissibility": "admissible"},
+        {"feature_cols": ["f1"]})
+    assert stamp.get("lineage_lane") == "unavailable" or \
+        stamp.get("lineage_stage2") == "unavailable"
+    assert "reason" in stamp
