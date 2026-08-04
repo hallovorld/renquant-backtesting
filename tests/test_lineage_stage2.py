@@ -422,16 +422,25 @@ def test_inputs_are_never_mutated(tmp_path):
     pd.testing.assert_frame_equal(panel, panel_before)
 
 
-def test_runner_carries_NO_reference_to_stage2_until_signoff():
-    """This slice ships the module UNWIRED (#94: per-stage operator sign-off;
-    the wiring lands as its own reviewed change after 'approved stage 2').
-    The wiring PR must consciously delete this assertion — severability is
-    mechanical, not a promise."""
+def test_runner_wires_stage2_as_a_sibling_stamp_only():
+    """POST-SIGN-OFF replacement for the runner-free guard (deleted
+    consciously in the wiring change, per bt#100's severability note; the
+    operator's stage-2 sign-off is recorded on #94, 2026-08-04). The
+    wiring must stay a SIBLING stamp: the setup envelope + module call
+    exist, the output carries lineage_stage2 beside lineage_stage1, the
+    declared pin comes from RUN_CLAIM.json (never recomputed from the
+    manifest), and NO admission surface reads the stamp."""
     src = (Path(__file__).resolve().parent.parent /
            "src/renquant_backtesting/wf_gate/runner.py").read_text()
-    assert "lineage_stage2" not in src
-    assert "attempt_lineage_scoring_stamp" not in src
-
+    assert "_attempt_stage2_stamp(lineage_stage1, artifact)" in src
+    assert '"lineage_stage2":      lineage_stage2,' in src
+    assert 'RUN_CLAIM.json' in src
+    assert "manifest_sha256" in src
+    # the stamp must not be consulted by any pass/fail path: no comparison
+    # or branch on the stage2 result anywhere in the runner.
+    import re
+    assert not re.search(r'if\s+lineage_stage2', src)
+    assert not re.search(r'lineage_stage2\[.{0,40}\]\s*(==|!=|and|or)', src)
 
 def test_module_touches_no_admission_surface():
     """Source-level guard in the Stage-1 style: the module never references

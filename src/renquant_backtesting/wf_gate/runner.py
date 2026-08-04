@@ -3347,6 +3347,56 @@ def run_sanity_battery(
     }
 
 
+RUN001_EXTENSION_DIR_ENV = "RQ_LINEAGE_EXTENSION_DIR"
+_RUN001_EXTENSION_REL = (
+    ".subrepo_runtime/repos/renquant-model/doc/research/data/"
+    "2026-08-02-jobb-gbdt-depth-extension-run001"
+)
+
+
+def _attempt_stage2_stamp(lineage_stage1: dict, artifact: dict) -> dict:
+    """Setup envelope for the Stage-2 scoring stamp: locate the run-001
+    extension bundle (pinned model checkout; env-overridable for tests),
+    read the DECLARED content pin from RUN_CLAIM.json (never recomputed
+    from the manifest itself), load the same sanity panel the battery
+    uses, and call the bt#100 module. NEVER raises — any setup failure is
+    a stamped ``unavailable`` and admission is untouched."""
+    import os as _os
+    try:
+        from renquant_backtesting.wf_gate.lineage_stage2 import (
+            attempt_lineage_scoring_stamp,
+        )
+        ext_dir = Path(
+            _os.environ.get(RUN001_EXTENSION_DIR_ENV)
+            or (REPO / _RUN001_EXTENSION_REL)
+        )
+        claim_path = ext_dir / "RUN_CLAIM.json"
+        manifest_path = ext_dir / "gbdt_depth_extension_manifest.json"
+        if not claim_path.is_file():
+            return {"lineage_lane": "unavailable",
+                    "reason": f"run claim missing: {claim_path}"}
+        expected_sha = json.loads(claim_path.read_text()).get("manifest_sha256")
+        feat_cols = artifact.get("feature_cols", [])
+        label = _sanity_model_label_col(artifact)
+        _ds_raw = training_contract_dataset(artifact)
+        _dataset_path = None
+        if _ds_raw:
+            _dp = Path(_ds_raw)
+            _dataset_path = _dp if _dp.is_absolute() else (REPO / _dp)
+        panel, _panel_meta = _load_sanity_panel(
+            feat_cols, label, dataset_path=_dataset_path)
+        return attempt_lineage_scoring_stamp(
+            stage1=lineage_stage1,
+            extension_manifest_path=manifest_path,
+            expected_manifest_sha256=expected_sha,
+            panel=panel,
+            label_horizon_bdays=60,
+        )
+    except Exception as exc:  # noqa: BLE001 — the stamp NEVER raises
+        return {"lineage_lane": "unavailable",
+                "reason": f"stage-2 setup failed: {exc}"}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifact", required=True, help="Path to staging artifact JSON")
@@ -3498,6 +3548,16 @@ def main():
     lineage_stage1 = attempt_lineage_stamp(
         artifact_usage=artifact_usage, strategy_dir=STRATEGY_DIR,
         label_horizon_bdays=60)
+    # Stage-2 scoring stamp (#94 slice 4) — WIRED under the operator's
+    # 2026-08-04 stage-2 sign-off (recorded on #94: "GOAL-6 Stage-2 签字，go").
+    # Signed scope: READ the committed run-001 extension bundle from the
+    # PINNED model checkout, content-bound to RUN_CLAIM.json's declared
+    # manifest sha; stamps cross the vintage seam only as two separately-
+    # pooled segments; admission byte-identical (a sibling stamp, never a
+    # gate input). NEVER raises; rollback = revert this block + the helper
+    # (bt#100's severability note — its runner-free source guard is deleted
+    # consciously in this same change).
+    lineage_stage2 = _attempt_stage2_stamp(lineage_stage1, artifact)
     cfg_path = STRATEGY_DIR / args.strategy_config
     gate_config = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     evaluate_wf_config_parity = _load_qp_helper("wf_config_parity").evaluate_wf_config_parity
@@ -3692,6 +3752,7 @@ def main():
         "wf_eval_scope":       artifact_usage.get("eval_scope"),
         "artifact_usage":      artifact_usage,
         "lineage_stage1":      lineage_stage1,
+        "lineage_stage2":      lineage_stage2,
         "config_parity":       parity_result,
         "qp_contract":         (
             {
