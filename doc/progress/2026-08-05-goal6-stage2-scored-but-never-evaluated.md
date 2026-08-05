@@ -38,9 +38,13 @@ reason = stage-1 admitted root 2969e1d199e2… != extension's old root
 ```
 
 Stage-1's admitted lineage root moved (`d1161f8d…` on 08-04 → `2969e1d1…` on
-08-05) while the frozen extension bundle still declares the old root. So the
-lane went from scoring 124 windows to scoring nothing, **between two consecutive
-sessions**, and nothing alarmed.
+08-05) while the frozen extension bundle still declares the old root.
+
+Stated precisely `[codex on bt#108]`: this is a **refusal BEFORE scoring**, not
+"scoring nothing" — the stamp carries no `n_scored_windows` at all. And I have
+**not** measured whether anything alarmed on it; the earlier "nothing alarmed"
+was an assumption, withdrawn. What is measured is that between two consecutive
+sessions the lane went from a scored stamp to an `unavailable` one.
 
 ## What lands here (small, on purpose)
 
@@ -54,6 +58,11 @@ and the two reasons are distinguishable:
 
 Previously the key was simply absent, and a reader could not tell those apart —
 nor tell either from a successful evaluation.
+
+**This also changes the payload for callers that DO pass labels but score zero
+rows** `[codex on bt#108]`: `main` omitted the key; now they get
+`label_summary = None` plus the reason. That is deliberate and is pinned by a
+test. The labels-plus-scores path is unchanged, and no verdict moves.
 
 ## What is NOT done, and why not here
 
@@ -74,7 +83,18 @@ Both are named in NEXT rather than guessed at.
 2. Re-pin or regenerate the extension bundle against the current admitted root,
    and add an alarm for the mismatch: today the lane simply went quiet.
 
-Suites: 5 new tests, incl. one bound to the live stamps · **672 passed, 1
+## The tests, after review
+
+The first version of the test file **reimplemented the new branch and then
+asserted the copy matched** — proving the helper equals itself — and its
+live-bound test only checked that *some* scored stamp existed
+`[codex on bt#108]`. Rewritten: the unit tests drive the real `_score_segment`
+(stubbing only the scoring engine), and the live-bound tests assert the measured
+facts — `n_scored_windows == 124` of `125`, both segments (`pre_seam`,
+`post_seam`) carrying `n_rows_scored > 0` and **no** `label_summary`, and the
+08-05 reason containing both root prefixes and no scored count.
+
+Suites: 6 tests, four bound to the live stamps · **673 passed, 1
 skipped, 3 failed** — all three failures (`test_b1_lift`, `test_import_lift`,
 `test_lineage_stage2::test_REAL_run001_…`) reproduce on `origin/main` and are
 untouched by this change `[VERIFIED — re-run on main earlier this session]`.
