@@ -99,16 +99,24 @@ class TestLogLine:
         assert "BEAR=n/a" in line
 
 
-# [codex on bt#105] Scanning only _compute_overall_pass misses the OTHER
+# [codex on bt#105] Scanning only _compute_overall_pass missed the OTHER
 # verdict-producing spans — above all `run_sanity_battery`, where
-# `pass_all = pass_shuf and pass_placebo and pass_regime` is formed. A future
-# reference there would change behaviour without touching the scanned slice, so
-# the advertised guard would not have been guarding.
+# `pass_all = pass_shuf and pass_placebo and pass_regime` is formed, and `main`,
+# where `overall_pass` is assembled and handed to `sys.exit`.
+#
+# SCOPE, deliberately narrow [codex on bt#106]: this is a DIRECT-REFERENCE
+# invariant. It catches the mistake that actually happens — someone wires the
+# reporting summary into a verdict — and it does NOT chase indirection through
+# aliases, wrappers, methods, `for`/`with` binds or walrus. An earlier revision
+# grew a 372-line AST dataflow analyser to close those; that is disproportionate
+# maintenance and false-positive risk for a reporting-only change, and it belongs
+# in a separately scoped tool if it is ever wanted. The wording here claims only
+# what it checks.
 _REPORTING_SYMBOLS = ("sanity_regime_genuine_ic", "regime_genuine_ic_summary",
                       "format_regime_genuine_ic")
 
-# Every place a pass/fail is COMPUTED. Each is asserted to exist, so a rename
-# that silently empties this list fails instead of vacuously passing.
+# Every function where a pass/fail is COMPUTED. Each is asserted to exist, so a
+# rename empties the list loudly instead of passing vacuously.
 _VERDICT_FUNCTIONS = (
     "_compute_overall_pass",
     "_sanity_result_passed",
@@ -118,13 +126,6 @@ _VERDICT_FUNCTIONS = (
     "run_sanity_battery",
 )
 
-# `main` is BOTH where the verdict is assembled (`overall_pass = ...`, then
-# `sys.exit(0 if overall_pass else 1)`) and where the reporting summary is
-# STAMPED — so a blanket "this symbol must not appear" scan cannot apply there.
-# [codex on bt#106] The guard for `main` is therefore narrower and exact: no
-# statement that touches `overall_pass` may reference a reporting symbol.
-_VERDICT_ASSEMBLY_FUNCTION = "main"
-
 
 def _runner_source() -> str:
     return (Path(__file__).resolve().parent.parent / "src" / "renquant_backtesting"
@@ -132,11 +133,10 @@ def _runner_source() -> str:
 
 
 def _function_body(src: str, name: str) -> str:
-    """Source of `def name(` up to the next TOP-LEVEL `def `/`class `.
+    """Source of `def name(` up to the next top-level `def `/`class `.
 
-    Nested defs and decorated helpers inside the function are indented, so they
-    do not match `\ndef `/`\nclass ` and stay inside the returned body — which
-    is what the guard wants: a reference hidden in a closure still counts.
+    Trailing decorators and blank lines belonging to the NEXT definition are
+    dropped, so exactly one function comes back.
     """
     marker = f"\ndef {name}("
     start = src.index(marker) + 1          # first char of `def`, not the newline
@@ -144,27 +144,49 @@ def _function_body(src: str, name: str) -> str:
     tail = rest[1:]                        # skip our own `def` when looking ahead
     ends = [tail.index(m) for m in ("\ndef ", "\nclass ") if m in tail]
     body = rest[:min(ends) + 1] if ends else rest
-    # [codex on bt#106] The next function's DECORATOR lines sit above its `def`
-    # and would otherwise be swallowed into this body. Walk back over trailing
-    # top-level decorators and blank lines so exactly one function is returned.
     lines = body.splitlines(keepends=True)
     while lines and (not lines[-1].strip() or lines[-1].startswith("@")):
         lines.pop()
     return "".join(lines)
 
 
-def assert_decides_nothing(body: str, func: str) -> None:
-    """THE guard. Both the live check and its own regression call THIS, so the
-    regression cannot pass while the check has stopped checking. [codex on bt#106]"""
+def assert_decides_nothing(text: str, where: str) -> None:
+    """THE guard. The live checks and their regressions all call THIS, so a
+    regression cannot pass while the check has stopped checking."""
     for forbidden in _REPORTING_SYMBOLS:
-        assert forbidden not in body, (
-            f"{forbidden} appears inside {func} — a reporting surface must not "
+        assert forbidden not in text, (
+            f"{forbidden} appears in {where} — a reporting surface must not "
             f"decide anything")
 
 
+def _verdict_expressions(src: str) -> list[tuple[str, str]]:
+    """(label, source text) for what PRODUCES the verdict in `main`.
+
+    `main` cannot be scanned wholesale: it legitimately mentions the reporting
+    symbols, because it is where they are STAMPED. The subject is the expression
+    the verdict is computed from — the value of `overall_pass = …` and the
+    argument of the `sys.exit` that carries it.
+    """
+    tree = ast.parse(src)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(main):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "overall_pass"
+                for t in node.targets):
+            found.append(("overall_pass = <expr>", ast.unparse(node.value)))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "exit"):
+            for arg in node.args:
+                text = ast.unparse(arg)
+                if "overall_pass" in text:
+                    found.append(("sys.exit(<verdict>)", text))
+    return found
+
+
 @pytest.mark.parametrize("func", _VERDICT_FUNCTIONS)
-def test_reporting_only_no_verdict_function_references_it(func):
-    """The load-bearing constraint, across EVERY pass/fail-producing span."""
+def test_no_verdict_function_references_a_reporting_symbol(func):
     src = _runner_source()
     assert f"\ndef {func}(" in src, (
         f"{func} no longer exists — this guard is now scanning nothing; "
@@ -172,311 +194,79 @@ def test_reporting_only_no_verdict_function_references_it(func):
     assert_decides_nothing(_function_body(src, func), func)
 
 
-def test_the_guard_REJECTS_a_planted_reference():
-    """Anti-vacuity for the guard itself. It is not enough to show the planted
-    string is present — that is tautological and would still pass if the live
-    check stopped inspecting bodies. This runs the SAME assertion path and
-    requires it to RAISE. [codex on bt#106]"""
-    src = _runner_source()
-    body = _function_body(src, "run_sanity_battery")
-    assert "pass_all" in body and len(body) > 500, (
-        "the extractor did not return run_sanity_battery's real body")
-
-    planted = body.replace("pass_all", "pass_all and sanity_regime_genuine_ic", 1)
-    assert planted != body, "the plant did not apply — the regression is vacuous"
-    with pytest.raises(AssertionError, match="must not decide anything"):
-        assert_decides_nothing(planted, "run_sanity_battery")
-
-    # ... and the unplanted body must still pass through the same call, or the
-    # guard would be rejecting everything and proving nothing.
-    assert_decides_nothing(body, "run_sanity_battery")
-
-
-@pytest.mark.parametrize("func", _VERDICT_FUNCTIONS)
-def test_every_extracted_body_is_REAL_source_not_an_empty_string(func):
-    """A body extractor that silently returns '' would make every guard above
-    pass vacuously — the exact failure mode this file exists to prevent."""
-    body = _function_body(_runner_source(), func)
-    assert body.startswith(f"def {func}("), (func, body[:60])
-    assert len(body) > 120, (func, len(body))
-    # a body that is only a signature would pass a substring check vacuously
-    assert "return" in body or "assert" in body, func
-
-
-def test_the_summary_IS_reachable_from_the_stamping_path():
-    """The mirror image: reporting-only must not mean unreachable. If nothing
-    stamps it, the whole PR is inert scaffolding."""
-    src = _runner_source()
-    assert '"sanity_regime_genuine_ic": regime_genuine_ic_summary(' in src
-    assert "format_regime_genuine_ic(wf_meta.get(" in src
-
-
-def _names_in(node) -> set[str]:
-    """Every identifier appearing anywhere under `node`."""
-    out = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Name):
-            out.add(sub.id)
-        elif isinstance(sub, ast.Attribute):
-            out.add(sub.attr)
-    return out
-
-
-def _plain_names(node) -> set[str]:
-    """Identifiers bound as NAMES under `node` (attributes excluded — `.get` is
-    not a dependency and treating it as one smears the slice over the module)."""
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-
-
-def _verdict_dependencies(src: str, exprs: list) -> set[str]:
-    """BACKWARD slice of the verdict, over ASSIGNMENTS only.
-
-    [codex on bt#106] Two earlier attempts were wrong in opposite directions.
-    Forward taint smeared over 441 names because `wf_meta = {...}` legitimately
-    holds a reporting symbol. Then merging called functions' bodies into the
-    slice by NAME re-inflated it to 609, because a local inside a big helper
-    that happens to share a name with a `main` local (`md`, `wf_meta`) drags
-    main's assignment in — a name-keyed slice cannot tell those apart, and
-    real def-use analysis is not worth building inside a test.
-
-    So the slice follows ASSIGNMENTS (main's scope plus module level) and stops
-    at call boundaries. Functions reached this way are checked SEPARATELY, by
-    `_functions_referencing_reporting`, which asks the only question that
-    matters about them: does this function hand back a reporting symbol?
-    """
-    tree = ast.parse(src)
-    main = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "main")
-    assigns: dict[str, list] = {}
-    scopes = [main] + [n for n in tree.body if not isinstance(
-        n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-    for scope in scopes:
-        for node in ast.walk(scope):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    # REBINDINGS only. `md["wf_gate_metadata"] = wf_meta`
-                    # mutates a container that is DOWNSTREAM of the verdict;
-                    # treating it as "md depends on wf_meta" walks the slice
-                    # forward into the stamping code and re-introduces the
-                    # false positive this guard exists to avoid.
-                    if isinstance(target, ast.Name):
-                        assigns.setdefault(target.id, []).append(node.value)
-                    elif isinstance(target, (ast.Tuple, ast.List)):
-                        for sub in target.elts:
-                            if isinstance(sub, ast.Name):
-                                assigns.setdefault(sub.id, []).append(node.value)
-
-    deps: set[str] = set()
-    for _, expr in exprs:
-        deps |= _plain_names(expr)
-    for _ in range(50):                       # fixpoint
-        grew = False
-        for name in list(deps):
-            for value in assigns.get(name, ()):
-                fresh = _plain_names(value) - deps
-                if fresh:
-                    deps |= fresh
-                    grew = True
-        if not grew:
-            break
-    else:                                     # pragma: no cover - defensive
-        raise AssertionError("dependency slice did not converge")
-    return deps
-
-
-def _functions_referencing_reporting(src: str, names: set[str]) -> set[str]:
-    """Of `names`, the module-level functions that mention a reporting symbol.
-
-    Closes the WRAPPED bypass (`def _h(): return sanity_regime_genuine_ic`,
-    then `overall_pass = _h() and ...`) without merging the callee's locals
-    into the caller's slice. Follows calls transitively, so a two-hop wrapper
-    is caught too.
-    """
-    tree = ast.parse(src)
-    # CLASSES too. [codex on bt#106] `class _C: def verdict(self): return
-    # sanity_regime_genuine_ic` then `_c = _C(); overall_pass = _c.verdict()
-    # and ...` is a normal refactoring shape, not a syntax corner, and the
-    # slice already resolves `_c -> _C`. Mapping the class NAME to its whole
-    # ClassDef scans every method body, so the wrapper check sees it.
-    functions = {n.name: n for n in tree.body
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                   ast.ClassDef))}
-    guilty: set[str] = set()
-    seen: set[str] = set()
-    frontier = [n for n in names if n in functions]
-    while frontier:
-        name = frontier.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        body_names = _plain_names(functions[name])
-        if body_names & set(_REPORTING_SYMBOLS):
-            guilty.add(name)
-        frontier.extend(n for n in body_names if n in functions and n not in seen)
-    return guilty
-
-
-def _verdict_expressions(src: str) -> list[tuple[str, ast.AST]]:
-    """(label, expression) for everything that PRODUCES the verdict in `main`.
-
-    [codex on bt#106] A line-based scan was wrong twice over: `wf_meta = {...}`
-    is ONE multi-line statement that legitimately contains both
-    `"passed": overall_pass` and `"sanity_regime_genuine_ic":
-    regime_genuine_ic_summary(...)`, so a statement-level rule would fail on
-    correct code while a line-level rule missed the statement entirely. The
-    right subject is neither the line nor the statement: it is the EXPRESSION
-    the verdict is computed from.
-    """
-    tree = ast.parse(src)
-    main = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "main")
-    found: list[tuple[str, ast.AST]] = []
-    for node in ast.walk(main):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "overall_pass":
-                    found.append(("overall_pass = <expr>", node.value))
-        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "exit"):
-            for arg in node.args:
-                # Only the exit that carries the VERDICT. `main` also has plain
-                # error exits (`sys.exit(1)` on a refused precondition); those
-                # are not the verdict and pulling them in would drag unrelated
-                # locals into the slice.
-                if "overall_pass" in _plain_names(arg):
-                    found.append(("sys.exit(<verdict>)", arg))
-    return found
-
-
-def _assert_verdict_untainted(src: str, exprs: list) -> None:
-    """THE main-guard assertion: nothing the verdict DEPENDS ON, transitively,
-    may be a reporting symbol. Shared by the live check and every regression
-    below, so a regression cannot pass while the check has stopped checking."""
-    deps = _verdict_dependencies(src, exprs)
-    direct = sorted(deps & set(_REPORTING_SYMBOLS))
-    assert not direct, (
-        f"{direct} is in the verdict's dependency slice — a reporting surface "
-        f"must not decide anything (transitively)")
-    wrapped = sorted(_functions_referencing_reporting(src, deps))
-    assert not wrapped, (
-        f"the verdict calls {wrapped}, which reference a reporting symbol — a "
-        f"reporting surface must not decide anything (through a wrapper)")
-
-
-def test_the_verdict_ASSEMBLY_in_main_is_also_clean():
-    """The span the first guard list omitted. `main` legitimately mentions the
-    reporting symbols — it is where they are STAMPED — so the rule is on the
-    verdict EXPRESSION: what `overall_pass` is computed from, and what
-    `sys.exit` is handed, may not reference a reporting symbol."""
-    src = _runner_source()
-    exprs = _verdict_expressions(src)
+def test_mains_verdict_EXPRESSIONS_are_clean():
+    """The span the first list omitted, checked at expression granularity."""
+    exprs = _verdict_expressions(_runner_source())
     labels = [lbl for lbl, _ in exprs]
     assert any("overall_pass =" in lbl for lbl in labels), labels
     assert any("sys.exit" in lbl for lbl in labels), labels
-    _assert_verdict_untainted(src, exprs)
+    for label, text in exprs:
+        assert_decides_nothing(text, f"main {label}")
 
 
-def test_the_main_guard_REJECTS_a_planted_reference_in_the_VERDICT_EXPRESSION():
-    """Plant into the expression the verdict is computed from and require the
-    same assertion path to RAISE — including via the multi-line `wf_meta`
-    statement shape that defeated the line-based version."""
+def test_the_guard_FIRES_on_a_planted_reference():
+    """Anti-vacuity: it is not enough to show the plant is present — that would
+    still pass if the checks stopped inspecting. This runs the SAME assertion
+    path and requires it to RAISE, in a verdict function and in main's verdict
+    expression."""
     src = _runner_source()
+    body = _function_body(src, "run_sanity_battery")
+    assert "pass_all" in body and len(body) > 500, "extractor returned no real body"
+    with pytest.raises(AssertionError, match="must not decide anything"):
+        assert_decides_nothing(
+            body.replace("pass_all", "pass_all and sanity_regime_genuine_ic", 1),
+            "run_sanity_battery")
+
     planted = src.replace(
         "    overall_pass = _compute_overall_pass(",
         "    overall_pass = sanity_regime_genuine_ic and _compute_overall_pass(", 1)
     assert planted != src, "the plant did not apply — the regression is vacuous"
     with pytest.raises(AssertionError, match="must not decide anything"):
-        _assert_verdict_untainted(planted, _verdict_expressions(planted))
+        for label, text in _verdict_expressions(planted):
+            assert_decides_nothing(text, f"main {label}")
 
 
-def test_the_main_guard_TOLERATES_the_legitimate_wf_meta_statement():
+def test_the_guard_TOLERATES_the_legitimate_stamping_statement():
     """Anti-false-positive: `wf_meta = {...}` holds BOTH `"passed": overall_pass`
-    and the reporting summary in one statement. That is correct code and the
-    guard must not reject it — which is why the subject is the expression, not
-    the statement."""
+    and the reporting summary, in one correct statement. Scanning `main`
+    wholesale would reject it — which is why the subject is the expression."""
     src = _runner_source()
     assert '"passed": overall_pass' in src
     assert '"sanity_regime_genuine_ic": regime_genuine_ic_summary(' in src
-    exprs = _verdict_expressions(src)          # must not raise
-    assert exprs, "the extractor found no verdict expression at all"
+    assert _verdict_expressions(src), "no verdict expression found at all"
+
+
+@pytest.mark.parametrize("func", _VERDICT_FUNCTIONS)
+def test_every_extracted_body_is_REAL_source(func):
+    """A extractor that silently returned '' would make every guard above pass
+    vacuously."""
+    body = _function_body(_runner_source(), func)
+    assert body.startswith(f"def {func}("), (func, body[:60])
+    assert len(body) > 120 and ("return" in body or "assert" in body), func
 
 
 def test_the_extractor_stops_before_the_next_functions_DECORATOR():
-    """[codex on bt#106] `runner.py` has no decorators today, so this pins the
-    behaviour rather than the current file."""
+    """`runner.py` has no decorators today, so this pins behaviour rather than
+    the current file."""
     src = "\ndef first():\n    return 1\n\n\n@dec\ndef second():\n    return 2\n"
     body = _function_body(src, "first")
     assert body.rstrip().endswith("return 1"), repr(body)
     assert "@dec" not in body and "second" not in body
 
 
-def test_the_main_guard_CATCHES_an_ALIASED_reporting_symbol():
-    """[codex on bt#106] `helper = sanity_regime_genuine_ic` then
-    `overall_pass = helper and ...` — the verdict subtree names only `helper`."""
-    src = _runner_source().replace(
-        "    overall_pass = _compute_overall_pass(",
-        "    _vh = sanity_regime_genuine_ic\n"
-        "    overall_pass = _vh and _compute_overall_pass(", 1)
-    with pytest.raises(AssertionError, match="must not decide anything"):
-        _assert_verdict_untainted(src, _verdict_expressions(src))
+def test_the_OUT_OF_SCOPE_indirection_is_written_down_not_forgotten():
+    """Aliases, wrappers, methods, `for`/`with` binds and walrus are NOT
+    checked. That is a decision — recorded so widening the claim later has to
+    confront the list rather than quietly inherit it."""
+    doc = " ".join((Path(__file__).resolve().parent.parent / "doc" / "progress"
+                    / "2026-08-05-regime-genuine-ic-in-verdict.md").read_text().split())
+    assert "OUT OF SCOPE" in doc
+    for shape in ("alias", "wrapper", "method", "walrus"):
+        assert shape in doc, shape
 
 
-def test_the_main_guard_CATCHES_a_WRAPPED_reporting_symbol():
-    """`def _h(): return sanity_regime_genuine_ic` then
-    `overall_pass = _h() and ...` — the subtree names only `_h`."""
+def test_the_summary_IS_reachable_from_the_stamping_path():
+    """Reporting-only must not quietly become unreachable."""
     src = _runner_source()
-    src = src.replace("\ndef main(",
-                      "\ndef _reporting_verdict_helper():\n"
-                      "    return sanity_regime_genuine_ic\n\n\ndef main(", 1)
-    src = src.replace(
-        "    overall_pass = _compute_overall_pass(",
-        "    overall_pass = _reporting_verdict_helper() and _compute_overall_pass(", 1)
-    with pytest.raises(AssertionError, match="must not decide anything"):
-        _assert_verdict_untainted(src, _verdict_expressions(src))
-
-
-def test_the_main_guard_CATCHES_a_reporting_symbol_behind_an_OBJECT_METHOD():
-    """[codex on bt#106] A normal refactoring shape, not a syntax corner:
-    `class _C: def verdict(self): return <reporting>` then
-    `_c = _C(); overall_pass = _c.verdict() and ...`."""
-    src = _runner_source()
-    src = src.replace("\ndef main(",
-                      "\nclass _VerdictCarrier:\n"
-                      "    def verdict(self):\n"
-                      "        return sanity_regime_genuine_ic\n\n\ndef main(", 1)
-    src = src.replace(
-        "    overall_pass = _compute_overall_pass(",
-        "    _carrier = _VerdictCarrier()\n"
-        "    overall_pass = _carrier.verdict() and _compute_overall_pass(", 1)
-    with pytest.raises(AssertionError, match="must not decide anything"):
-        _assert_verdict_untainted(src, _verdict_expressions(src))
-
-
-def test_the_ACCEPTED_CORNERS_are_written_down_not_forgotten():
-    """`for`, `with ... as` and a separate-statement walrus rebind are outside
-    the documented scope (REBINDING assignments). Codex judged them acceptable
-    for a test-level guard; that judgement is recorded here so it is a decision
-    rather than an oversight, and so widening the claim later has to confront
-    it."""
-    doc = (Path(__file__).resolve().parent.parent / "doc" / "progress"
-           / "2026-08-05-regime-genuine-ic-in-verdict.md").read_text()
-    flat = " ".join(doc.split())
-    assert "ACCEPTED CORNERS" in flat
-    for corner in ("for", "with", "walrus"):
-        assert corner in flat
-
-
-def test_the_slice_is_a_real_slice_not_the_whole_module():
-    """Anti-false-positive AND anti-vacuity. A slice that swallowed the module
-    would reject every future edit and get switched off; an empty one would
-    prove nothing. It must contain the verdict's real inputs and NOT the
-    reporting surface."""
-    src = _runner_source()
-    deps = _verdict_dependencies(src, _verdict_expressions(src))
-    for real_input in ("overall_pass", "_compute_overall_pass", "wf_result",
-                       "sanity_result", "parity_result"):
-        assert real_input in deps, real_input
-    for symbol in _REPORTING_SYMBOLS:
-        assert symbol not in deps, symbol
-    total = len({n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)})
-    assert len(deps) < total / 2, (len(deps), total)
+    assert '"sanity_regime_genuine_ic": regime_genuine_ic_summary(' in src
+    assert "format_regime_genuine_ic(wf_meta.get(" in src

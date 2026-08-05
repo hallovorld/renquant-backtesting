@@ -112,96 +112,36 @@ assertion path to RAISE.
 
 25 tests.
 
-## Review round 5 (codex on bt#106) — the subject was neither the line nor the statement
+## Review rounds 5-8 (codex on bt#106) — and a scope correction I should have made myself
 
-The `main` guard scanned LINES containing `overall_pass`. `wf_meta = { ... }` is
-ONE multi-line assignment that contains both `"passed": overall_pass` and, ~90
-lines later in the same statement, `"sanity_regime_genuine_ic":
-regime_genuine_ic_summary(...)`. The line scan never saw them together, so `main`
-was still effectively unguarded at exactly the place the PR claimed to cover.
+Rounds 5-7 chased indirection: the `main` guard scanned LINES, so the multi-line
+`wf_meta = {...}` statement evaded it; then an AST version missed aliases
+(`_vh = <reporting>`), wrappers (`def _h(): return <reporting>`) and object
+methods. Each fix was correct on its own terms, and by round 7 the guard was a
+**372-line AST dataflow analyser inside a test module**.
 
-And a statement-level rule would have been wrong in the other direction: that
-`wf_meta` statement is CORRECT code, and a statement rule would reject it.
+Round 8, correctly, rejected the whole direction: that is disproportionate
+maintenance and false-positive risk for a **reporting-only** change, and the
+"transitively / every span" wording still was not true because normal rebinding
+forms stayed out of scope. This is the over-engineering failure mode I have a
+standing rule about, and codex caught it, not me.
 
-The right subject is the **expression the verdict is computed from**. The guard
-is now AST-based: parse `main`, take the value expression of every
-`overall_pass = …` assignment and every argument of `sys.exit(…)`, and require
-those subtrees to reference no reporting symbol. Both kinds are asserted to
-exist, so the guard cannot scan nothing.
+**Scoped back to a DIRECT-REFERENCE invariant**, which is what actually earns
+its keep: no verdict-producing function may mention a reporting symbol, and in
+`main` — which legitimately mentions them, being where they are STAMPED — no
+verdict EXPRESSION (`overall_pass = …`, `sys.exit(<verdict>)`) may. One concise
+regression proves the guard FIRES on a planted reference through the same
+assertion path, in both places; one proves the legitimate `wf_meta` statement is
+tolerated; one proves each extracted body is real source.
 
-Three tests: the live check; a plant into `overall_pass = …` that must RAISE
-through the same path; and an anti-false-positive that the legitimate `wf_meta`
-statement is tolerated.
+### OUT OF SCOPE (a decision, not an oversight)
 
-26 tests.
+Indirection is **not** checked: an alias, a wrapper function, an object method,
+a `for` / `with … as` bind, or a walrus can route a reporting symbol into the
+verdict without this guard firing. Closing those needs real def-use analysis,
+which belongs in a separately scoped tool with real requirements — not in a test
+module. **A test asserts this paragraph still exists**, so widening the claim
+later has to confront the list rather than quietly inherit it.
 
-## Review round 6 (codex on bt#106) — indirection, and three wrong slices
-
-Codex showed the AST guard was too local: it inspected only the names appearing
-DIRECTLY in the verdict expression, so either of these evades it —
-
-```python
-_vh = sanity_regime_genuine_ic
-overall_pass = _vh and _compute_overall_pass(...)          # aliased
-
-def _h(): return sanity_regime_genuine_ic
-overall_pass = _h() and _compute_overall_pass(...)         # wrapped
-```
-
-Getting this right took three attempts, and the two failures are worth recording
-because both were the guard being WRONG rather than merely incomplete:
-
-1. **Forward taint** (taint anything touching a reporting symbol) smeared to
-   **441 names** — `wf_meta = {...}` legitimately holds the summary, so
-   everything downstream of it became "tainted". A guard that rejects correct
-   code gets switched off.
-2. **Backward slice that merged called functions' bodies by name** re-inflated to
-   **609** — a local inside a large helper that shares a name with a `main`
-   local (`md`, `wf_meta`) drags main's assignment in. A name-keyed slice cannot
-   distinguish scopes, and real def-use analysis is not worth building in a test.
-3. **Backward slice over REBINDINGS only, with calls checked separately** — 61
-   names, and correct. `md["wf_gate_metadata"] = wf_meta` mutates a container
-   that is DOWNSTREAM of the verdict; counting it as a dependency walked the
-   slice forward into the stamping code, which was the last false positive.
-
-Final shape: the slice follows rebinding assignments (main's scope + module
-level) and stops at call boundaries; functions reached that way are checked
-separately by `_functions_referencing_reporting`, which follows calls
-transitively and asks the only question that matters about a callee — does it
-hand back a reporting symbol?
-
-Five tests: the live check; the aliased bypass; the wrapped bypass; the
-anti-false-positive that the legitimate `wf_meta` statement is tolerated; and
-one asserting the slice contains the verdict's real inputs, excludes the
-reporting symbols, and stays under half the module's names.
-
-29 tests.
-
-## Review round 7 (codex on bt#106) — an object method, and the ACCEPTED CORNERS
-
-Codex re-attacked the widened guard. Dict-of-callables, list-of-callables and
-`functools.partial` wrappers all raise correctly. One shape did not:
-
-```python
-class _Carrier:
-    def verdict(self): return sanity_regime_genuine_ic
-...
-_carrier = _Carrier()
-overall_pass = _carrier.verdict() and _compute_overall_pass(...)
-```
-
-The slice resolved `_carrier -> _Carrier`, but the wrapper check only traversed
-module-level `FunctionDef`/`AsyncFunctionDef`, never methods under a `ClassDef`.
-Codex called it blocking, correctly: that is a normal refactoring shape, not a
-contrived corner. Fixed by mapping a class NAME to its whole `ClassDef`, so every
-method body is scanned. Test added.
-
-### ACCEPTED CORNERS (a decision, not an oversight)
-
-Rebinding through `for`, through `with ... as`, and through a walrus in a
-separate statement are outside the documented scope (`REBINDING assignments`).
-Codex judged them acceptable for a test-level guard and I agree: each requires
-deliberately routing a reporting symbol through an unusual binding form, and
-closing them means real def-use analysis inside a test. **A test asserts this
-paragraph still exists**, so widening the claim later has to confront the list
-rather than quietly inherit it.
+The claim in the code and here is therefore exactly: *a reporting symbol is not
+DIRECTLY referenced by anything that computes the verdict.*
