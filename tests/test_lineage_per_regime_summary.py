@@ -66,56 +66,94 @@ class TestTheSplitExists:
         without = summarize_lineage_scores(s, lab)
         with_split = summarize_lineage_scores(
             s, lab, {pd.Timestamp(d): "BULL_CALM" for d in dates})
-        assert without["mean_ic"] == pytest.approx(with_split["mean_ic"])
-        assert without["n_dates_with_labels"] == with_split["n_dates_with_labels"]
+        # [codex on bt#107] "bit-identical output" was too strong: supplying a
+        # map ADDS a `regime` key to each per_date row and new top-level keys.
+        # What is unchanged — and all that is claimed — is the POOLED fields
+        # and the per-date ICs.
+        for key in ("mean_ic", "n_dates_scored", "n_dates_with_labels"):
+            assert without[key] == pytest.approx(with_split[key]) if isinstance(
+                without[key], float) else without[key] == with_split[key]
+        assert [r["ic"] for r in without["per_date"]] == [
+            r["ic"] for r in with_split["per_date"]]
+        assert [r["date"] for r in without["per_date"]] == [
+            r["date"] for r in with_split["per_date"]]
+        # and the ONLY difference in a per_date row is the added regime tag
+        assert set(with_split["per_date"][0]) - set(without["per_date"][0]) == {"regime"}
 
 
-class TestTheLoadBearingFlag:
-    def test_pooled_POSITIVE_while_every_regime_is_NEGATIVE_is_flagged(self):
-        """The live shape, in miniature: one small strongly-positive regime drags
-        a pooled mean positive while the regime that carries the trading is
-        negative. Without the flag this reads as a passing candidate."""
-        big = [f"2026-01-{d:02d}" for d in range(5, 13)]      # 8 weak-negative days
-        small = ["2026-02-02"]                                # 1 strong-positive day
-        dates = big + small
-        signs = {d: -1.0 for d in big}
-        signs.update({d: 1.0 for d in small})
-        # weaken the negative days so the single positive day dominates the mean
+class TestTheDecomposition:
+    """[codex on bt#107] The first version asked whether the pooled mean
+    disagreed with EVERY regime. That is arithmetically impossible once dates
+    are assigned — the pooled mean is a date-weighted average of the regime
+    means, so it must lie between them. The flag was dead code for the exact
+    shape it was written for. The real shape is DOMINANCE."""
+
+    def _live_shape(self):
+        """50 strong-positive 'BEAR' dates against 363 weak-negative 'BULL_CALM'
+        dates — the live proportions, in miniature."""
+        bear = [f"2026-01-{d:02d}" for d in range(1, 6)]          # 5 dates
+        calm = [f"2026-03-{d:02d}" for d in range(1, 32)] + \
+               [f"2026-04-{d:02d}" for d in range(1, 6)]          # 36 dates
+        dates = bear + calm
+        signs = {**{d: 1.0 for d in bear}, **{d: -1.0 for d in calm}}
         s = _scores(dates, sign_by_date=signs)
-        noisy = s["date"].isin([pd.Timestamp(d) for d in big])
-        rng = np.random.default_rng(0)
-        s.loc[noisy, "score"] = s.loc[noisy, "score"] + rng.normal(0, 60, noisy.sum())
-        out = summarize_lineage_scores(
-            s, _labels(dates),
-            {**{pd.Timestamp(d): "BULL_CALM" for d in big},
-             **{pd.Timestamp(d): "BEAR" for d in small}})
-        assert out["by_regime"]["BULL_CALM"]["mean_ic"] < 0
-        assert out["by_regime"]["BEAR"]["mean_ic"] > 0
-        # the flag fires only when EVERY regime disagrees with the pooled sign
-        if out["mean_ic"] > 0 and out["by_regime"]["BEAR"]["mean_ic"] > 0:
-            assert out["pooled_is_a_regime_mix"] is False
-        assert out["pooled_is_a_regime_mix"] in (True, False)
+        # weaken the many negative dates so the few positive ones carry the mean
+        weak = s["date"].isin([pd.Timestamp(d) for d in calm])
+        rng = np.random.default_rng(7)
+        s.loc[weak, "score"] = s.loc[weak, "score"] + rng.normal(0, 40, int(weak.sum()))
+        regimes = {**{pd.Timestamp(d): "BEAR" for d in bear},
+                   **{pd.Timestamp(d): "BULL_CALM" for d in calm}}
+        return s, _labels(dates), regimes
 
-    def test_the_flag_fires_when_all_regimes_disagree_with_the_pool(self):
+    def test_the_minority_regime_carrying_the_pooled_SIGN_is_named(self):
+        s, lab, reg = self._live_shape()
+        out = summarize_lineage_scores(s, lab, reg)
+        assert out["by_regime"]["BEAR"]["mean_ic"] > 0
+        assert out["by_regime"]["BULL_CALM"]["mean_ic"] < 0
+        if out["pooled_ic"] > 0:
+            carriers = [c["regime"] for c in out["pooled_sign_carriers"]]
+            assert "BEAR" in carriers, out["pooled_sign_carriers"]
+            bear = next(c for c in out["pooled_sign_carriers"] if c["regime"] == "BEAR")
+            assert bear["weight"] < 0.25, bear
+            assert bear["pooled_ic_without_it"] < 0, bear
+
+    def test_weights_and_contributions_reconstruct_the_pooled_mean(self):
+        """The decomposition must be arithmetic, not decoration."""
+        s, lab, reg = self._live_shape()
+        out = summarize_lineage_scores(s, lab, reg)
+        assert sum(c["weight"] for c in out["by_regime"].values()) == pytest.approx(1.0)
+        assert sum(c["contribution_to_pooled_ic"]
+                   for c in out["by_regime"].values()) == pytest.approx(
+            out["pooled_ic"], abs=1e-9)
+
+    def test_no_carrier_when_every_regime_agrees_with_the_pool(self):
         dates = ["2026-01-05", "2026-01-06"]
-        s = _scores(dates, sign_by_date={d: -1.0 for d in dates})
         out = summarize_lineage_scores(
-            s, _labels(dates),
+            _scores(dates, sign_by_date={d: -1.0 for d in dates}), _labels(dates),
             {pd.Timestamp(d): ("BULL_CALM" if i == 0 else "BEAR")
              for i, d in enumerate(dates)})
-        # every regime is negative and so is the pool -> NOT a mix
-        assert out["mean_ic"] < 0
-        assert out["pooled_is_a_regime_mix"] is False
+        assert out["pooled_ic"] < 0
+        assert out["pooled_sign_carriers"] == []
 
-    def test_UNASSIGNED_dates_do_not_decide_the_flag(self):
-        """An unlabelled date must not be able to flip a conclusion about
-        regimes it was never assigned to."""
+    def test_a_single_regime_is_never_its_own_carrier(self):
+        """Removing the only regime leaves nothing to compare against."""
         dates = ["2026-01-05", "2026-01-06"]
-        s = _scores(dates, sign_by_date={d: 1.0 for d in dates})
         out = summarize_lineage_scores(
-            s, _labels(dates), {pd.Timestamp("2026-01-05"): "BULL_CALM"})
-        assert out["by_regime"][UNASSIGNED_REGIME]["n_dates"] == 1
-        assert out["pooled_is_a_regime_mix"] is False
+            _scores(dates, sign_by_date={d: 1.0 for d in dates}), _labels(dates),
+            {pd.Timestamp(d): "BULL_CALM" for d in dates})
+        assert out["pooled_sign_carriers"] == []
+
+    def test_a_pooled_mean_of_exactly_zero_reports_no_carriers(self):
+        """A zero pool has no sign for a regime to be carrying."""
+        import unittest.mock as _m
+        dates = ["2026-01-05", "2026-01-06"]
+        s, lab = _scores(dates, sign_by_date={"2026-01-05": 1.0,
+                                              "2026-01-06": -1.0}), _labels(dates)
+        out = summarize_lineage_scores(
+            s, lab, {pd.Timestamp(d): ("A" if i == 0 else "B")
+                     for i, d in enumerate(dates)})
+        assert out["pooled_ic"] == pytest.approx(0.0, abs=1e-12)
+        assert out["pooled_sign_carriers"] == []
 
 
 class TestAbsenceReadsAsAbsence:
@@ -125,7 +163,8 @@ class TestAbsenceReadsAsAbsence:
         out = summarize_lineage_scores(
             _scores(dates, sign_by_date={dates[0]: 1.0}), _labels(dates))
         assert out["by_regime"] is None
-        assert out["pooled_is_a_regime_mix"] is None
+        assert out["pooled_sign_carriers"] is None
+        assert out["pooled_ic"] is None
         assert "no regime_by_date" in out["by_regime_reason"]
 
     def test_an_unassigned_date_is_BUCKETED_not_dropped(self):
@@ -172,3 +211,23 @@ def test_the_stage2_entrypoint_accepts_and_forwards_a_regime_map():
         lineage_stage2.attempt_lineage_scoring_stamp).parameters
     assert "regime_by_date=regime_by_date" in inspect.getsource(
         lineage_stage2.attempt_lineage_scoring_stamp)
+
+
+def test_a_NaN_regime_is_UNASSIGNED_not_a_literal_nan_bucket():
+    """[codex on bt#107] A raw `Series.to_dict()` carries NaN. Stringifying one
+    would create a bucket named "nan" that reads like a regime."""
+    dates = ["2026-01-05", "2026-01-06"]
+    out = summarize_lineage_scores(
+        _scores(dates, sign_by_date={d: 1.0 for d in dates}), _labels(dates),
+        {pd.Timestamp("2026-01-05"): "BEAR",
+         pd.Timestamp("2026-01-06"): np.nan})
+    assert set(out["by_regime"]) == {"BEAR", UNASSIGNED_REGIME}
+    assert "nan" not in out["by_regime"]
+
+
+def test_a_pandas_NA_regime_is_also_UNASSIGNED():
+    dates = ["2026-01-05", "2026-01-06"]
+    out = summarize_lineage_scores(
+        _scores(dates, sign_by_date={d: 1.0 for d in dates}), _labels(dates),
+        {pd.Timestamp("2026-01-05"): "BEAR", pd.Timestamp("2026-01-06"): pd.NA})
+    assert set(out["by_regime"]) == {"BEAR", UNASSIGNED_REGIME}

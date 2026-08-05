@@ -200,8 +200,11 @@ def summarize_lineage_scores(scores: pd.DataFrame,
             regime = regime_by_date.get(pd.Timestamp(d))
             # A date the caller could not label is UNASSIGNED, not dropped:
             # silently discarding it would change the pooled mean the split is
-            # supposed to explain.
-            row["regime"] = str(regime) if regime is not None else UNASSIGNED_REGIME
+            # supposed to explain. [codex on bt#107] NaN/NA count as unlabelled —
+            # a raw `Series.to_dict()` carries them, and stringifying one would
+            # create a literal "nan" bucket that looks like a regime.
+            row["regime"] = (UNASSIGNED_REGIME if regime is None or pd.isna(regime)
+                             else str(regime))
         per_date.append(row)
 
     ics = [r["ic"] for r in per_date]
@@ -219,7 +222,8 @@ def _by_regime_block(per_date: list, regime_by_date: dict | None) -> dict:
     if regime_by_date is None:
         return {"by_regime": None,
                 "by_regime_reason": "no regime_by_date supplied by the caller",
-                "pooled_is_a_regime_mix": None}
+                "pooled_ic": None,
+                "pooled_sign_carriers": None}
     buckets: dict[str, list] = {}
     for row in per_date:
         buckets.setdefault(row["regime"], []).append(row["ic"])
@@ -230,14 +234,39 @@ def _by_regime_block(per_date: list, regime_by_date: dict | None) -> dict:
                "max_ic": float(np.max(vals))}
         for name, vals in sorted(buckets.items())
     }
-    # The load-bearing flag: pooled positive while EVERY regime with dates is
-    # negative (or vice versa) is the exact shape measured on the live book.
-    means = [b["mean_ic"] for name, b in by_regime.items()
-             if name != UNASSIGNED_REGIME]
-    pooled = float(np.mean([r["ic"] for r in per_date])) if per_date else None
-    mix = None
-    if means and pooled is not None:
-        mix = bool((pooled > 0 and max(means) < 0) or (pooled < 0 and min(means) > 0))
+    # DECOMPOSITION, not a sign-disagreement flag. [codex on bt#107] The first
+    # version asked whether the pooled mean disagreed with EVERY regime — which
+    # is arithmetically impossible once dates are assigned, because the pooled
+    # mean is a date-weighted average of the regime means and must lie between
+    # them. It was dead code for the very shape it was written for.
+    #
+    # The live shape is not sign-disagreement, it is DOMINANCE: a small,
+    # high-|IC| regime supplying the pooled sign while the regime that carries
+    # the trading has the opposite one. So: report each regime's weight and its
+    # contribution to the pooled mean, and name any regime whose REMOVAL flips
+    # the pooled sign. On this book that is BEAR at ~12% of dates.
+    total = len(per_date)
+    pooled = float(np.mean([r["ic"] for r in per_date])) if total else None
+    for name, cell in by_regime.items():
+        cell["weight"] = cell["n_dates"] / total if total else None
+        cell["contribution_to_pooled_ic"] = (
+            cell["weight"] * cell["mean_ic"] if cell["weight"] is not None else None)
+
+    sign_carriers = []
+    if pooled is not None and pooled != 0:
+        for name in by_regime:
+            rest = [r["ic"] for r in per_date if r["regime"] != name]
+            if not rest:
+                continue
+            without = float(np.mean(rest))
+            if (without > 0) != (pooled > 0):
+                sign_carriers.append(
+                    {"regime": name,
+                     "weight": by_regime[name]["weight"],
+                     "pooled_ic_without_it": without})
     return {"by_regime": by_regime,
             "by_regime_reason": None,
-            "pooled_is_a_regime_mix": mix}
+            "pooled_ic": pooled,
+            # Non-empty means the pooled SIGN is supplied by regime(s) whose
+            # removal flips it — read the split, not the pool.
+            "pooled_sign_carriers": sign_carriers}
