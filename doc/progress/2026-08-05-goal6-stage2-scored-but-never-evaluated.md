@@ -74,4 +74,7 @@ Both are named in NEXT rather than guessed at.
 2. Re-pin or regenerate the extension bundle against the current admitted root,
    and add an alarm for the mismatch: today the lane simply went quiet.
 
-Suites: 5 new tests, incl. one bound to the live stamps · 663 passed.
+Suites: 5 new tests, incl. one bound to the live stamps · **672 passed, 1
+skipped, 3 failed** — all three failures (`test_b1_lift`, `test_import_lift`,
+`test_lineage_stage2::test_REAL_run001_…`) reproduce on `origin/main` and are
+untouched by this change `[VERIFIED — re-run on main earlier this session]`.
