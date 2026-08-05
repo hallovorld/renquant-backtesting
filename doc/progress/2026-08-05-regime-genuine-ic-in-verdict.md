@@ -85,3 +85,29 @@ truncated. Fixed, and pinned — every extracted body must now start with
 body that is only a signature would satisfy a substring check vacuously.
 
 22 tests.
+
+## Review round 4 (codex on bt#106)
+
+Two more, both correct:
+
+1. **The extractor swallowed the NEXT function's decorator lines.** `runner.py`
+   has no decorators today, so no guarded span was mis-scanned — but the
+   extractor was wrong, and "it happens not to matter here" is not a fix. It now
+   walks back over trailing top-level decorators and blank lines, pinned by a
+   synthetic `def first / @dec / def second` fixture rather than by the current
+   file.
+2. **`main` was omitted from the guarded spans**, and `main` is where the final
+   verdict is assembled (`overall_pass = _compute_overall_pass(...)`, then
+   `sys.exit(0 if overall_pass else 1)`). A future
+   `overall_pass = _compute_overall_pass(...) and sanity_regime_genuine_ic`
+   would have evaded the guard exactly as the `run_sanity_battery` omission did.
+
+`main` needs a NARROWER rule than the others, because it legitimately mentions
+the reporting symbols — it is where they are STAMPED. So the check is on the
+verdict itself: **every statement touching `overall_pass` must be free of the
+reporting symbols**, and the test asserts such statements exist (one calling
+`_compute_overall_pass`, one calling `sys.exit`) so it cannot scan nothing. A
+companion test plants a reference into those statements and requires the same
+assertion path to RAISE.
+
+25 tests.

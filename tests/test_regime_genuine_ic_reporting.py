@@ -117,6 +117,13 @@ _VERDICT_FUNCTIONS = (
     "run_sanity_battery",
 )
 
+# `main` is BOTH where the verdict is assembled (`overall_pass = ...`, then
+# `sys.exit(0 if overall_pass else 1)`) and where the reporting summary is
+# STAMPED — so a blanket "this symbol must not appear" scan cannot apply there.
+# [codex on bt#106] The guard for `main` is therefore narrower and exact: no
+# statement that touches `overall_pass` may reference a reporting symbol.
+_VERDICT_ASSEMBLY_FUNCTION = "main"
+
 
 def _runner_source() -> str:
     return (Path(__file__).resolve().parent.parent / "src" / "renquant_backtesting"
@@ -135,7 +142,14 @@ def _function_body(src: str, name: str) -> str:
     rest = src[start:]
     tail = rest[1:]                        # skip our own `def` when looking ahead
     ends = [tail.index(m) for m in ("\ndef ", "\nclass ") if m in tail]
-    return rest[:min(ends) + 1] if ends else rest
+    body = rest[:min(ends) + 1] if ends else rest
+    # [codex on bt#106] The next function's DECORATOR lines sit above its `def`
+    # and would otherwise be swallowed into this body. Walk back over trailing
+    # top-level decorators and blank lines so exactly one function is returned.
+    lines = body.splitlines(keepends=True)
+    while lines and (not lines[-1].strip() or lines[-1].startswith("@")):
+        lines.pop()
+    return "".join(lines)
 
 
 def assert_decides_nothing(body: str, func: str) -> None:
@@ -194,3 +208,39 @@ def test_the_summary_IS_reachable_from_the_stamping_path():
     src = _runner_source()
     assert '"sanity_regime_genuine_ic": regime_genuine_ic_summary(' in src
     assert "format_regime_genuine_ic(wf_meta.get(" in src
+
+
+def test_the_verdict_ASSEMBLY_in_main_is_also_clean():
+    """The span the previous guard list omitted. `main` legitimately mentions
+    the reporting symbols (it stamps them), so the check is on the verdict
+    itself: every statement touching `overall_pass` must be free of them. A
+    future `overall_pass = _compute_overall_pass(...) and sanity_regime_genuine_ic`
+    would evade a function-level scan exactly as the `run_sanity_battery`
+    omission did."""
+    body = _function_body(_runner_source(), _VERDICT_ASSEMBLY_FUNCTION)
+    touching = [ln for ln in body.splitlines() if "overall_pass" in ln]
+    assert touching, "no statement touches overall_pass — the guard is scanning nothing"
+    assert any("_compute_overall_pass(" in ln for ln in touching), touching
+    assert any("sys.exit(" in ln for ln in touching), touching
+    for ln in touching:
+        assert_decides_nothing(ln, f"{_VERDICT_ASSEMBLY_FUNCTION} (overall_pass)")
+
+
+def test_that_main_guard_REJECTS_a_planted_reference():
+    body = _function_body(_runner_source(), _VERDICT_ASSEMBLY_FUNCTION)
+    planted = [ln.replace("overall_pass",
+                          "overall_pass and sanity_regime_genuine_ic", 1)
+               for ln in body.splitlines() if "overall_pass" in ln]
+    assert planted
+    with pytest.raises(AssertionError, match="must not decide anything"):
+        for ln in planted:
+            assert_decides_nothing(ln, "main (overall_pass)")
+
+
+def test_the_extractor_stops_before_the_next_functions_DECORATOR():
+    """[codex on bt#106] `runner.py` has no decorators today, so this pins the
+    behaviour rather than the current file."""
+    src = "\ndef first():\n    return 1\n\n\n@dec\ndef second():\n    return 2\n"
+    body = _function_body(src, "first")
+    assert body.rstrip().endswith("return 1"), repr(body)
+    assert "@dec" not in body and "second" not in body
