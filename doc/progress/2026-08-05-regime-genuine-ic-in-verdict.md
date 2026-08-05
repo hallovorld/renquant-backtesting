@@ -176,3 +176,32 @@ one asserting the slice contains the verdict's real inputs, excludes the
 reporting symbols, and stays under half the module's names.
 
 29 tests.
+
+## Review round 7 (codex on bt#106) — an object method, and the ACCEPTED CORNERS
+
+Codex re-attacked the widened guard. Dict-of-callables, list-of-callables and
+`functools.partial` wrappers all raise correctly. One shape did not:
+
+```python
+class _Carrier:
+    def verdict(self): return sanity_regime_genuine_ic
+...
+_carrier = _Carrier()
+overall_pass = _carrier.verdict() and _compute_overall_pass(...)
+```
+
+The slice resolved `_carrier -> _Carrier`, but the wrapper check only traversed
+module-level `FunctionDef`/`AsyncFunctionDef`, never methods under a `ClassDef`.
+Codex called it blocking, correctly: that is a normal refactoring shape, not a
+contrived corner. Fixed by mapping a class NAME to its whole `ClassDef`, so every
+method body is scanned. Test added.
+
+### ACCEPTED CORNERS (a decision, not an oversight)
+
+Rebinding through `for`, through `with ... as`, and through a walrus in a
+separate statement are outside the documented scope (`REBINDING assignments`).
+Codex judged them acceptable for a test-level guard and I agree: each requires
+deliberately routing a reporting symbol through an unusual binding form, and
+closing them means real def-use analysis inside a test. **A test asserts this
+paragraph still exists**, so widening the claim later has to confront the list
+rather than quietly inherit it.

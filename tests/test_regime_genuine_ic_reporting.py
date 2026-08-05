@@ -293,8 +293,14 @@ def _functions_referencing_reporting(src: str, names: set[str]) -> set[str]:
     is caught too.
     """
     tree = ast.parse(src)
+    # CLASSES too. [codex on bt#106] `class _C: def verdict(self): return
+    # sanity_regime_genuine_ic` then `_c = _C(); overall_pass = _c.verdict()
+    # and ...` is a normal refactoring shape, not a syntax corner, and the
+    # slice already resolves `_c -> _C`. Mapping the class NAME to its whole
+    # ClassDef scans every method body, so the wrapper check sees it.
     functions = {n.name: n for n in tree.body
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef))}
     guilty: set[str] = set()
     seen: set[str] = set()
     frontier = [n for n in names if n in functions]
@@ -427,6 +433,37 @@ def test_the_main_guard_CATCHES_a_WRAPPED_reporting_symbol():
         "    overall_pass = _reporting_verdict_helper() and _compute_overall_pass(", 1)
     with pytest.raises(AssertionError, match="must not decide anything"):
         _assert_verdict_untainted(src, _verdict_expressions(src))
+
+
+def test_the_main_guard_CATCHES_a_reporting_symbol_behind_an_OBJECT_METHOD():
+    """[codex on bt#106] A normal refactoring shape, not a syntax corner:
+    `class _C: def verdict(self): return <reporting>` then
+    `_c = _C(); overall_pass = _c.verdict() and ...`."""
+    src = _runner_source()
+    src = src.replace("\ndef main(",
+                      "\nclass _VerdictCarrier:\n"
+                      "    def verdict(self):\n"
+                      "        return sanity_regime_genuine_ic\n\n\ndef main(", 1)
+    src = src.replace(
+        "    overall_pass = _compute_overall_pass(",
+        "    _carrier = _VerdictCarrier()\n"
+        "    overall_pass = _carrier.verdict() and _compute_overall_pass(", 1)
+    with pytest.raises(AssertionError, match="must not decide anything"):
+        _assert_verdict_untainted(src, _verdict_expressions(src))
+
+
+def test_the_ACCEPTED_CORNERS_are_written_down_not_forgotten():
+    """`for`, `with ... as` and a separate-statement walrus rebind are outside
+    the documented scope (REBINDING assignments). Codex judged them acceptable
+    for a test-level guard; that judgement is recorded here so it is a decision
+    rather than an oversight, and so widening the claim later has to confront
+    it."""
+    doc = (Path(__file__).resolve().parent.parent / "doc" / "progress"
+           / "2026-08-05-regime-genuine-ic-in-verdict.md").read_text()
+    flat = " ".join(doc.split())
+    assert "ACCEPTED CORNERS" in flat
+    for corner in ("for", "with", "walrus"):
+        assert corner in flat
 
 
 def test_the_slice_is_a_real_slice_not_the_whole_module():
