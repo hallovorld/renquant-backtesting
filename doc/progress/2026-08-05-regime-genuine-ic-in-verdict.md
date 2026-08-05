@@ -44,3 +44,104 @@ OMITTED, never zero-filled — an absent measurement must read as absent, not as
 "measured, and it is zero".
 
 Suite: 9 new tests.
+
+## Review round 2 (codex on bt#105)
+
+Codex confirmed the change is reporting-only and that every number in the PR
+body matches the artifact, including the 2×/120-session shift — then blocked on
+the anti-vacuity guard, correctly: it scanned only the slice from
+`def _compute_overall_pass` to `def _sanity_result_passed`, missing the other
+verdict-producing spans. Above all `run_sanity_battery`, where
+`pass_all = pass_shuf and pass_placebo and pass_regime` is formed — a future
+reference there would change behaviour without touching the scanned slice, so
+the advertised guard was not guarding.
+
+The guard is now parametrised over every pass/fail-producing function
+(`_compute_overall_pass`, `_sanity_result_passed`, `_placebo_difference_pass`,
+`_placebo_absolute_rule_pass`, `_pooled_placebo_verdict`, `run_sanity_battery`),
+each asserted to EXIST so a rename empties the list loudly instead of passing
+vacuously. Two more tests: one proves the body extractor returns
+`run_sanity_battery`'s real body and that a planted reference in it is detected;
+one asserts the summary IS reachable from the stamping path, because
+reporting-only must not quietly become unreachable.
+
+16 tests.
+
+## Review round 3 (codex on bt#106)
+
+The anti-vacuity regression asserted only that the planted string was PRESENT in
+the modified body — tautological, and it would still pass if the live check
+stopped inspecting bodies at all.
+
+The assertion is now a shared helper, `assert_decides_nothing(body, func)`,
+called by BOTH the live check and its regression. The regression requires it to
+RAISE on the planted body, and to still pass on the unplanted one (a guard that
+rejects everything proves nothing either).
+
+Writing that test immediately found a real bug in my own extractor: an
+off-by-one dropped the leading `d` of `def`, so five of six bodies were
+truncated. Fixed, and pinned — every extracted body must now start with
+`def <name>(`, exceed 120 chars, and contain a `return`/`assert`, because a
+body that is only a signature would satisfy a substring check vacuously.
+
+22 tests.
+
+## Review round 4 (codex on bt#106)
+
+Two more, both correct:
+
+1. **The extractor swallowed the NEXT function's decorator lines.** `runner.py`
+   has no decorators today, so no guarded span was mis-scanned — but the
+   extractor was wrong, and "it happens not to matter here" is not a fix. It now
+   walks back over trailing top-level decorators and blank lines, pinned by a
+   synthetic `def first / @dec / def second` fixture rather than by the current
+   file.
+2. **`main` was omitted from the guarded spans**, and `main` is where the final
+   verdict is assembled (`overall_pass = _compute_overall_pass(...)`, then
+   `sys.exit(0 if overall_pass else 1)`). A future
+   `overall_pass = _compute_overall_pass(...) and sanity_regime_genuine_ic`
+   would have evaded the guard exactly as the `run_sanity_battery` omission did.
+
+`main` needs a NARROWER rule than the others, because it legitimately mentions
+the reporting symbols — it is where they are STAMPED. So the check is on the
+verdict itself: **every statement touching `overall_pass` must be free of the
+reporting symbols**, and the test asserts such statements exist (one calling
+`_compute_overall_pass`, one calling `sys.exit`) so it cannot scan nothing. A
+companion test plants a reference into those statements and requires the same
+assertion path to RAISE.
+
+25 tests.
+
+## Review rounds 5-8 (codex on bt#106) — and a scope correction I should have made myself
+
+Rounds 5-7 chased indirection: the `main` guard scanned LINES, so the multi-line
+`wf_meta = {...}` statement evaded it; then an AST version missed aliases
+(`_vh = <reporting>`), wrappers (`def _h(): return <reporting>`) and object
+methods. Each fix was correct on its own terms, and by round 7 the guard was a
+**372-line AST dataflow analyser inside a test module**.
+
+Round 8, correctly, rejected the whole direction: that is disproportionate
+maintenance and false-positive risk for a **reporting-only** change, and the
+"transitively / every span" wording still was not true because normal rebinding
+forms stayed out of scope. This is the over-engineering failure mode I have a
+standing rule about, and codex caught it, not me.
+
+**Scoped back to a DIRECT-REFERENCE invariant**, which is what actually earns
+its keep: no verdict-producing function may mention a reporting symbol, and in
+`main` — which legitimately mentions them, being where they are STAMPED — no
+verdict EXPRESSION (`overall_pass = …`, `sys.exit(<verdict>)`) may. One concise
+regression proves the guard FIRES on a planted reference through the same
+assertion path, in both places; one proves the legitimate `wf_meta` statement is
+tolerated; one proves each extracted body is real source.
+
+### OUT OF SCOPE (a decision, not an oversight)
+
+Indirection is **not** checked: an alias, a wrapper function, an object method,
+a `for` / `with … as` bind, or a walrus can route a reporting symbol into the
+verdict without this guard firing. Closing those needs real def-use analysis,
+which belongs in a separately scoped tool with real requirements — not in a test
+module. **A test asserts this paragraph still exists**, so widening the claim
+later has to confront the list rather than quietly inherit it.
+
+The claim in the code and here is therefore exactly: *a reporting symbol is not
+DIRECTLY referenced by anything that computes the verdict.*
