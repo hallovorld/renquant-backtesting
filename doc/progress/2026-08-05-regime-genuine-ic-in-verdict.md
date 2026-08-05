@@ -44,3 +44,25 @@ OMITTED, never zero-filled — an absent measurement must read as absent, not as
 "measured, and it is zero".
 
 Suite: 9 new tests.
+
+## Review round 2 (codex on bt#105)
+
+Codex confirmed the change is reporting-only and that every number in the PR
+body matches the artifact, including the 2×/120-session shift — then blocked on
+the anti-vacuity guard, correctly: it scanned only the slice from
+`def _compute_overall_pass` to `def _sanity_result_passed`, missing the other
+verdict-producing spans. Above all `run_sanity_battery`, where
+`pass_all = pass_shuf and pass_placebo and pass_regime` is formed — a future
+reference there would change behaviour without touching the scanned slice, so
+the advertised guard was not guarding.
+
+The guard is now parametrised over every pass/fail-producing function
+(`_compute_overall_pass`, `_sanity_result_passed`, `_placebo_difference_pass`,
+`_placebo_absolute_rule_pass`, `_pooled_placebo_verdict`, `run_sanity_battery`),
+each asserted to EXIST so a rename empties the list loudly instead of passing
+vacuously. Two more tests: one proves the body extractor returns
+`run_sanity_battery`'s real body and that a planted reference in it is detected;
+one asserts the summary IS reachable from the stamping path, because
+reporting-only must not quietly become unreachable.
+
+16 tests.

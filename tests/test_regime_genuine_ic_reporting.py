@@ -98,13 +98,68 @@ class TestLogLine:
         assert "BEAR=n/a" in line
 
 
-def test_reporting_only_it_is_referenced_by_NO_pass_fail_leg():
-    """The load-bearing constraint. If `sanity_regime_genuine_ic` or either
-    helper ever appears inside the verdict computation, this fails."""
-    src = (Path(__file__).resolve().parent.parent / "src" / "renquant_backtesting"
-           / "wf_gate" / "runner.py").read_text()
-    start = src.index("def _compute_overall_pass(")
-    body = src[start:src.index("def _sanity_result_passed(")]
-    for forbidden in ("sanity_regime_genuine_ic", "regime_genuine_ic_summary",
-                      "format_regime_genuine_ic"):
-        assert forbidden not in body, f"{forbidden} must not decide anything"
+# [codex on bt#105] Scanning only _compute_overall_pass misses the OTHER
+# verdict-producing spans — above all `run_sanity_battery`, where
+# `pass_all = pass_shuf and pass_placebo and pass_regime` is formed. A future
+# reference there would change behaviour without touching the scanned slice, so
+# the advertised guard would not have been guarding.
+_REPORTING_SYMBOLS = ("sanity_regime_genuine_ic", "regime_genuine_ic_summary",
+                      "format_regime_genuine_ic")
+
+# Every place a pass/fail is COMPUTED. Each is asserted to exist, so a rename
+# that silently empties this list fails instead of vacuously passing.
+_VERDICT_FUNCTIONS = (
+    "_compute_overall_pass",
+    "_sanity_result_passed",
+    "_placebo_difference_pass",
+    "_placebo_absolute_rule_pass",
+    "_pooled_placebo_verdict",
+    "run_sanity_battery",
+)
+
+
+def _runner_source() -> str:
+    return (Path(__file__).resolve().parent.parent / "src" / "renquant_backtesting"
+            / "wf_gate" / "runner.py").read_text()
+
+
+def _function_body(src: str, name: str) -> str:
+    """Source of `def name(` up to the next top-level `def `/`class `."""
+    marker = f"\ndef {name}("
+    start = src.index(marker) + 1
+    rest = src[start + 1:]
+    ends = [rest.index(m) for m in ("\ndef ", "\nclass ") if m in rest]
+    return rest[:min(ends)] if ends else rest
+
+
+@pytest.mark.parametrize("func", _VERDICT_FUNCTIONS)
+def test_reporting_only_no_verdict_function_references_it(func):
+    """The load-bearing constraint, across EVERY pass/fail-producing span."""
+    src = _runner_source()
+    assert f"\ndef {func}(" in src, (
+        f"{func} no longer exists — this guard is now scanning nothing; "
+        f"re-derive the list of verdict-producing functions")
+    body = _function_body(src, func)
+    for forbidden in _REPORTING_SYMBOLS:
+        assert forbidden not in body, (
+            f"{forbidden} appears inside {func} — a reporting surface must not "
+            f"decide anything")
+
+
+def test_the_guard_would_actually_CATCH_a_reference():
+    """Anti-vacuity for the guard itself: prove the extractor returns a real
+    body and that a planted reference in it is detected."""
+    src = _runner_source()
+    body = _function_body(src, "run_sanity_battery")
+    assert "pass_all" in body and len(body) > 500, (
+        "the extractor did not return run_sanity_battery's real body")
+    planted = body.replace("pass_all", "pass_all and sanity_regime_genuine_ic", 1)
+    assert any(sym in planted for sym in _REPORTING_SYMBOLS)
+
+
+def test_the_summary_IS_reachable_from_the_stamping_path():
+    """The mirror image: reporting-only must not mean unreachable. If nothing
+    stamps it, the whole PR is inert scaffolding."""
+    src = _runner_source()
+    assert '"sanity_regime_genuine_ic": regime_genuine_ic_summary(' in src
+    assert "format_regime_genuine_ic(wf_meta.get(" in src
