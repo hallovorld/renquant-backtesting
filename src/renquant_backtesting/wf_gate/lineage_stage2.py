@@ -199,6 +199,7 @@ def _score_segment(*, seg_name: str, rows: list[dict], input_vintage: str | None
                    vintage_note: str | None, recipe_id: str, bundle_dir: Path,
                    grid: dict, panel: pd.DataFrame, panel_dates: pd.Series,
                    labels_by_date: dict | None, label_horizon_bdays: int,
+                   regime_by_date: dict | None = None,
                    min_windows: int, t0: float, budget: float,
                    factory_kw: dict, workdir: Path) -> dict:
     """One segment: admissibility (#95) then per-window scoring (#96 engine).
@@ -287,8 +288,17 @@ def _score_segment(*, seg_name: str, rows: list[dict], input_vintage: str | None
         "n_dates_scored": int(scores["date"].nunique()) if len(scores) else 0,
     }
     if labels_by_date is not None and len(scores):
+        # Per-regime split threaded through to the stamp (orch#805): the pooled
+        # mean is a regime-mix artifact on this book, so a Stage-2 lane that
+        # ranked candidates on it would rank them on that artifact. The regime
+        # map is supplied by the CALLER, exactly like labels_by_date — this
+        # module never derives a regime.
+        # Passed as a KEYWORD and only when supplied, so the two-argument call
+        # contract other callers (and test doubles) rely on is unchanged when
+        # there is no regime map — adding a capability must not break the seam.
+        extra = {"regime_by_date": regime_by_date} if regime_by_date is not None else {}
         statistics["label_summary"] = LS.summarize_lineage_scores(
-            scores, labels_by_date)
+            scores, labels_by_date, **extra)
     scoring_verdict = "scored" if n_scored >= min_windows else "refused"
     return {
         "segment": seg_name,
@@ -316,6 +326,7 @@ def attempt_lineage_scoring_stamp(*, stage1: dict,
                                   panel: pd.DataFrame,
                                   label_horizon_bdays: int,
                                   labels_by_date: dict | None = None,
+                                  regime_by_date: dict | None = None,
                                   oos_dates_by_cutoff: dict | None = None,
                                   min_admissible_windows_per_segment: int =
                                   DEFAULT_MIN_ADMISSIBLE_WINDOWS,
@@ -400,6 +411,7 @@ def attempt_lineage_scoring_stamp(*, stage1: dict,
             common = dict(recipe_id=recipe_id, bundle_dir=mpath.parent,
                           grid=grid, panel=panel, panel_dates=panel_dates,
                           labels_by_date=labels_by_date,
+                          regime_by_date=regime_by_date,
                           label_horizon_bdays=label_horizon_bdays,
                           min_windows=min_admissible_windows_per_segment,
                           t0=t0, budget=float(time_budget_seconds),
