@@ -287,6 +287,23 @@ def _score_segment(*, seg_name: str, rows: list[dict], input_vintage: str | None
         "n_rows_scored": int(len(scores)),
         "n_dates_scored": int(scores["date"].nunique()) if len(scores) else 0,
     }
+    # WHY THERE IS NO IC, said out loud. [GOAL-6, measured 2026-08-05] The
+    # 2026-08-04 stamp scored 124 of 125 windows and carried NO `label_summary`
+    # at all, because the gate's call site passes no `labels_by_date`. A reader
+    # saw `statistics` without the key and could not tell "labels were never
+    # supplied" from "labels were supplied and nothing matured" — and the
+    # per-regime split added in bt#107 sits downstream of a summary that never
+    # runs. An absent evaluation must READ as absent, with its reason.
+    if labels_by_date is None:
+        statistics["label_summary"] = None
+        statistics["label_summary_absent_because"] = (
+            "the caller supplied no labels_by_date — this lane SCORED but was "
+            "never evaluated against labels, so it produced no IC of any kind")
+    elif not len(scores):
+        statistics["label_summary"] = None
+        statistics["label_summary_absent_because"] = (
+            "no rows were scored in this segment, so there is nothing to "
+            "evaluate against the supplied labels")
     if labels_by_date is not None and len(scores):
         # Per-regime split threaded through to the stamp (orch#805): the pooled
         # mean is a regime-mix artifact on this book, so a Stage-2 lane that
