@@ -124,12 +124,27 @@ def _runner_source() -> str:
 
 
 def _function_body(src: str, name: str) -> str:
-    """Source of `def name(` up to the next top-level `def `/`class `."""
+    """Source of `def name(` up to the next TOP-LEVEL `def `/`class `.
+
+    Nested defs and decorated helpers inside the function are indented, so they
+    do not match `\ndef `/`\nclass ` and stay inside the returned body — which
+    is what the guard wants: a reference hidden in a closure still counts.
+    """
     marker = f"\ndef {name}("
-    start = src.index(marker) + 1
-    rest = src[start + 1:]
-    ends = [rest.index(m) for m in ("\ndef ", "\nclass ") if m in rest]
-    return rest[:min(ends)] if ends else rest
+    start = src.index(marker) + 1          # first char of `def`, not the newline
+    rest = src[start:]
+    tail = rest[1:]                        # skip our own `def` when looking ahead
+    ends = [tail.index(m) for m in ("\ndef ", "\nclass ") if m in tail]
+    return rest[:min(ends) + 1] if ends else rest
+
+
+def assert_decides_nothing(body: str, func: str) -> None:
+    """THE guard. Both the live check and its own regression call THIS, so the
+    regression cannot pass while the check has stopped checking. [codex on bt#106]"""
+    for forbidden in _REPORTING_SYMBOLS:
+        assert forbidden not in body, (
+            f"{forbidden} appears inside {func} — a reporting surface must not "
+            f"decide anything")
 
 
 @pytest.mark.parametrize("func", _VERDICT_FUNCTIONS)
@@ -139,22 +154,38 @@ def test_reporting_only_no_verdict_function_references_it(func):
     assert f"\ndef {func}(" in src, (
         f"{func} no longer exists — this guard is now scanning nothing; "
         f"re-derive the list of verdict-producing functions")
-    body = _function_body(src, func)
-    for forbidden in _REPORTING_SYMBOLS:
-        assert forbidden not in body, (
-            f"{forbidden} appears inside {func} — a reporting surface must not "
-            f"decide anything")
+    assert_decides_nothing(_function_body(src, func), func)
 
 
-def test_the_guard_would_actually_CATCH_a_reference():
-    """Anti-vacuity for the guard itself: prove the extractor returns a real
-    body and that a planted reference in it is detected."""
+def test_the_guard_REJECTS_a_planted_reference():
+    """Anti-vacuity for the guard itself. It is not enough to show the planted
+    string is present — that is tautological and would still pass if the live
+    check stopped inspecting bodies. This runs the SAME assertion path and
+    requires it to RAISE. [codex on bt#106]"""
     src = _runner_source()
     body = _function_body(src, "run_sanity_battery")
     assert "pass_all" in body and len(body) > 500, (
         "the extractor did not return run_sanity_battery's real body")
+
     planted = body.replace("pass_all", "pass_all and sanity_regime_genuine_ic", 1)
-    assert any(sym in planted for sym in _REPORTING_SYMBOLS)
+    assert planted != body, "the plant did not apply — the regression is vacuous"
+    with pytest.raises(AssertionError, match="must not decide anything"):
+        assert_decides_nothing(planted, "run_sanity_battery")
+
+    # ... and the unplanted body must still pass through the same call, or the
+    # guard would be rejecting everything and proving nothing.
+    assert_decides_nothing(body, "run_sanity_battery")
+
+
+@pytest.mark.parametrize("func", _VERDICT_FUNCTIONS)
+def test_every_extracted_body_is_REAL_source_not_an_empty_string(func):
+    """A body extractor that silently returns '' would make every guard above
+    pass vacuously — the exact failure mode this file exists to prevent."""
+    body = _function_body(_runner_source(), func)
+    assert body.startswith(f"def {func}("), (func, body[:60])
+    assert len(body) > 120, (func, len(body))
+    # a body that is only a signature would pass a substring check vacuously
+    assert "return" in body or "assert" in body, func
 
 
 def test_the_summary_IS_reachable_from_the_stamping_path():

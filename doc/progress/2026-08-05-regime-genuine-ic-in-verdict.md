@@ -66,3 +66,22 @@ one asserts the summary IS reachable from the stamping path, because
 reporting-only must not quietly become unreachable.
 
 16 tests.
+
+## Review round 3 (codex on bt#106)
+
+The anti-vacuity regression asserted only that the planted string was PRESENT in
+the modified body — tautological, and it would still pass if the live check
+stopped inspecting bodies at all.
+
+The assertion is now a shared helper, `assert_decides_nothing(body, func)`,
+called by BOTH the live check and its regression. The regression requires it to
+RAISE on the planted body, and to still pass on the unplanted one (a guard that
+rejects everything proves nothing either).
+
+Writing that test immediately found a real bug in my own extractor: an
+off-by-one dropped the leading `d` of `def`, so five of six bodies were
+truncated. Fixed, and pinned — every extracted body must now start with
+`def <name>(`, exceed 120 chars, and contain a `return`/`assert`, because a
+body that is only a signature would satisfy a substring check vacuously.
+
+22 tests.
