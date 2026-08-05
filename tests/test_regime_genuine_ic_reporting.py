@@ -222,6 +222,94 @@ def _names_in(node) -> set[str]:
     return out
 
 
+def _plain_names(node) -> set[str]:
+    """Identifiers bound as NAMES under `node` (attributes excluded — `.get` is
+    not a dependency and treating it as one smears the slice over the module)."""
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _verdict_dependencies(src: str, exprs: list) -> set[str]:
+    """BACKWARD slice of the verdict, over ASSIGNMENTS only.
+
+    [codex on bt#106] Two earlier attempts were wrong in opposite directions.
+    Forward taint smeared over 441 names because `wf_meta = {...}` legitimately
+    holds a reporting symbol. Then merging called functions' bodies into the
+    slice by NAME re-inflated it to 609, because a local inside a big helper
+    that happens to share a name with a `main` local (`md`, `wf_meta`) drags
+    main's assignment in — a name-keyed slice cannot tell those apart, and
+    real def-use analysis is not worth building inside a test.
+
+    So the slice follows ASSIGNMENTS (main's scope plus module level) and stops
+    at call boundaries. Functions reached this way are checked SEPARATELY, by
+    `_functions_referencing_reporting`, which asks the only question that
+    matters about them: does this function hand back a reporting symbol?
+    """
+    tree = ast.parse(src)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    assigns: dict[str, list] = {}
+    scopes = [main] + [n for n in tree.body if not isinstance(
+        n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    for scope in scopes:
+        for node in ast.walk(scope):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    # REBINDINGS only. `md["wf_gate_metadata"] = wf_meta`
+                    # mutates a container that is DOWNSTREAM of the verdict;
+                    # treating it as "md depends on wf_meta" walks the slice
+                    # forward into the stamping code and re-introduces the
+                    # false positive this guard exists to avoid.
+                    if isinstance(target, ast.Name):
+                        assigns.setdefault(target.id, []).append(node.value)
+                    elif isinstance(target, (ast.Tuple, ast.List)):
+                        for sub in target.elts:
+                            if isinstance(sub, ast.Name):
+                                assigns.setdefault(sub.id, []).append(node.value)
+
+    deps: set[str] = set()
+    for _, expr in exprs:
+        deps |= _plain_names(expr)
+    for _ in range(50):                       # fixpoint
+        grew = False
+        for name in list(deps):
+            for value in assigns.get(name, ()):
+                fresh = _plain_names(value) - deps
+                if fresh:
+                    deps |= fresh
+                    grew = True
+        if not grew:
+            break
+    else:                                     # pragma: no cover - defensive
+        raise AssertionError("dependency slice did not converge")
+    return deps
+
+
+def _functions_referencing_reporting(src: str, names: set[str]) -> set[str]:
+    """Of `names`, the module-level functions that mention a reporting symbol.
+
+    Closes the WRAPPED bypass (`def _h(): return sanity_regime_genuine_ic`,
+    then `overall_pass = _h() and ...`) without merging the callee's locals
+    into the caller's slice. Follows calls transitively, so a two-hop wrapper
+    is caught too.
+    """
+    tree = ast.parse(src)
+    functions = {n.name: n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    guilty: set[str] = set()
+    seen: set[str] = set()
+    frontier = [n for n in names if n in functions]
+    while frontier:
+        name = frontier.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body_names = _plain_names(functions[name])
+        if body_names & set(_REPORTING_SYMBOLS):
+            guilty.add(name)
+        frontier.extend(n for n in body_names if n in functions and n not in seen)
+    return guilty
+
+
 def _verdict_expressions(src: str) -> list[tuple[str, ast.AST]]:
     """(label, expression) for everything that PRODUCES the verdict in `main`.
 
@@ -245,8 +333,28 @@ def _verdict_expressions(src: str) -> list[tuple[str, ast.AST]]:
         elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "exit"):
             for arg in node.args:
-                found.append(("sys.exit(<expr>)", arg))
+                # Only the exit that carries the VERDICT. `main` also has plain
+                # error exits (`sys.exit(1)` on a refused precondition); those
+                # are not the verdict and pulling them in would drag unrelated
+                # locals into the slice.
+                if "overall_pass" in _plain_names(arg):
+                    found.append(("sys.exit(<verdict>)", arg))
     return found
+
+
+def _assert_verdict_untainted(src: str, exprs: list) -> None:
+    """THE main-guard assertion: nothing the verdict DEPENDS ON, transitively,
+    may be a reporting symbol. Shared by the live check and every regression
+    below, so a regression cannot pass while the check has stopped checking."""
+    deps = _verdict_dependencies(src, exprs)
+    direct = sorted(deps & set(_REPORTING_SYMBOLS))
+    assert not direct, (
+        f"{direct} is in the verdict's dependency slice — a reporting surface "
+        f"must not decide anything (transitively)")
+    wrapped = sorted(_functions_referencing_reporting(src, deps))
+    assert not wrapped, (
+        f"the verdict calls {wrapped}, which reference a reporting symbol — a "
+        f"reporting surface must not decide anything (through a wrapper)")
 
 
 def test_the_verdict_ASSEMBLY_in_main_is_also_clean():
@@ -254,12 +362,12 @@ def test_the_verdict_ASSEMBLY_in_main_is_also_clean():
     reporting symbols — it is where they are STAMPED — so the rule is on the
     verdict EXPRESSION: what `overall_pass` is computed from, and what
     `sys.exit` is handed, may not reference a reporting symbol."""
-    exprs = _verdict_expressions(_runner_source())
+    src = _runner_source()
+    exprs = _verdict_expressions(src)
     labels = [lbl for lbl, _ in exprs]
     assert any("overall_pass =" in lbl for lbl in labels), labels
     assert any("sys.exit" in lbl for lbl in labels), labels
-    for label, expr in exprs:
-        assert_decides_nothing(" ".join(sorted(_names_in(expr))), f"main {label}")
+    _assert_verdict_untainted(src, exprs)
 
 
 def test_the_main_guard_REJECTS_a_planted_reference_in_the_VERDICT_EXPRESSION():
@@ -271,10 +379,8 @@ def test_the_main_guard_REJECTS_a_planted_reference_in_the_VERDICT_EXPRESSION():
         "    overall_pass = _compute_overall_pass(",
         "    overall_pass = sanity_regime_genuine_ic and _compute_overall_pass(", 1)
     assert planted != src, "the plant did not apply — the regression is vacuous"
-    exprs = _verdict_expressions(planted)
     with pytest.raises(AssertionError, match="must not decide anything"):
-        for label, expr in exprs:
-            assert_decides_nothing(" ".join(sorted(_names_in(expr))), f"main {label}")
+        _assert_verdict_untainted(planted, _verdict_expressions(planted))
 
 
 def test_the_main_guard_TOLERATES_the_legitimate_wf_meta_statement():
@@ -296,3 +402,44 @@ def test_the_extractor_stops_before_the_next_functions_DECORATOR():
     body = _function_body(src, "first")
     assert body.rstrip().endswith("return 1"), repr(body)
     assert "@dec" not in body and "second" not in body
+
+
+def test_the_main_guard_CATCHES_an_ALIASED_reporting_symbol():
+    """[codex on bt#106] `helper = sanity_regime_genuine_ic` then
+    `overall_pass = helper and ...` — the verdict subtree names only `helper`."""
+    src = _runner_source().replace(
+        "    overall_pass = _compute_overall_pass(",
+        "    _vh = sanity_regime_genuine_ic\n"
+        "    overall_pass = _vh and _compute_overall_pass(", 1)
+    with pytest.raises(AssertionError, match="must not decide anything"):
+        _assert_verdict_untainted(src, _verdict_expressions(src))
+
+
+def test_the_main_guard_CATCHES_a_WRAPPED_reporting_symbol():
+    """`def _h(): return sanity_regime_genuine_ic` then
+    `overall_pass = _h() and ...` — the subtree names only `_h`."""
+    src = _runner_source()
+    src = src.replace("\ndef main(",
+                      "\ndef _reporting_verdict_helper():\n"
+                      "    return sanity_regime_genuine_ic\n\n\ndef main(", 1)
+    src = src.replace(
+        "    overall_pass = _compute_overall_pass(",
+        "    overall_pass = _reporting_verdict_helper() and _compute_overall_pass(", 1)
+    with pytest.raises(AssertionError, match="must not decide anything"):
+        _assert_verdict_untainted(src, _verdict_expressions(src))
+
+
+def test_the_slice_is_a_real_slice_not_the_whole_module():
+    """Anti-false-positive AND anti-vacuity. A slice that swallowed the module
+    would reject every future edit and get switched off; an empty one would
+    prove nothing. It must contain the verdict's real inputs and NOT the
+    reporting surface."""
+    src = _runner_source()
+    deps = _verdict_dependencies(src, _verdict_expressions(src))
+    for real_input in ("overall_pass", "_compute_overall_pass", "wf_result",
+                       "sanity_result", "parity_result"):
+        assert real_input in deps, real_input
+    for symbol in _REPORTING_SYMBOLS:
+        assert symbol not in deps, symbol
+    total = len({n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)})
+    assert len(deps) < total / 2, (len(deps), total)

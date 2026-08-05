@@ -134,3 +134,45 @@ through the same path; and an anti-false-positive that the legitimate `wf_meta`
 statement is tolerated.
 
 26 tests.
+
+## Review round 6 (codex on bt#106) — indirection, and three wrong slices
+
+Codex showed the AST guard was too local: it inspected only the names appearing
+DIRECTLY in the verdict expression, so either of these evades it —
+
+```python
+_vh = sanity_regime_genuine_ic
+overall_pass = _vh and _compute_overall_pass(...)          # aliased
+
+def _h(): return sanity_regime_genuine_ic
+overall_pass = _h() and _compute_overall_pass(...)         # wrapped
+```
+
+Getting this right took three attempts, and the two failures are worth recording
+because both were the guard being WRONG rather than merely incomplete:
+
+1. **Forward taint** (taint anything touching a reporting symbol) smeared to
+   **441 names** — `wf_meta = {...}` legitimately holds the summary, so
+   everything downstream of it became "tainted". A guard that rejects correct
+   code gets switched off.
+2. **Backward slice that merged called functions' bodies by name** re-inflated to
+   **609** — a local inside a large helper that shares a name with a `main`
+   local (`md`, `wf_meta`) drags main's assignment in. A name-keyed slice cannot
+   distinguish scopes, and real def-use analysis is not worth building in a test.
+3. **Backward slice over REBINDINGS only, with calls checked separately** — 61
+   names, and correct. `md["wf_gate_metadata"] = wf_meta` mutates a container
+   that is DOWNSTREAM of the verdict; counting it as a dependency walked the
+   slice forward into the stamping code, which was the last false positive.
+
+Final shape: the slice follows rebinding assignments (main's scope + module
+level) and stops at call boundaries; functions reached that way are checked
+separately by `_functions_referencing_reporting`, which follows calls
+transitively and asks the only question that matters about a callee — does it
+hand back a reporting symbol?
+
+Five tests: the live check; the aliased bypass; the wrapped bypass; the
+anti-false-positive that the legitimate `wf_meta` statement is tolerated; and
+one asserting the slice contains the verdict's real inputs, excludes the
+reporting symbols, and stays under half the module's names.
+
+29 tests.
