@@ -157,15 +157,32 @@ def score_lineage(*, lineage_manifest: Path, admissibility: dict,
     }
 
 
+UNASSIGNED_REGIME = "__unassigned__"
+
+
 def summarize_lineage_scores(scores: pd.DataFrame,
-                             labels_by_date: dict) -> dict:
-    """Stamp-level descriptive summary of pooled lineage scores.
+                             labels_by_date: dict,
+                             regime_by_date: dict | None = None) -> dict:
+    """Stamp-level descriptive summary of lineage scores, POOLED AND PER REGIME.
 
     ``labels_by_date`` maps date -> ``pd.Series`` (label by ticker), supplied by
     the CALLER (the gate's label contract) — never derived from the lineage.
-    Inference (bars, placebo, genuine_ic) belongs to the runner slice; this
-    summary records per-date rank ICs and coverage so the stamp is auditable
-    on its own.
+    ``regime_by_date`` maps date -> regime name and follows the same rule: it
+    comes from the production regime chain via the caller, so this summary never
+    invents a regime.
+
+    WHY PER REGIME (orch#805, measured 2026-08-05): the pooled figure is a
+    REGIME-MIX ARTIFACT on this book. The served recipe's genuine IC measured
+    +0.335 in BEAR — where the strategy places zero buys — and negative in
+    BULL_CALM, where 136 of its 154 buys land, and the pooled number came out
+    POSITIVE anyway because BEAR's 50 dates dragged it up. A Stage-2 lane that
+    scores a candidate on a pooled mean would rank candidates on the same
+    artifact. Pooling is still reported (continuity), now beside the split that
+    explains it.
+
+    Absence reads as absence: with no ``regime_by_date`` the split is ``None``
+    with a stated reason, never an empty dict that looks like "measured, and
+    there were no regimes".
     """
     from scipy import stats as _st
     per_date = []
@@ -176,13 +193,51 @@ def summarize_lineage_scores(scores: pd.DataFrame,
         j = pd.DataFrame({"s": g.set_index("ticker")["score"], "y": lab}).dropna()
         if len(j) < 20:
             continue
-        per_date.append({"date": str(pd.Timestamp(d).date()),
-                         "ic": float(_st.spearmanr(j["s"], j["y"]).statistic),
-                         "n": int(len(j))})
+        row = {"date": str(pd.Timestamp(d).date()),
+               "ic": float(_st.spearmanr(j["s"], j["y"]).statistic),
+               "n": int(len(j))}
+        if regime_by_date is not None:
+            regime = regime_by_date.get(pd.Timestamp(d))
+            # A date the caller could not label is UNASSIGNED, not dropped:
+            # silently discarding it would change the pooled mean the split is
+            # supposed to explain.
+            row["regime"] = str(regime) if regime is not None else UNASSIGNED_REGIME
+        per_date.append(row)
+
     ics = [r["ic"] for r in per_date]
-    return {
+    summary = {
         "n_dates_scored": int(scores["date"].nunique()) if len(scores) else 0,
         "n_dates_with_labels": len(per_date),
         "mean_ic": (float(np.mean(ics)) if ics else None),
         "per_date": per_date,
     }
+    summary.update(_by_regime_block(per_date, regime_by_date))
+    return summary
+
+
+def _by_regime_block(per_date: list, regime_by_date: dict | None) -> dict:
+    if regime_by_date is None:
+        return {"by_regime": None,
+                "by_regime_reason": "no regime_by_date supplied by the caller",
+                "pooled_is_a_regime_mix": None}
+    buckets: dict[str, list] = {}
+    for row in per_date:
+        buckets.setdefault(row["regime"], []).append(row["ic"])
+    by_regime = {
+        name: {"n_dates": len(vals),
+               "mean_ic": float(np.mean(vals)),
+               "min_ic": float(np.min(vals)),
+               "max_ic": float(np.max(vals))}
+        for name, vals in sorted(buckets.items())
+    }
+    # The load-bearing flag: pooled positive while EVERY regime with dates is
+    # negative (or vice versa) is the exact shape measured on the live book.
+    means = [b["mean_ic"] for name, b in by_regime.items()
+             if name != UNASSIGNED_REGIME]
+    pooled = float(np.mean([r["ic"] for r in per_date])) if per_date else None
+    mix = None
+    if means and pooled is not None:
+        mix = bool((pooled > 0 and max(means) < 0) or (pooled < 0 and min(means) > 0))
+    return {"by_regime": by_regime,
+            "by_regime_reason": None,
+            "pooled_is_a_regime_mix": mix}
