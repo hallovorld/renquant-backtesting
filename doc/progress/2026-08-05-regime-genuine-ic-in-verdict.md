@@ -111,3 +111,26 @@ companion test plants a reference into those statements and requires the same
 assertion path to RAISE.
 
 25 tests.
+
+## Review round 5 (codex on bt#106) — the subject was neither the line nor the statement
+
+The `main` guard scanned LINES containing `overall_pass`. `wf_meta = { ... }` is
+ONE multi-line assignment that contains both `"passed": overall_pass` and, ~90
+lines later in the same statement, `"sanity_regime_genuine_ic":
+regime_genuine_ic_summary(...)`. The line scan never saw them together, so `main`
+was still effectively unguarded at exactly the place the PR claimed to cover.
+
+And a statement-level rule would have been wrong in the other direction: that
+`wf_meta` statement is CORRECT code, and a statement rule would reject it.
+
+The right subject is the **expression the verdict is computed from**. The guard
+is now AST-based: parse `main`, take the value expression of every
+`overall_pass = …` assignment and every argument of `sys.exit(…)`, and require
+those subtrees to reference no reporting symbol. Both kinds are asserted to
+exist, so the guard cannot scan nothing.
+
+Three tests: the live check; a plant into `overall_pass = …` that must RAISE
+through the same path; and an anti-false-positive that the legitimate `wf_meta`
+statement is tolerated.
+
+26 tests.

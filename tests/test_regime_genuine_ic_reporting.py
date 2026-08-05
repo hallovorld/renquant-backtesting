@@ -10,6 +10,7 @@ changed a verdict, the change was wrong.
 """
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -210,31 +211,82 @@ def test_the_summary_IS_reachable_from_the_stamping_path():
     assert "format_regime_genuine_ic(wf_meta.get(" in src
 
 
+def _names_in(node) -> set[str]:
+    """Every identifier appearing anywhere under `node`."""
+    out = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            out.add(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            out.add(sub.attr)
+    return out
+
+
+def _verdict_expressions(src: str) -> list[tuple[str, ast.AST]]:
+    """(label, expression) for everything that PRODUCES the verdict in `main`.
+
+    [codex on bt#106] A line-based scan was wrong twice over: `wf_meta = {...}`
+    is ONE multi-line statement that legitimately contains both
+    `"passed": overall_pass` and `"sanity_regime_genuine_ic":
+    regime_genuine_ic_summary(...)`, so a statement-level rule would fail on
+    correct code while a line-level rule missed the statement entirely. The
+    right subject is neither the line nor the statement: it is the EXPRESSION
+    the verdict is computed from.
+    """
+    tree = ast.parse(src)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    found: list[tuple[str, ast.AST]] = []
+    for node in ast.walk(main):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "overall_pass":
+                    found.append(("overall_pass = <expr>", node.value))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "exit"):
+            for arg in node.args:
+                found.append(("sys.exit(<expr>)", arg))
+    return found
+
+
 def test_the_verdict_ASSEMBLY_in_main_is_also_clean():
-    """The span the previous guard list omitted. `main` legitimately mentions
-    the reporting symbols (it stamps them), so the check is on the verdict
-    itself: every statement touching `overall_pass` must be free of them. A
-    future `overall_pass = _compute_overall_pass(...) and sanity_regime_genuine_ic`
-    would evade a function-level scan exactly as the `run_sanity_battery`
-    omission did."""
-    body = _function_body(_runner_source(), _VERDICT_ASSEMBLY_FUNCTION)
-    touching = [ln for ln in body.splitlines() if "overall_pass" in ln]
-    assert touching, "no statement touches overall_pass — the guard is scanning nothing"
-    assert any("_compute_overall_pass(" in ln for ln in touching), touching
-    assert any("sys.exit(" in ln for ln in touching), touching
-    for ln in touching:
-        assert_decides_nothing(ln, f"{_VERDICT_ASSEMBLY_FUNCTION} (overall_pass)")
+    """The span the first guard list omitted. `main` legitimately mentions the
+    reporting symbols — it is where they are STAMPED — so the rule is on the
+    verdict EXPRESSION: what `overall_pass` is computed from, and what
+    `sys.exit` is handed, may not reference a reporting symbol."""
+    exprs = _verdict_expressions(_runner_source())
+    labels = [lbl for lbl, _ in exprs]
+    assert any("overall_pass =" in lbl for lbl in labels), labels
+    assert any("sys.exit" in lbl for lbl in labels), labels
+    for label, expr in exprs:
+        assert_decides_nothing(" ".join(sorted(_names_in(expr))), f"main {label}")
 
 
-def test_that_main_guard_REJECTS_a_planted_reference():
-    body = _function_body(_runner_source(), _VERDICT_ASSEMBLY_FUNCTION)
-    planted = [ln.replace("overall_pass",
-                          "overall_pass and sanity_regime_genuine_ic", 1)
-               for ln in body.splitlines() if "overall_pass" in ln]
-    assert planted
+def test_the_main_guard_REJECTS_a_planted_reference_in_the_VERDICT_EXPRESSION():
+    """Plant into the expression the verdict is computed from and require the
+    same assertion path to RAISE — including via the multi-line `wf_meta`
+    statement shape that defeated the line-based version."""
+    src = _runner_source()
+    planted = src.replace(
+        "    overall_pass = _compute_overall_pass(",
+        "    overall_pass = sanity_regime_genuine_ic and _compute_overall_pass(", 1)
+    assert planted != src, "the plant did not apply — the regression is vacuous"
+    exprs = _verdict_expressions(planted)
     with pytest.raises(AssertionError, match="must not decide anything"):
-        for ln in planted:
-            assert_decides_nothing(ln, "main (overall_pass)")
+        for label, expr in exprs:
+            assert_decides_nothing(" ".join(sorted(_names_in(expr))), f"main {label}")
+
+
+def test_the_main_guard_TOLERATES_the_legitimate_wf_meta_statement():
+    """Anti-false-positive: `wf_meta = {...}` holds BOTH `"passed": overall_pass`
+    and the reporting summary in one statement. That is correct code and the
+    guard must not reject it — which is why the subject is the expression, not
+    the statement."""
+    src = _runner_source()
+    assert '"passed": overall_pass' in src
+    assert '"sanity_regime_genuine_ic": regime_genuine_ic_summary(' in src
+    exprs = _verdict_expressions(src)          # must not raise
+    assert exprs, "the extractor found no verdict expression at all"
 
 
 def test_the_extractor_stops_before_the_next_functions_DECORATOR():
