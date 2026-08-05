@@ -254,7 +254,11 @@ def _by_regime_block(per_date: list, regime_by_date: dict | None) -> dict:
 
     sign_carriers = []
     if pooled is not None and pooled != 0:
-        for name in by_regime:
+        # [codex on bt#107] UNASSIGNED is never a carrier. A bucket of dates the
+        # caller could not label must not be reported as supplying the pooled
+        # sign — it is not a regime, and naming it would hand an unknown-label
+        # bucket the interpretation.
+        for name in (n for n in by_regime if n != UNASSIGNED_REGIME):
             rest = [r["ic"] for r in per_date if r["regime"] != name]
             if not rest:
                 continue

@@ -1,9 +1,14 @@
-# 2026-08-05 — GOAL-6 Stage 2 stops scoring candidates on a regime mix
+# 2026-08-05 — GOAL-6 Stage 2: per-regime scoring INSTRUMENTATION (not yet a selection rule)
 
 ## STATUS
 
-The Stage-2 candidate-scoring lane gains a per-regime split. Capability + wiring,
-no behaviour change to any verdict.
+The Stage-2 candidate-scoring lane gains per-regime **instrumentation**. Nothing
+selects, ranks or decides on it yet, and this document does not claim otherwise
+`[codex on bt#107]`: the runner does not supply a regime map, and no verdict
+consumes `by_regime` or `pooled_sign_carriers`. **Production scoring still uses
+the pooled `mean_ic`.** Making the pooled figure visibly decomposable is the
+prerequisite; a regime-aware selection rule is a separately designed change that
+needs the exposure/trading-regime input decided first.
 
 ## WHY
 
@@ -43,7 +48,11 @@ level up from "the gate admits on recipe hash only".
 - **A date the caller could not label is BUCKETED as `__unassigned__`, not
   dropped** — discarding it would change the pooled mean the split exists to
   explain. A test asserts the buckets reconcile with `n_dates_with_labels`.
-- **Unassigned dates never decide the mix flag.**
+- **Unassigned dates are never reported as pooled-sign carriers.** A bucket of
+  dates the caller could not label is not a regime; naming it would hand an
+  unknown-label bucket the interpretation. A regression constructs the case
+  where removing that bucket WOULD flip the pooled sign and asserts it is still
+  not named.
 - **The seam is unchanged when no map is given**: the regime map is passed as a
   keyword and only when supplied, so the two-argument call contract other
   callers and test doubles rely on still holds.
@@ -76,6 +85,6 @@ trading has the opposite one. So the summary now decomposes — `weight` and
 a test), plus `pooled_sign_carriers`, the regimes whose removal flips the pooled
 sign. On the live proportions that is BEAR at ~12% of dates.
 
-Suites: 15 tests. The 3 failures on this branch (`test_b1_lift`,
+Suites: 16 tests. The 3 failures on this branch (`test_b1_lift`,
 `test_import_lift`, `test_lineage_stage2::test_REAL_run001_...`) all reproduce on
 `origin/main` and are untouched by this change `[VERIFIED — re-run on main]`.

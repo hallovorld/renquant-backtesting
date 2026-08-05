@@ -231,3 +231,25 @@ def test_a_pandas_NA_regime_is_also_UNASSIGNED():
         _scores(dates, sign_by_date={d: 1.0 for d in dates}), _labels(dates),
         {pd.Timestamp("2026-01-05"): "BEAR", pd.Timestamp("2026-01-06"): pd.NA})
     assert set(out["by_regime"]) == {"BEAR", UNASSIGNED_REGIME}
+
+
+def test_UNASSIGNED_is_never_reported_as_a_pooled_SIGN_CARRIER():
+    """[codex on bt#107] Construct the case where dropping the unassigned bucket
+    WOULD flip the pooled sign. It must still not be named: a bucket of dates the
+    caller could not label is not a regime, and reporting it would hand an
+    unknown-label bucket the interpretation."""
+    labelled = [f"2026-01-{d:02d}" for d in range(1, 8)]     # 7 weak-negative
+    unknown = [f"2026-02-{d:02d}" for d in range(1, 4)]      # 3 strong-positive
+    dates = labelled + unknown
+    signs = {**{d: -1.0 for d in labelled}, **{d: 1.0 for d in unknown}}
+    s = _scores(dates, sign_by_date=signs)
+    weak = s["date"].isin([pd.Timestamp(d) for d in labelled])
+    rng = np.random.default_rng(3)
+    s.loc[weak, "score"] = s.loc[weak, "score"] + rng.normal(0, 45, int(weak.sum()))
+    out = summarize_lineage_scores(
+        s, _labels(dates), {pd.Timestamp(d): "BULL_CALM" for d in labelled})
+
+    assert out["by_regime"][UNASSIGNED_REGIME]["n_dates"] == 3
+    # whatever the pooled sign is, the unassigned bucket is not offered as its cause
+    named = [c["regime"] for c in out["pooled_sign_carriers"]]
+    assert UNASSIGNED_REGIME not in named, out["pooled_sign_carriers"]
