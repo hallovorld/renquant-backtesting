@@ -156,6 +156,56 @@ def _required_validation_skip_reasons(args) -> list[str]:
     return reasons
 
 
+def regime_genuine_ic_summary(model_placebo_profile: dict | None) -> dict:
+    """Flatten the per-regime 2x-shift genuine IC into one readable summary.
+
+    WHY (orch#805, 2026-08-04): the gate already computes a full per-regime
+    placebo profile and stamps it four levels deep, where nobody read it. The
+    consequence, measured on the 2026-07-06 stamp: the model's whole edge is in
+    BEAR (genuine_ic +0.335 over 50 dates, placebo +0.016) while BULL_CALM —
+    363 of 452 dates and 136 of 154 of the strategy's buys — is NEGATIVE
+    (genuine_ic -0.029). The pooled +0.0089 that every decision was read off is
+    a regime-mix artifact.
+
+    This is REPORTING ONLY. It reads what is already computed, decides nothing,
+    and is never consulted by any pass/fail leg. 2x is the shift the enforced
+    placebo leg itself uses (2 x horizon, see `_placebo_gate_horizon`), so the
+    summary and the verdict describe the same experiment.
+    """
+    per_regime = ((model_placebo_profile or {}).get("per_regime") or {})
+    out: dict[str, dict] = {}
+    for regime, shifts in per_regime.items():
+        cell = (shifts or {}).get("2x") or {}
+        if not cell:
+            continue
+        out[str(regime)] = {
+            "genuine_ic": cell.get("genuine_ic"),
+            "aligned_real_ic": cell.get("aligned_real_ic"),
+            "placebo_ic": cell.get("placebo_ic"),
+            "label_autocorr_ic": cell.get("label_autocorr_ic"),
+            "n_dates": cell.get("n_dates"),
+        }
+    return out
+
+
+def format_regime_genuine_ic(summary: dict) -> str:
+    """One log line, worst regime first — the reader should see the problem."""
+    if not summary:
+        return "per-regime genuine_ic: UNAVAILABLE (no placebo profile stamped)"
+
+    def key(item):
+        v = item[1].get("genuine_ic")
+        return (v is None, v if isinstance(v, (int, float)) else 0.0)
+
+    parts = []
+    for regime, cell in sorted(summary.items(), key=key):
+        g = cell.get("genuine_ic")
+        n = cell.get("n_dates")
+        parts.append(f"{regime}={g:+.4f}(n={n})" if isinstance(g, (int, float))
+                     else f"{regime}=n/a")
+    return "per-regime genuine_ic (2x shift, worst first): " + "  ".join(parts)
+
+
 def _compute_overall_pass(
     *,
     wf_result: dict,
@@ -3808,6 +3858,9 @@ def main():
         "placebo_shift_diagnostics": sanity_result.get("placebo_shift_diagnostics"),
         "label_autocorr_profile": sanity_result.get("label_autocorr_profile"),
         "model_placebo_profile": sanity_result.get("model_placebo_profile"),
+        # orch#805 REPORTING ONLY — decides nothing; see regime_genuine_ic_summary.
+        "sanity_regime_genuine_ic": regime_genuine_ic_summary(
+            sanity_result.get("model_placebo_profile")),
         "wf_reason":           wf_result.get("reason"),
         "sanity_reason":       sanity_result.get("reason"),
         "run_at":              datetime.datetime.utcnow().isoformat(),
@@ -3823,6 +3876,10 @@ def main():
     log.info("Wrote wf_gate_metadata to %s", written)
     log.info("=" * 60)
     log.info("VERDICT: %s", "PASS" if overall_pass else "FAIL")
+    # orch#805: a rejection that says "placebo ratio 0.95" sends the reader to
+    # the gate; one that says "BULL_CALM=-0.0295" sends them to the model. The
+    # numbers were already computed — they were just never surfaced.
+    log.info("%s", format_regime_genuine_ic(wf_meta.get("sanity_regime_genuine_ic")))
     log.info("=" * 60)
     sys.exit(0 if overall_pass else 1)
 
