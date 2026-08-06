@@ -337,6 +337,51 @@ def _score_segment(*, seg_name: str, rows: list[dict], input_vintage: str | None
     }
 
 
+def labels_by_date_from_panel(panel, label_col: str) -> tuple[dict, dict]:
+    """``({date: Series(label by ticker)}, provenance)`` from the sanity panel.
+
+    WHY THIS EXISTS (GOAL-6, measured 2026-08-04): the Stage-2 stamp scored 124
+    of 125 windows and carried **no `label_summary` at all**, because the gate's
+    call site passed no ``labels_by_date``. A lane that scores candidates and
+    cannot say whether the scores relate to outcomes ranks them on nothing.
+
+    The labels come from the panel the lane ALREADY scored on — the same frame,
+    the same label column the artifact declares — so this introduces no second
+    data source to disagree with the first. It is a helper for the caller, not
+    a derivation inside the summary: ``summarize_lineage_scores`` still takes
+    labels from its caller and never invents them.
+
+    NEVER RAISES. The stamp's whole contract is that it cannot break admission,
+    so a panel this cannot read returns ``({}, {...why})`` and the caller passes
+    ``None`` — with a reason that says WHICH absence it is, rather than
+    inheriting the "caller supplied none" wording that would be a lie.
+    """
+    import pandas as _pd
+
+    prov: dict = {"label_col": label_col, "source": "sanity_panel"}
+    try:
+        if panel is None:
+            return {}, {**prov, "unavailable_because": "no sanity panel was supplied"}
+        if not len(panel):
+            return {}, {**prov, "unavailable_because": "the sanity panel is empty"}
+        for col in ("date", "ticker", label_col):
+            if col not in panel.columns:
+                return {}, {**prov,
+                            "unavailable_because": f"panel has no {col!r} column"}
+        frame = panel[["date", "ticker", label_col]].dropna(subset=[label_col])
+        if not len(frame):
+            return {}, {**prov,
+                        "unavailable_because": f"no non-null {label_col!r} rows"}
+        dates = _pd.to_datetime(frame["date"])
+        out = {}
+        for d, g in frame.groupby(dates):
+            out[_pd.Timestamp(d)] = g.set_index("ticker")[label_col]
+        return out, {**prov, "n_dates": len(out), "n_rows": int(len(frame))}
+    except Exception as exc:  # noqa: BLE001 — the stamp NEVER raises
+        return {}, {**prov,
+                    "unavailable_because": f"{type(exc).__name__}: {exc}"}
+
+
 def attempt_lineage_scoring_stamp(*, stage1: dict,
                                   extension_manifest_path: Path | str,
                                   expected_manifest_sha256: str | None,

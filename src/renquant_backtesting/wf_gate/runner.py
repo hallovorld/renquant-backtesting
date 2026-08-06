@@ -3415,6 +3415,7 @@ def _attempt_stage2_stamp(lineage_stage1: dict, artifact: dict) -> dict:
     try:
         from renquant_backtesting.wf_gate.lineage_stage2 import (
             attempt_lineage_scoring_stamp,
+            labels_by_date_from_panel,
         )
         ext_dir = Path(
             _os.environ.get(RUN001_EXTENSION_DIR_ENV)
@@ -3435,13 +3436,32 @@ def _attempt_stage2_stamp(lineage_stage1: dict, artifact: dict) -> dict:
             _dataset_path = _dp if _dp.is_absolute() else (REPO / _dp)
         panel, _panel_meta = _load_sanity_panel(
             feat_cols, label, dataset_path=_dataset_path)
-        return attempt_lineage_scoring_stamp(
+        # GOAL-6: the labels the lane scores AGAINST. Until now this call site
+        # supplied none, so every Stage-2 stamp carried `label_summary: null` —
+        # 124 of 125 windows SCORED, and nothing said whether the scores had any
+        # relationship to outcomes. The labels come from the panel the lane
+        # already scored on, so no second data source can disagree with the
+        # first. `labels_by_date_from_panel` never raises; an unusable panel
+        # yields `None` here with its OWN reason rather than inheriting the
+        # "caller supplied none" wording, which would now be false.
+        _labels, _label_prov = labels_by_date_from_panel(panel, label)
+        stamp = attempt_lineage_scoring_stamp(
             stage1=lineage_stage1,
             extension_manifest_path=manifest_path,
             expected_manifest_sha256=expected_sha,
             panel=panel,
             label_horizon_bdays=60,
+            labels_by_date=_labels or None,
         )
+        if isinstance(stamp, dict):
+            stamp["label_source"] = _label_prov
+            if not _labels:
+                stats = stamp.get("statistics")
+                if isinstance(stats, dict):
+                    stats["label_summary_absent_because"] = (
+                        "the caller HAS a label contract but could not build it: "
+                        + str(_label_prov.get("unavailable_because", "unknown")))
+        return stamp
     except Exception as exc:  # noqa: BLE001 — the stamp NEVER raises
         return {"lineage_lane": "unavailable",
                 "reason": f"stage-2 setup failed: {exc}"}
