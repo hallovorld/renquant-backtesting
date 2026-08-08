@@ -42,7 +42,25 @@ def cs_ic(p, a, d):
     return float(np.mean(ics)) if ics else np.nan
 
 
-def run_wf(panel, feat_cols, *, shift_days=0, shuffle=False, seed=42):
+def run_wf(panel, feat_cols, *, shift_days=0, shuffle=False, seed=42,
+           cuts=CUTS, served_sink=None):
+    """One walk-forward pass; returns the per-fold mean ICs.
+
+    ``served_sink`` (orch#905): an optional ``ServedMatrixEmission`` — when
+    set, each fold's TEST-partition per-date cross-section ``(ticker, score)``
+    is persisted through the pipeline#268 sink BEFORE ``cs_ic`` collapses it
+    to a scalar. Walk-forward/point-in-time holds structurally: the fold's
+    booster trains only on dates ≤ the fold's train end. Emission is refused
+    on a perturbed arm (shuffle/shift): those scores are diagnostic poison and
+    writing them as a served matrix would let a placebo be read as evidence.
+    With ``served_sink=None`` this function's behaviour is byte-identical to
+    the pre-#905 version.
+    """
+    if served_sink is not None and (shuffle or shift_days):
+        raise ValueError(
+            "served_sink on a perturbed arm (shuffle=%r, shift_days=%r): "
+            "refusing to persist placebo scores as a served matrix"
+            % (shuffle, shift_days))
     params = {"objective":"rank:pairwise","eta":0.05,"max_depth":5,
               "min_child_weight":50,"subsample":0.7,"colsample_bytree":0.7,
               "nthread":10,"verbosity":0,"seed":seed}
@@ -53,7 +71,7 @@ def run_wf(panel, feat_cols, *, shift_days=0, shuffle=False, seed=42):
         p[LABEL] = p.groupby("ticker")[LABEL].shift(-shift_days)
         p = p.dropna(subset=[LABEL])
     ics = []
-    for cut in CUTS:
+    for cut in cuts:
         tr_s,tr_e,te_s,te_e = cut
         tr = p[(p["date"]>=tr_s)&(p["date"]<=tr_e)].dropna(subset=[LABEL])
         te = p[(p["date"]>=te_s)&(p["date"]<=te_e)].dropna(subset=[LABEL])
@@ -75,8 +93,63 @@ def run_wf(panel, feat_cols, *, shift_days=0, shuffle=False, seed=42):
         _, gsz = np.unique(ds, return_counts=True)
         dtr = xgb.DMatrix(Xs, label=ys); dtr.set_group(gsz)
         booster = xgb.train(params, dtr, num_boost_round=100)
-        ics.append(cs_ic(booster.predict(xgb.DMatrix(Xte_n)), yte, te["date"].values))
+        preds = booster.predict(xgb.DMatrix(Xte_n))
+        if served_sink is not None:
+            served_sink.emit_fold(te, preds, fold_train_end=tr_e, seed=seed)
+        ics.append(cs_ic(preds, yte, te["date"].values))
     return ics
+
+
+class ServedMatrixEmission:
+    """Persist a replay fold's test cross-section via the pipeline#268 sink.
+
+    Reuses ``write_served_matrix`` (which takes an EXPLICIT out_dir) rather
+    than ``PersistServedMatrixTask`` — the task is InferenceContext-shaped and
+    is the live path's interface, not a replay loop's. The lane name must
+    distinguish replay rows from served-live rows: a replay row must never be
+    mistakable for something the book actually served, so ``lane`` defaults to
+    ``wf_replay_panel`` and the writer refuses lane names without a
+    ``wf_replay`` prefix.
+    """
+
+    def __init__(self, out_dir: Path, *, run_id: str, lane: str = "wf_replay_panel"):
+        if not str(lane).startswith("wf_replay"):
+            raise ValueError(
+                f"replay lane must carry the wf_replay prefix, got {lane!r} — "
+                "a replay row must never be mistakable for a served-live row")
+        self.out_dir = Path(out_dir)
+        self.run_id = str(run_id)
+        self.lane = str(lane)
+        self.n_files = 0
+
+    def emit_fold(self, te, preds, *, fold_train_end, seed):
+        from renquant_pipeline.kernel.panel_pipeline.served_matrix_sink import (  # noqa: PLC0415
+            SCHEMA_VERSION, write_served_matrix)
+
+        frame = pd.DataFrame({
+            "ticker": te["ticker"].astype(str).values,
+            "score": np.asarray(preds, dtype=float),
+            "date": pd.to_datetime(te["date"]).values,
+        })
+        for day, g in frame.groupby("date"):
+            date_iso = pd.Timestamp(day).date().isoformat()
+            rows = [{"ticker": t, "score": float(s)}
+                    for t, s in zip(g["ticker"], g["score"])]
+            manifest = {
+                "schema_version": SCHEMA_VERSION,
+                "run_id": self.run_id,
+                "as_of_date": date_iso,
+                "lane": self.lane,
+                "n_rows": len(rows),
+                "replay": {
+                    "kind": "wf_sanity_paired.run_wf",
+                    "fold_train_end": str(fold_train_end),
+                    "label": LABEL,
+                    "seed": int(seed),
+                },
+            }
+            write_served_matrix(self.out_dir, rows, manifest)
+            self.n_files += 1
 
 
 def battery(panel_path, label):
@@ -122,6 +195,29 @@ def battery(panel_path, label):
     return out
 
 
+def emit_served_matrix_main(argv=None):
+    """CLI for the orch#905 wiring: one clean (unperturbed, seed=42) WF pass
+    over a panel, persisting every fold's test cross-section."""
+    import argparse  # noqa: PLC0415
+    ap = argparse.ArgumentParser(description=emit_served_matrix_main.__doc__)
+    ap.add_argument("--panel", required=True, help="panel dataset parquet")
+    ap.add_argument("--out-dir", required=True, help="served-matrix output root")
+    ap.add_argument("--run-id", required=True, help="replay invocation id")
+    ap.add_argument("--lane", default="wf_replay_panel",
+                    help="must carry the wf_replay prefix")
+    args = ap.parse_args(argv)
+
+    panel = pd.read_parquet(args.panel)
+    panel["date"] = pd.to_datetime(panel["date"])
+    excl = {"ticker","date","split_label","fwd_5d_excess","fwd_20d_excess","fwd_60d_excess"}
+    feat_cols = [c for c in panel.columns if c not in excl]
+    sink = ServedMatrixEmission(Path(args.out_dir), run_id=args.run_id, lane=args.lane)
+    ics = run_wf(panel, feat_cols, seed=42, served_sink=sink)
+    log.info("emitted %d per-date files under %s; per-fold mean IC = [%s]",
+             sink.n_files, args.out_dir,
+             ", ".join(f"{x:+.3f}" if not np.isnan(x) else "NA" for x in ics))
+
+
 def main():
     base = battery("data/alpha158_291_fundamental_dataset.parquet",
                    "BASELINE alpha158+5fund")
@@ -152,4 +248,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    if "--emit-served-matrix" in _sys.argv[1:]:
+        _sys.argv.remove("--emit-served-matrix")
+        emit_served_matrix_main()
+    else:
+        main()
