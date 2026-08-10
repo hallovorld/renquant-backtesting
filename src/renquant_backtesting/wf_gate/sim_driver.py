@@ -137,6 +137,20 @@ def main() -> None:
                         "repeatable, at least one required with "
                         "--input-bundle. Manifest entries outside every "
                         "covered root are still digest-checked individually.")
+    # 2026-08-10 (orch#962 B2): regime-series injection seam for the BEAR-exit
+    # confirmatory arms (orch doc/design/2026-08-08-bear-exit-prereg.md §3:
+    # 200-seed episode-permutation placebos + the +5/+10/+20d shifted series).
+    p.add_argument("--regime-series", default=None,
+                   help="Path to a per-date regime label series (CSV "
+                        "'date,regime' or JSON {date: label}). When given, "
+                        "the labels REPLACE the computed regime for decision "
+                        "logic on every sim bar, and the sim output metadata "
+                        "records the injection + the series' sha256. Applies "
+                        "to the candidate AND the golden comparison leg "
+                        "(paired arms, same series). A sim date missing from "
+                        "the series is a hard ERROR, never a silent fallback "
+                        "to the computed regime. Absent = byte-identical "
+                        "legacy behavior.")
     args = p.parse_args()
     _bundle_flags = (args.input_bundle is not None,
                      args.input_bundle_root is not None,
@@ -230,6 +244,24 @@ def main() -> None:
     from renquant_pipeline.kernel.data import fetch_ohlcv  # noqa: PLC0415
     from sim.runner import run_backtest   # noqa: PLC0415
 
+    # Regime-series injection seam (orch#962 B2). Installed AFTER the
+    # strategy dir is on sys.path (the seam anchors on the umbrella's
+    # kernel.pipeline.task_regime.RegimeFinalizeTask) and BEFORE any data
+    # fetch or sim run. The class-level patch covers the candidate AND the
+    # golden comparison leg — both arms run under the SAME injected series,
+    # the prereg's paired-arm contract. Flag absent = nothing imported,
+    # nothing patched, byte-identical legacy behavior.
+    regime_series = None
+    regime_injection_meta = None
+    if args.regime_series is not None:
+        from renquant_backtesting.wf_gate.regime_injection import (  # noqa: PLC0415
+            install_regime_injection,
+            load_regime_series,
+        )
+        regime_series = load_regime_series(args.regime_series)
+        installed = install_regime_injection(regime_series)
+        regime_injection_meta = installed.metadata()
+
     # Load benchmark + sector ETFs
     log.info("Fetching SPY + sector ETFs …")
     benchmark = config.get("benchmark", "SPY")
@@ -241,6 +273,28 @@ def main() -> None:
             ohlcv[sym] = fetch_ohlcv(sym)
         except Exception as exc:
             log.warning("  %s: %s", sym, exc)
+
+    # Regime-injection coverage PREFLIGHT: every bar date the sim will
+    # iterate (run_backtest's own derivation: spy_df.loc[start:end].index)
+    # must be covered by the injected series. Fail-closed BEFORE any
+    # compute; the per-bar guard inside the seam remains the hard backstop
+    # for any date derived differently at run time. Verdicts on stdout for
+    # the wrapper's tee (the input-bundle idiom).
+    if regime_series is not None:
+        from renquant_backtesting.wf_gate.regime_injection import (  # noqa: PLC0415
+            required_sim_dates,
+            uncovered_dates,
+        )
+        missing = uncovered_dates(
+            regime_series, required_sim_dates(spy_df, args.start, args.end))
+        if missing:
+            print(f"REGIME INJECTION PREFLIGHT FAILED: {len(missing)} sim "
+                  f"date(s) not covered by {args.regime_series} "
+                  f"(first missing: {missing[0]})")
+            sys.exit(5)
+        print(f"REGIME INJECTION ACTIVE: sha256={regime_series.sha256} "
+              f"n_dates={len(regime_series.by_date)} "
+              f"source={args.regime_series}")
 
     log.info("Running sim: %s → %s  config=%s",
              args.start, args.end, args.strategy_config_name)
@@ -318,6 +372,10 @@ def main() -> None:
             "max_dd":        float(result.max_dd) if result.max_dd == result.max_dd else None,
             "equity":        eq["portfolio"].astype(float).to_dict(),
         }
+        # Injection provenance (orch#962 B2): recorded ONLY when active so
+        # the flag-absent payload stays byte-identical to legacy.
+        if regime_injection_meta is not None:
+            payload["regime_injection"] = regime_injection_meta
         annual_eq = result.annual_net_equity_df_estimate.copy()
         if (not annual_eq.empty and "portfolio" in annual_eq.columns):
             annual_eq.index = annual_eq.index.astype(str)
@@ -341,6 +399,13 @@ def main() -> None:
                     end_prices[sym] = float(hist["close"].iloc[-1])
             except Exception:  # noqa: BLE001
                 pass
+        extra_metrics = {
+            "config": args.strategy_config_name,
+            "start": args.start,
+            "end": args.end,
+        }
+        if regime_injection_meta is not None:
+            extra_metrics["regime_injection"] = regime_injection_meta
         written = write_trade_outputs(
             result           = result,
             config           = config,
@@ -353,11 +418,7 @@ def main() -> None:
                 f"renquant_104 sim trade forensics "
                 f"({args.strategy_config_name}, {args.start} to {args.end})"
             ),
-            extra_metrics    = {
-                "config": args.strategy_config_name,
-                "start": args.start,
-                "end": args.end,
-            },
+            extra_metrics    = extra_metrics,
         )
         for kind, path in sorted(written.items()):
             log.info("Wrote %s → %s", kind, path)
