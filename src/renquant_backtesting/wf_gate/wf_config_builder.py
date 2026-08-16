@@ -135,28 +135,35 @@ def _normalize_kind(kind: Any) -> str:
     return aliases.get(value, value)
 
 
-def _load_artifact_declared_kind(artifact_path: str, strategy_dir: Path) -> str | None:
-    """Return the scorer kind DECLARED inside a panel artifact, or None.
+def _load_artifact_meta(
+    artifact_path: str, strategy_dir: Path
+) -> tuple[str | None, str | None]:
+    """Return ``(declared_kind, config_fingerprint)`` from a panel artifact.
 
-    Read from the artifact payload's own metadata, never inferred from the
-    filename. Used to prove a blend component is genuinely the xgb leg before it
-    can serve as an xgb reference (orch#799); a failure to load returns None so
-    the caller fails closed rather than assuming a kind.
+    Both are read from the artifact payload's own metadata, never inferred from
+    the filename. Used to prove a blend component is genuinely the xgb leg AND
+    that its on-disk contents match the pinned production fingerprint before it
+    can serve as an xgb reference (orch#799); a failure to load returns
+    ``(None, None)`` so the caller fails closed rather than assuming either.
     """
     resolved = _resolve_strategy_path(artifact_path, strategy_dir)
     if resolved is None or not resolved.exists():
-        return None
+        return None, None
     try:
         payload = json.loads(resolved.read_text())
     except (OSError, ValueError):
-        return None
+        return None, None
     if not isinstance(payload, dict):
-        return None
+        return None, None
+    declared_kind: str | None = None
     for key in ("kind", "model_kind", "scorer_kind"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+            declared_kind = value.strip()
+            break
+    fp = payload.get("config_fingerprint")
+    config_fingerprint = fp.strip() if isinstance(fp, str) and fp.strip() else None
+    return declared_kind, config_fingerprint
 
 
 def derive_xgb_reference_from_blend(
@@ -205,7 +212,7 @@ def derive_xgb_reference_from_blend(
         raise ValueError(
             f"blend components[{component_index}] has no artifact_path; fail closed."
         )
-    declared_kind = _load_artifact_declared_kind(comp_artifact, strategy_dir)
+    declared_kind, artifact_fingerprint = _load_artifact_meta(comp_artifact, strategy_dir)
     if _normalize_kind(declared_kind) != _GBDT_KIND:
         raise ValueError(
             f"blend components[{component_index}] artifact ({comp_artifact}) "
@@ -213,14 +220,35 @@ def derive_xgb_reference_from_blend(
             f"{_GBDT_KIND!r}; refusing to derive an xgb reference from a non-xgb "
             "component (fail closed — never mutate kind to pass parity)."
         )
+    # The config-fingerprint pin is what proves THIS is the pinned production xgb
+    # leg, not merely any artifact declaring an xgb alias. Fail closed unless the
+    # component carries the pin AND the on-disk artifact's own config_fingerprint
+    # matches it — otherwise a swapped-in artifact with the right kind would be
+    # laundered into an accepted reference (parity proves model family, the pin
+    # proves identity). (codex orch#799 #112 review.)
+    fingerprint_pin = comp.get("expected_config_fingerprint")
+    if not isinstance(fingerprint_pin, str) or not fingerprint_pin.strip():
+        raise ValueError(
+            f"blend components[{component_index}] has no expected_config_fingerprint "
+            "pin; refusing to derive an unpinned xgb reference (fail closed)."
+        )
+    fingerprint_pin = fingerprint_pin.strip()
+    if artifact_fingerprint != fingerprint_pin:
+        raise ValueError(
+            f"blend components[{component_index}] artifact ({comp_artifact}) "
+            f"declares config_fingerprint={artifact_fingerprint!r}, which does "
+            f"not match the pinned expected_config_fingerprint={fingerprint_pin!r}; "
+            "the on-disk artifact is not the pinned production xgb leg (fail closed)."
+        )
     derived = copy.deepcopy(blend_config)
     dps = derived["ranking"]["panel_scoring"]
     # Present the genuine xgb leg as a single-scorer reference: adopt the
-    # component's declared kind + artifact (+ its config-fingerprint pin), and
-    # drop the blend-only structure so parity/build_wf_config_from_prod see xgb.
+    # component's declared kind + artifact + its config-fingerprint pin at the
+    # canonical single-scorer field downstream validation consumes, and drop the
+    # blend-only structure so parity/build_wf_config_from_prod see xgb.
     dps["kind"] = declared_kind
     dps["artifact_path"] = comp_artifact
-    fingerprint_pin = comp.get("expected_config_fingerprint")
+    dps["expected_config_fingerprint"] = fingerprint_pin
     dps.pop("components", None)
     dps.pop("_zblend_fullbook_note", None)
     dps["_orch799_derived_from_blend"] = {

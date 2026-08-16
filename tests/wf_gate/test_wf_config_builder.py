@@ -57,8 +57,18 @@ def _write_manifest(path: Path, artifact_uri: str) -> None:
     _write_json(path, {"retrains": [{"artifact_uri": artifact_uri}]})
 
 
-def _gbdt_artifact(path: Path, cols: list[str]) -> Path:
-    _write_json(path, {"kind": "panel_ltr_xgboost", "feature_cols": cols})
+#: The pinned production xgb leg's config fingerprint (matches the real
+#: ``panel-ltr.alpha158_fund.json`` artifact + the blend component pin).
+_XGB_PIN = "sha256:f8fb2259b2bf1537"
+
+
+def _gbdt_artifact(
+    path: Path, cols: list[str], *, config_fingerprint: str | None = _XGB_PIN
+) -> Path:
+    payload = {"kind": "panel_ltr_xgboost", "feature_cols": cols}
+    if config_fingerprint is not None:
+        payload["config_fingerprint"] = config_fingerprint
+    _write_json(path, payload)
     return path
 
 
@@ -346,8 +356,17 @@ def test_main_explicit_prod_config_mismatch_fails_closed(
 # ── orch#799: derive an xgb reference from a blend prod ───────────────────────
 
 
-def _blend_config(*, component0_artifact: str) -> dict:
-    """A z-blend prod: component[0] = xgb panel leg, component[1] = momentum."""
+def _blend_config(*, component0_artifact: str, pin: str | None = _XGB_PIN) -> dict:
+    """A z-blend prod: component[0] = xgb panel leg, component[1] = momentum.
+
+    ``pin=None`` omits the component's ``expected_config_fingerprint`` (to test
+    the missing-pin fail-closed path)."""
+    component0: dict = {
+        "artifact_path": component0_artifact,
+        "_role": "component 0 = PRODUCTION panel scorer (rank:pairwise xgb)",
+    }
+    if pin is not None:
+        component0["expected_config_fingerprint"] = pin
     return {
         "ranking": {
             "panel_scoring": {
@@ -357,11 +376,7 @@ def _blend_config(*, component0_artifact: str) -> dict:
                 "buy_floor": "adaptive_mean_std",
                 "_zblend_fullbook_note": "OPERATOR OVERRIDE 2026-08-04 z-blend进prod",
                 "components": [
-                    {
-                        "artifact_path": component0_artifact,
-                        "expected_config_fingerprint": "sha256:f8fb2259b2bf1537",
-                        "_role": "component 0 = PRODUCTION panel scorer (rank:pairwise xgb)",
-                    },
+                    component0,
                     {
                         "kind": "momentum_residual",
                         "artifact_path": "artifacts/momentum/momentum_artifact_ledger.jsonl",
@@ -385,11 +400,13 @@ def test_derive_xgb_reference_from_blend_produces_xgb_shaped_ref(tmp_path: Path)
     assert dps["artifact_path"] == str(art.relative_to(tmp_path))
     assert "components" not in dps  # no longer a blend
     assert "_zblend_fullbook_note" not in dps
+    # The pin lands at the canonical single-scorer field downstream validation
+    # consumes — not merely echoed into the provenance sidecar.
+    assert dps["expected_config_fingerprint"] == _XGB_PIN
     # ADVERSARIAL provenance: the derived ref pins the SAME component fingerprint,
     # so parity compares the live xgb leg (not a phantom).
     assert (
-        dps["_orch799_derived_from_blend"]["component_config_fingerprint"]
-        == "sha256:f8fb2259b2bf1537"
+        dps["_orch799_derived_from_blend"]["component_config_fingerprint"] == _XGB_PIN
     )
     # original blend config is untouched (deepcopy, not mutated in place)
     assert blend["ranking"]["panel_scoring"]["kind"] == "blend"
@@ -422,6 +439,44 @@ def test_derive_refuses_when_component_artifact_missing(tmp_path: Path) -> None:
     """Fail closed when the component artifact can't be loaded (kind unknowable)."""
     blend = _blend_config(component0_artifact="artifacts/prod/does-not-exist.json")
     with pytest.raises(ValueError):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_component_has_no_fingerprint_pin(tmp_path: Path) -> None:
+    """ADVERSARIAL (codex #112 review): an xgb component with NO
+    expected_config_fingerprint pin is refused — an unpinned reference cannot
+    prove it is the pinned production leg."""
+    art = _gbdt_artifact(tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json", ["a", "b"])
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)), pin=None)
+    with pytest.raises(ValueError, match="no expected_config_fingerprint"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_artifact_fingerprint_mismatches_pin(tmp_path: Path) -> None:
+    """ADVERSARIAL (codex #112 review): the component declares the xgb kind and a
+    pin, but the on-disk artifact's config_fingerprint does NOT match the pin —
+    i.e. the configured path was swapped for a different xgb-alias artifact.
+    Refused: parity would prove model family, but the pin proves identity."""
+    art = _gbdt_artifact(
+        tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json",
+        ["a", "b"],
+        config_fingerprint="sha256:deadbeefdeadbeef",  # != the component pin
+    )
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+    with pytest.raises(ValueError, match="does not match the pinned"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_artifact_has_no_fingerprint(tmp_path: Path) -> None:
+    """Fail closed when the on-disk artifact declares no config_fingerprint at
+    all — the pin cannot be corroborated, so identity is unproven."""
+    art = _gbdt_artifact(
+        tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json",
+        ["a", "b"],
+        config_fingerprint=None,  # artifact carries no fingerprint to match
+    )
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+    with pytest.raises(ValueError, match="does not match the pinned"):
         derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
 
 
