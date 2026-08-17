@@ -26,7 +26,18 @@ def _inputs() -> dict:
             "strategy": "renquant_104",
             "fingerprint": "sha256:model",
             "uri": "object://renquant-artifacts/panel-ltr-prod.json",
-            "promotion_status": "prod",
+            # renquant-artifacts made provenance mandatory on 2026-08-15
+            # (PROVENANCE_REQUIRED_AFTER) and rejects kind='none' combined with
+            # promotion_status='prod' -- correctly: a real prod artifact must carry
+            # a canonical, registry-published lineage (publication_record_digest +
+            # registry bindings). This fixture is a synthetic test double, not a
+            # published production artifact, so claiming 'prod' was a fiction the
+            # new guard exposed rather than a capability the guard removed.
+            # Nothing under test reads promotion_status (no consumer in
+            # renquant-backtesting/src), and 'candidate' is the value the other
+            # manifest fixtures in these repos already use.
+            "promotion_status": "candidate",
+            "provenance": {"kind": "none"},
             "feature_cols": ["alpha_1", "alpha_2"],
             "metrics": {"accepted": True},
         },
