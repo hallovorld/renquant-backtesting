@@ -28,6 +28,7 @@ import pytest
 from renquant_backtesting.wf_gate import wf_config_builder
 from renquant_backtesting.wf_gate.wf_config_builder import (
     build_wf_config_from_prod,
+    derive_xgb_reference_from_blend,
     main as wf_config_builder_main,
     select_prod_reference_for_candidate,
 )
@@ -56,8 +57,18 @@ def _write_manifest(path: Path, artifact_uri: str) -> None:
     _write_json(path, {"retrains": [{"artifact_uri": artifact_uri}]})
 
 
-def _gbdt_artifact(path: Path, cols: list[str]) -> Path:
-    _write_json(path, {"kind": "panel_ltr_xgboost", "feature_cols": cols})
+#: The pinned production xgb leg's config fingerprint (matches the real
+#: ``panel-ltr.alpha158_fund.json`` artifact + the blend component pin).
+_XGB_PIN = "sha256:f8fb2259b2bf1537"
+
+
+def _gbdt_artifact(
+    path: Path, cols: list[str], *, config_fingerprint: str | None = _XGB_PIN
+) -> Path:
+    payload = {"kind": "panel_ltr_xgboost", "feature_cols": cols}
+    if config_fingerprint is not None:
+        payload["config_fingerprint"] = config_fingerprint
+    _write_json(path, payload)
     return path
 
 
@@ -340,3 +351,144 @@ def test_main_explicit_prod_config_mismatch_fails_closed(
             "--candidate-artifact", str(gbdt_artifact),
             "--prod-config", str(tmp_path / "strategy_config.json"),  # PatchTST, mismatched
         ])
+
+
+# ── orch#799: derive an xgb reference from a blend prod ───────────────────────
+
+
+def _blend_config(*, component0_artifact: str, pin: str | None = _XGB_PIN) -> dict:
+    """A z-blend prod: component[0] = xgb panel leg, component[1] = momentum.
+
+    ``pin=None`` omits the component's ``expected_config_fingerprint`` (to test
+    the missing-pin fail-closed path)."""
+    component0: dict = {
+        "artifact_path": component0_artifact,
+        "_role": "component 0 = PRODUCTION panel scorer (rank:pairwise xgb)",
+    }
+    if pin is not None:
+        component0["expected_config_fingerprint"] = pin
+    return {
+        "ranking": {
+            "panel_scoring": {
+                "enabled": True,
+                "kind": "blend",
+                "artifact_path": component0_artifact,
+                "buy_floor": "adaptive_mean_std",
+                "_zblend_fullbook_note": "OPERATOR OVERRIDE 2026-08-04 z-blend进prod",
+                "components": [
+                    component0,
+                    {
+                        "kind": "momentum_residual",
+                        "artifact_path": "artifacts/momentum/momentum_artifact_ledger.jsonl",
+                    },
+                ],
+            },
+        },
+    }
+
+
+def test_derive_xgb_reference_from_blend_produces_xgb_shaped_ref(tmp_path: Path) -> None:
+    """A blend whose component[0] artifact DECLARES xgb yields an xgb reference."""
+    art = _gbdt_artifact(tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json", ["a", "b"])
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+
+    derived = derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+    dps = derived["ranking"]["panel_scoring"]
+    assert wf_config_builder._normalize_kind(dps["kind"]) == "xgb"  # normalizes to xgb
+    assert dps["kind"] == "panel_ltr_xgboost"  # the artifact's OWN declared kind, verbatim
+    assert dps["artifact_path"] == str(art.relative_to(tmp_path))
+    assert "components" not in dps  # no longer a blend
+    assert "_zblend_fullbook_note" not in dps
+    # The pin lands at the canonical single-scorer field downstream validation
+    # consumes — not merely echoed into the provenance sidecar.
+    assert dps["expected_config_fingerprint"] == _XGB_PIN
+    # ADVERSARIAL provenance: the derived ref pins the SAME component fingerprint,
+    # so parity compares the live xgb leg (not a phantom).
+    assert (
+        dps["_orch799_derived_from_blend"]["component_config_fingerprint"] == _XGB_PIN
+    )
+    # original blend config is untouched (deepcopy, not mutated in place)
+    assert blend["ranking"]["panel_scoring"]["kind"] == "blend"
+    assert "components" in blend["ranking"]["panel_scoring"]
+
+
+def test_derived_ref_kind_matches_an_xgb_candidate_for_parity(tmp_path: Path) -> None:
+    """The derived reference kind matches an xgb candidate — parity would pass."""
+    art = _gbdt_artifact(tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json", ["a", "b"])
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+    derived = derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+    ref_kind = wf_config_builder._normalize_kind(derived["ranking"]["panel_scoring"]["kind"])
+    assert ref_kind == wf_config_builder._normalize_kind("panel_ltr_xgboost")  # candidate kind
+
+
+def test_derive_refuses_non_xgb_component_fail_closed(tmp_path: Path) -> None:
+    """ADVERSARIAL: a component whose artifact declares a NON-xgb kind is refused.
+
+    The kind is read from the artifact, never mutated to pass, so a PatchTST (or
+    any non-xgb) component cannot be laundered into a passing xgb reference.
+    """
+    art = tmp_path / "artifacts" / "prod" / "patchtst.json"
+    _write_json(art, {"kind": "hf_patchtst", "feature_cols": ["a"]})
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+    with pytest.raises(ValueError, match="does not normalize"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_component_artifact_missing(tmp_path: Path) -> None:
+    """Fail closed when the component artifact can't be loaded (kind unknowable)."""
+    blend = _blend_config(component0_artifact="artifacts/prod/does-not-exist.json")
+    with pytest.raises(ValueError):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_component_has_no_fingerprint_pin(tmp_path: Path) -> None:
+    """ADVERSARIAL (codex #112 review): an xgb component with NO
+    expected_config_fingerprint pin is refused — an unpinned reference cannot
+    prove it is the pinned production leg."""
+    art = _gbdt_artifact(tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json", ["a", "b"])
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)), pin=None)
+    with pytest.raises(ValueError, match="no expected_config_fingerprint"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_artifact_fingerprint_mismatches_pin(tmp_path: Path) -> None:
+    """ADVERSARIAL (codex #112 review): the component declares the xgb kind and a
+    pin, but the on-disk artifact's config_fingerprint does NOT match the pin —
+    i.e. the configured path was swapped for a different xgb-alias artifact.
+    Refused: parity would prove model family, but the pin proves identity."""
+    art = _gbdt_artifact(
+        tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json",
+        ["a", "b"],
+        config_fingerprint="sha256:deadbeefdeadbeef",  # != the component pin
+    )
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+    with pytest.raises(ValueError, match="does not match the pinned"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_when_artifact_has_no_fingerprint(tmp_path: Path) -> None:
+    """Fail closed when the on-disk artifact declares no config_fingerprint at
+    all — the pin cannot be corroborated, so identity is unproven."""
+    art = _gbdt_artifact(
+        tmp_path / "artifacts" / "prod" / "panel-ltr.alpha158_fund.json",
+        ["a", "b"],
+        config_fingerprint=None,  # artifact carries no fingerprint to match
+    )
+    blend = _blend_config(component0_artifact=str(art.relative_to(tmp_path)))
+    with pytest.raises(ValueError, match="does not match the pinned"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_non_blend_config(tmp_path: Path) -> None:
+    """An already-xgb (non-blend) prod config is not a derivation target."""
+    prod = _prod_config(kind="xgb", artifact_path="artifacts/prod/model.json")
+    with pytest.raises(ValueError, match="not kind=blend"):
+        derive_xgb_reference_from_blend(prod, strategy_dir=tmp_path)
+
+
+def test_derive_refuses_blend_without_components(tmp_path: Path) -> None:
+    """A blend missing its components list fails closed."""
+    blend = {"ranking": {"panel_scoring": {"kind": "blend", "artifact_path": "x"}}}
+    with pytest.raises(ValueError, match="no components"):
+        derive_xgb_reference_from_blend(blend, strategy_dir=tmp_path)
