@@ -986,12 +986,24 @@ def inspect_artifact_usage(strategy_config: str, artifact_path: Path) -> dict:
 
 
 def cut_market_context(start: str, end: str) -> dict:
-    """SPY benchmark + regime distribution for one WF cut."""
-    import pandas as _pd
-    from renquant_common.hmm_regime_labels import compute_hmm_regime_labels  # noqa: PLC0415
-    # Lifted to renquant-common (PR #5 in that repo, 2026-06-01).
-    from renquant_common.regime_labels import compute_spy_regime_labels  # noqa: PLC0415
+    """SPY benchmark + regime distribution for one WF cut.
 
+    Regime labels come from the PRODUCTION plane by default — the same
+    kernel task-chain replay the ``sanity_regime_ic`` leg has always used
+    (orch#985 ranked item 1: one label plane instead of four). Set
+    ``RENQUANT_REGIME_PLANE=legacy_stateless`` to reproduce historical
+    reports keyed to the stateless ``hmm_regime_labels`` approximation +
+    SPY grid labels; that mode additionally emits the pre-consolidation
+    ``hmm_regime_counts`` / ``spy_grid_regime_counts`` keys verbatim.
+    """
+    import pandas as _pd
+    from renquant_backtesting.analysis.regime_plane import (  # noqa: PLC0415
+        PLANE_PRODUCTION,
+        production_regime_labels,
+        resolve_regime_plane,
+    )
+
+    plane = resolve_regime_plane()
     spy_path = REPO / "data" / "ohlcv" / "SPY" / "1d.parquet"
     if not spy_path.exists():
         return {"benchmark": "SPY", "error": f"missing {spy_path}"}
@@ -1012,6 +1024,24 @@ def cut_market_context(start: str, end: str) -> dict:
     if len(cut) > 1 and len(ret) > 0:
         apy = float((cut["close"].iloc[-1] / cut["close"].iloc[0]) ** (252.0 / len(ret)) - 1.0)
 
+    out = {
+        "benchmark": "SPY",
+        "spy_sharpe": sharpe,
+        "spy_apy": apy,
+        "n_trading_days": int(len(ret)),
+        "regime_plane": plane,
+    }
+    if plane == PLANE_PRODUCTION:
+        labels = production_regime_labels(cut.index)
+        counts = labels["regime"].value_counts().to_dict() if not labels.empty else {}
+        out["regime_counts"] = {str(k): int(v) for k, v in counts.items()}
+        return out
+
+    # legacy_stateless escape hatch — historical reproduction only.
+    from renquant_common.hmm_regime_labels import compute_hmm_regime_labels  # noqa: PLC0415
+    # Lifted to renquant-common (PR #5 in that repo, 2026-06-01).
+    from renquant_common.regime_labels import compute_spy_regime_labels  # noqa: PLC0415
+
     hmm = compute_hmm_regime_labels(spy_path)
     grid = compute_spy_regime_labels(spy_path)
     hmm_counts = (
@@ -1022,14 +1052,10 @@ def cut_market_context(start: str, end: str) -> dict:
         grid[(grid.date >= start_ts) & (grid.date <= end_ts)]
         .regime.value_counts().to_dict()
     )
-    return {
-        "benchmark": "SPY",
-        "spy_sharpe": sharpe,
-        "spy_apy": apy,
-        "n_trading_days": int(len(ret)),
-        "hmm_regime_counts": {str(k): int(v) for k, v in hmm_counts.items()},
-        "spy_grid_regime_counts": {str(k): int(v) for k, v in grid_counts.items()},
-    }
+    out["regime_counts"] = {str(k): int(v) for k, v in hmm_counts.items()}
+    out["hmm_regime_counts"] = {str(k): int(v) for k, v in hmm_counts.items()}
+    out["spy_grid_regime_counts"] = {str(k): int(v) for k, v in grid_counts.items()}
+    return out
 
 
 def _finite_number(value) -> float | None:
@@ -1090,7 +1116,10 @@ def _benchmark_by_dominant_regime(rows: list[dict]) -> dict[str, dict]:
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         regime = (
-            row.get("dominant_spy_grid_regime")
+            # Production label plane (orch#985 item 1). The stateless keys
+            # below survive only as the legacy_stateless escape hatch.
+            row.get("dominant_regime")
+            or row.get("dominant_spy_grid_regime")
             or row.get("dominant_hmm_regime")
             or "UNKNOWN"
         )
@@ -1154,7 +1183,8 @@ def _benchmark_by_dominant_regime(rows: list[dict]) -> dict[str, dict]:
 def _trade_trace_summary(traces: dict[str, str]) -> dict:
     """Summarize production decision regimes from the persisted trade trace.
 
-    `cut_market_context()` is an independent SPY/HMM lens. The trade trace is
+    `cut_market_context()` is an independent SPY/regime lens (production
+    label plane by default — orch#985 item 1). The trade trace is
     the production decision path: it records what regime the pipeline attached
     to each actual buy/sell. Keeping both prevents us from explaining trades
     with the wrong regime taxonomy.
@@ -1360,6 +1390,11 @@ def run_sim_cut(
         ),
         "sharpe_vs_spy": sharpe_vs_spy,
         "apy_vs_spy": apy_vs_spy,
+        # Canonical (production label plane by default — orch#985 item 1).
+        "dominant_regime": _top_regime(market_context.get("regime_counts")),
+        "regime_plane": market_context.get("regime_plane"),
+        # Pre-consolidation keys — populated only under the
+        # RENQUANT_REGIME_PLANE=legacy_stateless escape hatch.
         "dominant_hmm_regime": _top_regime(market_context.get("hmm_regime_counts")),
         "dominant_spy_grid_regime": _top_regime(market_context.get("spy_grid_regime_counts")),
         "market_context": market_context,
@@ -1451,6 +1486,10 @@ def run_walk_forward(
                 "performance_tax_basis_counts": _value_counts(
                     results, "performance_tax_basis",
                 ),
+                "regime_counts_total": _merge_counts(results, "regime_counts"),
+                "regime_plane": _value_counts(results, "regime_plane"),
+                # legacy_stateless escape-hatch totals — {} on the default
+                # production plane (see cut_market_context / orch#985 item 1).
                 "hmm_regime_counts_total": _merge_counts(results, "hmm_regime_counts"),
                 "spy_grid_regime_counts_total": _merge_counts(results, "spy_grid_regime_counts"),
                 "trade_buy_regime_counts_total": {},
@@ -1564,6 +1603,10 @@ def run_walk_forward(
         "benchmark_by_dominant_regime": benchmark_by_regime,
         "regime_benchmark_failures": regime_benchmark_failures,
         "performance_tax_basis_counts": _value_counts(results, "performance_tax_basis"),
+        "regime_counts_total": _merge_counts(results, "regime_counts"),
+        "regime_plane": _value_counts(results, "regime_plane"),
+        # legacy_stateless escape-hatch totals — {} on the default
+        # production plane (see cut_market_context / orch#985 item 1).
         "hmm_regime_counts_total": _merge_counts(results, "hmm_regime_counts"),
         "spy_grid_regime_counts_total": _merge_counts(results, "spy_grid_regime_counts"),
         "trade_buy_regime_counts_total": _merge_trade_counts(results, "buy_regime_counts"),
@@ -3804,6 +3847,8 @@ def main():
         "benchmark_by_dominant_regime": wf_result.get("benchmark_by_dominant_regime"),
         "regime_benchmark_failures": wf_result.get("regime_benchmark_failures"),
         "performance_tax_basis_counts": wf_result.get("performance_tax_basis_counts"),
+        "regime_counts_total": wf_result.get("regime_counts_total"),
+        "regime_plane": wf_result.get("regime_plane"),
         "hmm_regime_counts_total": wf_result.get("hmm_regime_counts_total"),
         "spy_grid_regime_counts_total": wf_result.get("spy_grid_regime_counts_total"),
         "trade_buy_regime_counts_total": wf_result.get("trade_buy_regime_counts_total"),

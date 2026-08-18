@@ -12,3 +12,7 @@ backtests/
 data/
 artifacts/
 logs/
+# committed research corpora (orch#985 item 1) — provenance-manifested
+# label series, NOT runtime data; the blanket data/ rule above must not
+# swallow them.
+!doc/research/data/
