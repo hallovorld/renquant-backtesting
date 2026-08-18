@@ -1,0 +1,71 @@
+{
+  "chain": {
+    "renquant_pipeline.kernel.pipeline.task_regime": {
+      "path": "renquant-pipeline:src/renquant_pipeline/kernel/pipeline/task_regime.py",
+      "sha256": "ae6fc160e89a23b5c3c7fcfcc67daf779ac85d8ad172f953272906844233d467"
+    },
+    "renquant_pipeline.kernel.regime": {
+      "path": "renquant-pipeline:src/renquant_pipeline/kernel/regime.py",
+      "sha256": "84149b544ecfb51a4a2d3e020d145cb03afc4d3e7b91c7d89a0d2905c2ac5407"
+    },
+    "renquant_pipeline.kernel.regime_hmm": {
+      "path": "renquant-pipeline:src/renquant_pipeline/kernel/regime_hmm.py",
+      "sha256": "252a53993fa91b02eb6d68e79a65cc79405720175a1d6142c0ed15f306b1ea97"
+    }
+  },
+  "chain_flag_state": {
+    "bear_short_route_require_both": false,
+    "bear_trend_filter_enabled": false,
+    "note": "the renquant-pipeline lifted task_regime.py carries 2026-06-11 bear-audit guards the umbrella working copy lacks; both copies are behaviorally equal only while these flags stay unset/false (see the drift issue filed on hallovorld/renquant-pipeline)"
+  },
+  "consumers": [
+    "renquant-model harnesses (by path; boundary tests forbid imports)",
+    "orch#984 serving-plane power-map re-derivation"
+  ],
+  "date_end": "2026-08-17",
+  "date_start": "2016-02-16",
+  "generated_on": "2026-08-17",
+  "generator": "tools/publish_production_regime_labels.py",
+  "inputs": {
+    "gmm_artifact": {
+      "path": "RenQuant:backtesting/renquant_104/artifacts/prod/spy-gmm-regime.json",
+      "sha256": "cb643e003cec11ea897137c206713e6753746b1792ed39083b6a5319c851a07d"
+    },
+    "spy_parquet": {
+      "path": "RenQuant:data/ohlcv/SPY/1d.parquet",
+      "sha256": "68665523c23edae565dee40b25fcc90051b209703c57f0887e70fd295964b0ee"
+    },
+    "strategy_config": {
+      "path": "RenQuant:backtesting/renquant_104/strategy_config.json",
+      "sha256": "ff54318e63444832030575975163484cb8285931275068497759a106e2bb8cb7"
+    }
+  },
+  "memo_985_crosscheck": {
+    "evaluated": true,
+    "exact_match": true,
+    "expected": {
+      "bear_days": 413,
+      "bear_episodes": 57,
+      "n_days": 2459
+    },
+    "measured": {
+      "bear_days": 413,
+      "bear_episodes": 57,
+      "n_days": 2459
+    },
+    "span": [
+      "2016-11-01",
+      "2026-08-14"
+    ]
+  },
+  "occupancy": {
+    "BEAR": 419,
+    "BULL_CALM": 1929,
+    "BULL_VOLATILE": 185,
+    "CHOPPY": 108
+  },
+  "plane": "production",
+  "row_count": 2641,
+  "schema": "production_regime_labels/v1",
+  "series_sha256": "76b57d1bffd402875006be76fd93ff57996916dacc45e5aceb2183dfb6d30edb"
+}

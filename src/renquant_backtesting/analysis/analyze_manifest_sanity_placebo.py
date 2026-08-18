@@ -15,7 +15,6 @@ import math
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -174,41 +173,17 @@ def shift_diagnostics(
     return out
 
 
-def _resolve_strategy_artifact(strategy_dir: Path, raw: str | None) -> Path | None:
-    if not raw:
-        return None
-    p = Path(raw)
-    candidates = [p] if p.is_absolute() else [
-        strategy_dir / "artifacts" / p,
-        strategy_dir / p,
-        REPO / p,
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    return candidates[0]
-
-
-def _load_config(strategy_dir: Path) -> dict:
-    return json.loads((strategy_dir / "strategy_config.json").read_text())
-
-
-def _load_gmm(strategy_dir: Path, config: dict) -> dict | None:
-    p = _resolve_strategy_artifact(
-        strategy_dir,
-        str((config.get("regime", {}) or {}).get("gmm_artifact") or ""),
-    )
-    if p is None or not p.exists():
-        return None
-    return json.loads(p.read_text())
-
-
-def _load_spy_frame() -> pd.DataFrame:
-    df = pd.read_parquet(REPO / "data" / "ohlcv" / "SPY" / "1d.parquet")
-    if "date" not in df.columns:
-        df = df.reset_index()
-    df["date"] = pd.to_datetime(df["date"])
-    return df.sort_values("date").set_index("date")
+# Strategy-config / GMM / SPY loading and the production-chain replay were
+# refactor-extracted (NOT copied) into ``analysis.regime_plane`` so ONE
+# accessor serves the WF sanity leg, the corpus publisher and cut-level
+# market context — orch#985 ranked item 1 (one label plane).
+from renquant_backtesting.analysis.regime_plane import (  # noqa: E402
+    load_gmm_artifact as _load_gmm,  # noqa: F401 — legacy alias
+    load_spy_frame as _load_spy_frame,  # noqa: F401 — legacy alias
+    load_strategy_config as _load_config,  # noqa: F401 — legacy alias
+    production_regime_labels,
+    resolve_strategy_artifact as _resolve_strategy_artifact,  # noqa: F401
+)
 
 
 def build_regime_series(
@@ -216,56 +191,12 @@ def build_regime_series(
     *,
     strategy_dir: Path = STRATEGY_DIR,
 ) -> pd.DataFrame:
-    """Run the production regime Task chain for each requested date."""
-    logging.getLogger("kernel.pipeline.regime").setLevel(logging.WARNING)
-    logging.getLogger("kernel.regime").setLevel(logging.WARNING)
-    from renquant_pipeline.kernel.regime import RegimeState  # noqa: PLC0415
-    from renquant_pipeline.kernel.pipeline.task_regime import (  # noqa: PLC0415
-        BEAROverrideTask,
-        CUSUMTask,
-        GMMTask,
-        HurstTask,
-        RegimeFinalizeTask,
-    )
+    """Run the production regime Task chain for each requested date.
 
-    config = _load_config(strategy_dir)
-    gmm = _load_gmm(strategy_dir, config)
-    spy = _load_spy_frame()
-    tasks = [HurstTask(), CUSUMTask(), GMMTask(), BEAROverrideTask(), RegimeFinalizeTask()]
-    ctx = SimpleNamespace(
-        config=config,
-        regime_state=RegimeState(),
-        spy_returns=[],
-        ohlcv={},
-        gmm=gmm,
-        regime_counts={},
-        today=None,
-        regime=None,
-        confidence=None,
-    )
-    out: list[dict[str, Any]] = []
-    for raw_d in sorted({pd.Timestamp(d).normalize() for d in dates}):
-        hist = spy.loc[spy.index <= raw_d].copy()
-        if len(hist) < 30:
-            continue
-        ctx.today = raw_d.date()
-        ctx.ohlcv = {"SPY": hist}
-        ctx.spy_returns = hist["close"].pct_change().dropna().values
-        for task in tasks:
-            task.run(ctx)
-        evidence = dict(getattr(ctx, "_regime_evidence", {}) or {})
-        out.append({
-            "date": raw_d,
-            "regime": ctx.regime,
-            "confidence": ctx.confidence,
-            "source": evidence.get("source"),
-            "hurst": evidence.get("hurst"),
-            "hurst_regime": evidence.get("hurst_regime"),
-            "hard_bear": evidence.get("hard_bear"),
-            "vol_cluster_choppy": evidence.get("vol_cluster_choppy"),
-            "in_transition": evidence.get("in_transition"),
-        })
-    return pd.DataFrame(out)
+    Thin delegate kept for the WF gate call sites; the single replay
+    implementation lives in ``regime_plane.production_regime_labels``.
+    """
+    return production_regime_labels(dates, strategy_dir=strategy_dir)
 
 
 def regime_diagnostics(
