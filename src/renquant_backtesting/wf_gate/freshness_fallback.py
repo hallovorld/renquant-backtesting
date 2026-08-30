@@ -9,6 +9,17 @@ runner.py GATE_VERSION) — and kept the piece that needs no frozen margin:
 implement the ALREADY-DECIDED freshness governance (RFC #210: no served
 model >28 days; else serve the BEST from the last 10 days).
 
+AMENDMENT A4 (RFC#210, orchestrator design doc
+``doc/design/2026-06-30-model-freshness-governance.md``, 2026-08-30). The
+first implementation admitted any candidate with a non-negative genuine_ic
+and then RATCHETED it against the served fallback's stamped genuine_ic. That
+rule promoted (2026-08-04) an artifact whose signal is indistinguishable from
+a 120-day-shifted placebo (genuine_ic +0.0029 against the 0.02 bar), and then
+could never promote again (later candidates +0.0006..+0.0000). A comparison
+against a model that itself failed the floor is not a quality predicate.
+Under A4 a Pillar-3 promotion requires the QUALITY FLOOR and INFRA-ONLY
+failure classes; the ratchet is removed.
+
 The policy, exactly:
 
   FALLBACK-PROMOTE the staged candidate iff ALL of
@@ -18,14 +29,28 @@ The policy, exactly:
        ``MAX_SERVED_AGE_DAYS`` (28) before as-of;
     3. the candidate is RECENT: trained within ``CANDIDATE_WINDOW_DAYS``
        (10) of as-of;
-    4. the candidate's stamped ``sanity_placebo_genuine_ic`` is a finite
-       float >= 0.0 — never serve a candidate measured NEGATIVE net of the
-       placebo (genuine_ic is used as an ORDINAL/sign quantity here, not a
-       pass threshold: no frozen margin is introduced);
-    5. NO DOWNWARD RATCHET: when the served model was ITSELF
-       fallback-promoted, the candidate's genuine_ic must be STRICTLY
-       greater than the served model's stamped fallback genuine_ic — a
-       chain of fallbacks may only walk up.
+    4. QUALITY FLOOR: the candidate's stamped ``sanity_placebo_genuine_ic``
+       (= aligned_real_ic − placebo_ic, the Fix-3 difference test) is a
+       finite float >= ``FALLBACK_GENUINE_IC_FLOOR`` — the SAME 0.02 the §5.2
+       sanity bar uses (``runner.PLACEBO_GENUINE_IC_MARGIN``; one constant,
+       one place). The served artifact's own genuine_ic is REPORTED in the
+       verdict for context and never compared;
+    5. INFRA-ONLY FAILURE CLASSES: every failing sub-verdict in the
+       candidate's stamp must be in ``INFRA_ONLY_FAILURE_CLASSES``
+       (§4.3.1). Any QUALITY/SUBSTANCE class — sub-SPY / negative ΔSharpe
+       (Fix-4), shuffled-label leakage, regime sanity IC, trade
+       monotonicity, recipe mismatch, a diagnostic-only stamp — or any
+       failure the classifier cannot attribute is fail-closed, regardless
+       of genuine_ic.
+
+Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
+structural placebo floor (Fix-3) as bypassable ONLY with the difference test
+as its predicate — check 4 IS that predicate. The other infra classes named
+there (phase/timeout, path-not-found) abort the runner before any stamp is
+written, so they never reach this module as a ``passed=False`` stamp; a
+partially-executed sim ("N/3 sim cuts failed execution") is stamped but its
+WF economics were never measured, and §4.3.3's independent OOS floor for
+that case has no implemented predicate — fail-closed.
 
 Every verdict names each check's measured value. A promoted artifact is
 stamped ``promotion_basis: "freshness_fallback_rfc210"`` plus the decision
@@ -49,9 +74,22 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from renquant_backtesting.wf_gate.runner import PLACEBO_GENUINE_IC_MARGIN, SHUF_IC_MAX
+
 PROMOTION_BASIS = "freshness_fallback_rfc210"
 MAX_SERVED_AGE_DAYS = 28      # RFC #210 SLA on the served model
 CANDIDATE_WINDOW_DAYS = 10    # RFC #210 "best from the last 10 days"
+
+# A4: the Fix-3 difference floor. NOT a second copy of the number — it IS the
+# §5.2 sanity bar (0.02, FROZEN 2026-07-02). The sanity battery's shadow
+# verdict is strictly-greater; the fallback floor is >= per A4's wording
+# ("genuine_ic >= 0.02"), which differs only at exact equality.
+FALLBACK_GENUINE_IC_FLOOR = PLACEBO_GENUINE_IC_MARGIN
+
+# §4.3.1 enumerated, CLOSED list of failure classes the fallback may act on.
+# See the module docstring for why it is this short. Everything else is
+# QUALITY/SUBSTANCE (fail-closed), including anything unclassified.
+INFRA_ONLY_FAILURE_CLASSES = frozenset({"placebo_ceiling"})
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -82,6 +120,124 @@ def _finite_float(value: Any) -> float | None:
     return f
 
 
+def _sub_verdict_failed(value: Any) -> tuple[bool, str]:
+    """(failed?, reason) for a stamped {passed, reason} sub-verdict dict.
+
+    The runner composes ``overall_pass`` from ``bool(result["passed"])`` —
+    only an explicit True is a pass here; anything else is a failure with
+    whatever reason the stamp carries (or its own absence named).
+    """
+    if not isinstance(value, dict):
+        return True, f"sub-verdict absent or not an object (got {value!r})"
+    if value.get("passed") is True:
+        return False, ""
+    reason = value.get("reason")
+    return True, (reason if isinstance(reason, str) and reason
+                  else f"passed={value.get('passed')!r}")
+
+
+def classify_gate_failures(wf: dict[str, Any]) -> list[dict[str, Any]]:
+    """Name every failing sub-verdict in a stamped ``wf_gate_metadata``.
+
+    The runner does not stamp a failure class; it stamps each sub-verdict
+    (``wf_reason``, the sanity fields, ``trade_contract``, ...) and composes
+    ``passed`` from them (``runner._compute_overall_pass``). This reads
+    those same fields back — the runner's own contract, not parallel gate
+    logic — and tags each failure with a §4.3.1 class. Anything that cannot
+    be attributed is ``unclassified`` (substance, fail-closed).
+
+    Each entry: {"class": <name>, "kind": "infra"|"substance", "detail": str}.
+    """
+    failures: list[dict[str, Any]] = []
+
+    def fail(cls: str, detail: str) -> None:
+        failures.append({
+            "class": cls,
+            "kind": "infra" if cls in INFRA_ONLY_FAILURE_CLASSES else "substance",
+            "detail": detail[:300],
+        })
+
+    # A diagnostic-only stamp (a required gate skipped) is not evidence.
+    skipped = wf.get("skipped_required_gates")
+    if wf.get("diagnostic_only") is True or (isinstance(skipped, list) and skipped):
+        fail("diagnostic_only", f"required gates skipped: {skipped!r}")
+
+    # Validation scope: the candidate must have been evaluated directly or
+    # via a validated matching recipe — otherwise it is not the model the
+    # recipe claims (recipe-mismatch, §4.3.1 substance).
+    if not (wf.get("candidate_artifact_used") is True
+            or wf.get("recipe_validated") is True):
+        fail("recipe_mismatch",
+             f"candidate_artifact_used={wf.get('candidate_artifact_used')!r} "
+             f"recipe_validated={wf.get('recipe_validated')!r} "
+             f"scope={wf.get('wf_eval_scope')!r}")
+
+    # Walk-forward economics (Fix-4). The runner stamps only its reason
+    # string; its own contract prefixes PASS:/FAIL:.
+    wf_reason = wf.get("wf_reason")
+    if isinstance(wf_reason, str) and wf_reason.startswith("PASS"):
+        pass
+    elif isinstance(wf_reason, str) and "sim cuts failed" in wf_reason:
+        # A phase failure — WF economics never measured; §4.3.3 has no
+        # implemented OOS-floor predicate for it, so it is NOT in the
+        # bypassable list (fail-closed).
+        fail("wf_sim_execution", wf_reason)
+    elif isinstance(wf_reason, str) and wf_reason.startswith("FAIL"):
+        fail("wf_benchmark_economics", wf_reason)
+    else:
+        fail("wf_unclassified", f"wf_reason={wf_reason!r}")
+
+    # Sanity battery: shuffled-label leak guard, placebo ceiling (Fix-3),
+    # regime sanity IC. Same contract: the reason prefixes PASS:/FAIL:.
+    sanity_reason = wf.get("sanity_reason")
+    if not (isinstance(sanity_reason, str) and sanity_reason.startswith("PASS")):
+        named = False
+        shuf = _finite_float(wf.get("sanity_shuffled_ic"))
+        if shuf is not None and abs(shuf) >= SHUF_IC_MAX:
+            named = True
+            fail("leakage_shuffled_label",
+                 f"|shuffled_ic|={abs(shuf):.4f} >= {SHUF_IC_MAX}")
+        if wf.get("sanity_placebo_absolute_rule_pass") is False:
+            named = True
+            fail("placebo_ceiling",
+                 f"placebo_ic={wf.get('sanity_placebo_ic')!r} >= threshold "
+                 f"{wf.get('sanity_placebo_absolute_rule_threshold')!r}; "
+                 f"bypassable only via the difference-test floor (check 4)")
+        regime = wf.get("sanity_regime_ic")
+        if isinstance(regime, dict) and regime.get("passed") is False:
+            named = True
+            fail("regime_sanity_ic", str(regime.get("reason")))
+        if not named:
+            fail("sanity_unclassified", f"sanity_reason={sanity_reason!r}")
+
+    for key, cls in (("trade_contract", "trade_contract"),
+                     ("trade_monotonicity", "trade_monotonicity"),
+                     ("alpha_economics", "alpha_economics")):
+        failed, reason = _sub_verdict_failed(wf.get(key))
+        if failed:
+            fail(cls, reason)
+
+    # config_parity: the runner defaults a MISSING ``passed`` to True
+    # (``parity_result.get("passed", True)``); an explicit non-True fails.
+    parity = wf.get("config_parity")
+    if isinstance(parity, dict) and "passed" in parity and parity.get("passed") is not True:
+        fail("config_parity", str(parity.get("reason") or parity.get("passed")))
+    elif parity is not None and not isinstance(parity, dict):
+        fail("config_parity", f"not an object (got {parity!r})")
+
+    # qp_contract: None is legitimate (no qp lane); a dict must say True.
+    qp = wf.get("qp_contract")
+    if qp is not None:
+        failed, reason = _sub_verdict_failed(qp)
+        if failed:
+            fail("qp_contract", reason)
+
+    if not failures and wf.get("passed") is False:
+        fail("unclassified",
+             "stamp says passed=False but no sub-verdict names the failure")
+    return failures
+
+
 def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any]:
     """The pure decision. Returns a verdict dict; never raises on bad input."""
     checks: list[dict[str, Any]] = []
@@ -90,6 +246,7 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
         "as_of": as_of.isoformat(),
         "prod_artifact": str(prod_path),
         "staging_artifact": str(staging_path),
+        "quality_floor": FALLBACK_GENUINE_IC_FLOOR,
         "checks": checks,
     }
 
@@ -108,6 +265,16 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     staging = _read_json(staging_path)
     if staging is None:
         return refuse("staging_readable", f"staging artifact unreadable: {staging_path}")
+
+    # Served-model context — REPORTED, never compared (A4: a comparison
+    # against a model that itself failed the floor is not a quality
+    # predicate).
+    prod_meta = prod.get("metadata") if isinstance(prod.get("metadata"), dict) else {}
+    served_basis = prod_meta.get("promotion_basis")
+    served_genuine = (_finite_float(prod_meta.get("fallback_genuine_ic"))
+                      if served_basis == PROMOTION_BASIS else None)
+    verdict["served_promotion_basis"] = served_basis
+    verdict["served_fallback_genuine_ic"] = served_genuine
 
     # 1. the gate actually rejected the candidate (stamped verdict).
     wf = ((staging.get("metadata") or {}).get("wf_gate_metadata")
@@ -166,39 +333,35 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     ok("candidate_recent", candidate_trained=cand_trained.isoformat(),
        candidate_age_days=cand_age)
 
-    # 4. genuine_ic present, finite, non-negative.
+    # 4. quality floor: genuine_ic present, finite, >= the §5.2 bar (A4).
     genuine = _finite_float(wf.get("sanity_placebo_genuine_ic"))
     if genuine is None:
         return refuse("genuine_ic_present",
                       f"stamped sanity_placebo_genuine_ic is not a finite number "
                       f"(got {wf.get('sanity_placebo_genuine_ic')!r})")
-    if genuine < 0.0:
-        return refuse("genuine_ic_nonnegative",
-                      f"candidate measures NEGATIVE net of placebo "
-                      f"(genuine_ic={genuine:+.6f}) — never served",
-                      genuine_ic=genuine)
-    ok("genuine_ic_nonnegative", genuine_ic=genuine)
+    floor_ctx = {
+        "genuine_ic": genuine,
+        "floor": FALLBACK_GENUINE_IC_FLOOR,
+        "served_fallback_genuine_ic": served_genuine,
+        "served_promotion_basis": served_basis,
+    }
+    if genuine < FALLBACK_GENUINE_IC_FLOOR:
+        return refuse("quality_floor",
+                      f"quality_floor_not_met(genuine_ic={genuine:+.4f} < "
+                      f"{FALLBACK_GENUINE_IC_FLOOR:g})",
+                      **floor_ctx)
+    ok("quality_floor", why="quality_floor_met", **floor_ctx)
 
-    # 5. no downward ratchet across chained fallbacks.
-    prod_meta = prod.get("metadata") if isinstance(prod.get("metadata"), dict) else {}
-    prod_basis = prod_meta.get("promotion_basis")
-    if prod_basis == PROMOTION_BASIS:
-        prior = _finite_float(prod_meta.get("fallback_genuine_ic"))
-        if prior is None:
-            return refuse("ratchet_prior_readable",
-                          "served model is fallback-promoted but carries no "
-                          "finite fallback_genuine_ic — cannot prove the chain "
-                          "walks up; refusing rather than guessing")
-        if genuine <= prior:
-            return refuse("ratchet_up_only",
-                          f"candidate genuine_ic {genuine:+.6f} does not exceed "
-                          f"the served fallback's {prior:+.6f} — a chain of "
-                          f"fallbacks may only walk up",
-                          genuine_ic=genuine, prior_genuine_ic=prior)
-        ok("ratchet_up_only", genuine_ic=genuine, prior_genuine_ic=prior)
-    else:
-        ok("ratchet_up_only", note="served model is gate-passed; no ratchet bar",
-           prod_promotion_basis=prod_basis)
+    # 5. failure classes all infra-only (§4.3.1); any substance class or
+    #    anything unclassified is fail-closed regardless of genuine_ic.
+    failures = classify_gate_failures(wf)
+    verdict["failure_classes"] = failures
+    substance = [f["class"] for f in failures if f["kind"] != "infra"]
+    if substance:
+        return refuse("failure_classes",
+                      f"substance_failure_fail_closed({','.join(substance)})",
+                      failure_classes=failures)
+    ok("failure_classes", why="infra_only_ok", failure_classes=failures)
 
     verdict["decision"] = "FALLBACK_PROMOTE"
     verdict["genuine_ic"] = genuine
@@ -224,6 +387,7 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
     meta["fallback_genuine_ic"] = verdict["genuine_ic"]
     meta["fallback_as_of"] = verdict["as_of"]
     meta["fallback_prod_staleness_days"] = verdict["prod_staleness_days"]
+    meta["fallback_quality_floor"] = verdict["quality_floor"]
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
                                prefix=staging_path.name + ".")
     try:
