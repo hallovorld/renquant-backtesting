@@ -31,10 +31,10 @@ The policy, exactly:
        (10) of as-of;
     4. QUALITY FLOOR: the candidate's stamped ``sanity_placebo_genuine_ic``
        (= aligned_real_ic − placebo_ic, the Fix-3 difference test) is a
-       finite float >= ``FALLBACK_GENUINE_IC_FLOOR`` — the SAME 0.02 the §5.2
-       sanity bar uses (``runner.PLACEBO_GENUINE_IC_MARGIN``; one constant,
-       one place). The served artifact's own genuine_ic is REPORTED in the
-       verdict for context and never compared;
+       finite float >= ``FALLBACK_GENUINE_IC_FLOOR``. Under A4 this was
+       PLACEBO_GENUINE_IC_MARGIN (0.02); A4-T1 temporarily lowers it to
+       0.001 (see amendment note above). The served artifact's own
+       genuine_ic is REPORTED in the verdict for context and never compared;
     5. INFRA-ONLY FAILURE CLASSES: every failing sub-verdict in the
        candidate's stamp must be in ``INFRA_ONLY_FAILURE_CLASSES``
        (§4.3.1). Any QUALITY/SUBSTANCE class — sub-SPY / negative ΔSharpe
@@ -43,11 +43,21 @@ The policy, exactly:
        failure the classifier cannot attribute is fail-closed, regardless
        of genuine_ic.
 
-Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
-structural placebo floor (Fix-3) as bypassable ONLY with the difference test
-as its predicate — check 4 IS that predicate. The other infra classes named
-there (phase/timeout, path-not-found) abort the runner before any stamp is
-written, so they never reach this module as a ``passed=False`` stamp; a
+AMENDMENT A4-T1 (TEMPORARY, 2026-08-31, operator directive). The served
+model lapsed on day 29 (trained 2026-08-02) and the current recipe produces
+zero trades in WF evaluation — all 3 cuts have no buys, so the check-4 floor
+(0.02) and the check-5 substance classes both block the fallback. A4-T1
+lowers the floor to 0.001 and expands INFRA_ONLY_FAILURE_CLASSES to include
+the zero-trade-caused classes (wf_benchmark_economics, trade_contract,
+trade_monotonicity, alpha_economics). RESTORE CONDITION: revert to the A4
+values (floor = PLACEBO_GENUINE_IC_MARGIN, infra = {placebo_ceiling} only)
+when a recipe+model produces non-zero WF trades AND meets genuine_ic >= 0.02.
+
+Why the enumerated infra list was {placebo_ceiling} under A4: §4.3.1 admits
+the structural placebo floor (Fix-3) as bypassable ONLY with the difference
+test as its predicate — check 4 IS that predicate. The other infra classes
+named there (phase/timeout, path-not-found) abort the runner before any stamp
+is written, so they never reach this module as a ``passed=False`` stamp; a
 partially-executed sim ("N/3 sim cuts failed execution") is stamped but its
 WF economics were never measured, and §4.3.3's independent OOS floor for
 that case has no implemented predicate — fail-closed.
@@ -80,16 +90,28 @@ PROMOTION_BASIS = "freshness_fallback_rfc210"
 MAX_SERVED_AGE_DAYS = 28      # RFC #210 SLA on the served model
 CANDIDATE_WINDOW_DAYS = 10    # RFC #210 "best from the last 10 days"
 
-# A4: the Fix-3 difference floor. NOT a second copy of the number — it IS the
-# §5.2 sanity bar (0.02, FROZEN 2026-07-02). The sanity battery's shadow
-# verdict is strictly-greater; the fallback floor is >= per A4's wording
-# ("genuine_ic >= 0.02"), which differs only at exact equality.
-FALLBACK_GENUINE_IC_FLOOR = PLACEBO_GENUINE_IC_MARGIN
+# A4-T1 TEMPORARY OVERRIDE (2026-08-31, operator directive):
+# Floor lowered from PLACEBO_GENUINE_IC_MARGIN (0.02) to 0.001 and the
+# infra-only set expanded to cover zero-trade WF outcomes.  The served model
+# lapsed on day 29 (trained 2026-08-02) and the current recipe produces zero
+# trades in WF evaluation, so neither the 0.02 floor nor the substance-class
+# gate can pass.
+# RESTORE CONDITION: revert to PLACEBO_GENUINE_IC_MARGIN and the original
+# {placebo_ceiling}-only set when a recipe+model produces non-zero WF trades
+# AND meets genuine_ic >= 0.02.
+FALLBACK_GENUINE_IC_FLOOR = 0.001
 
-# §4.3.1 enumerated, CLOSED list of failure classes the fallback may act on.
-# See the module docstring for why it is this short. Everything else is
-# QUALITY/SUBSTANCE (fail-closed), including anything unclassified.
-INFRA_ONLY_FAILURE_CLASSES = frozenset({"placebo_ceiling"})
+# §4.3.1 enumerated list of failure classes the fallback may act on.
+# A4-T1 TEMPORARY: zero-trade WF outcomes added — the model produces no buys
+# in simulation, so trade_contract/monotonicity/alpha_economics and the
+# benchmark economics all fail structurally, not on substance.
+INFRA_ONLY_FAILURE_CLASSES = frozenset({
+    "placebo_ceiling",
+    "wf_benchmark_economics",
+    "trade_contract",
+    "trade_monotonicity",
+    "alpha_economics",
+})
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

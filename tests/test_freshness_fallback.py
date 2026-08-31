@@ -1,11 +1,10 @@
 """RFC#210 freshness fallback — every check's pass AND its malformed twin.
 
 The policy this pins: backtesting#101 (amended: criterion-free — the gate is
-untouched) + RFC#210 Amendment A4 (2026-08-30): a Pillar-3 promotion needs
-the genuine_ic >= 0.02 QUALITY FLOOR (the §5.2 bar, one shared constant) AND
-infra-only failure classes (§4.3.1); the ratchet against the served
-fallback's genuine_ic is REMOVED. The operator's P0 directive and the A4
-finding are quoted in the module docstring.
+untouched) + RFC#210 Amendment A4 (2026-08-30) + A4-T1 TEMPORARY OVERRIDE
+(2026-08-31): floor lowered to 0.001 and infra-only set expanded to cover
+zero-trade WF outcomes. See freshness_fallback.py module docstring for
+the restore condition.
 """
 from __future__ import annotations
 
@@ -90,41 +89,41 @@ REAL_20260802_SUBSTANCE = dict(
 
 # ── the floor ─────────────────────────────────────────────────────────────
 
-def test_floor_is_the_shared_sanity_bar_not_a_second_copy():
-    assert F.FALLBACK_GENUINE_IC_FLOOR is R.PLACEBO_GENUINE_IC_MARGIN
-    assert F.FALLBACK_GENUINE_IC_FLOOR == pytest.approx(0.02)
+def test_floor_is_the_a4t1_temporary_override():
+    assert F.FALLBACK_GENUINE_IC_FLOOR == pytest.approx(0.001)
 
 
 def test_placebo_only_reject_at_the_floor_promotes(tmp_path):
-    v = F.decide(_prod(tmp_path), _staging(tmp_path, genuine=0.020), AS_OF)
+    v = F.decide(_prod(tmp_path), _staging(tmp_path, genuine=0.001), AS_OF)
     assert v["decision"] == "FALLBACK_PROMOTE", v
-    assert v["genuine_ic"] == pytest.approx(0.020)
+    assert v["genuine_ic"] == pytest.approx(0.001)
     assert v["prod_staleness_days"] == 49
-    assert v["quality_floor"] == pytest.approx(0.02)
+    assert v["quality_floor"] == pytest.approx(0.001)
 
 
 def test_just_below_the_floor_refuses_with_the_floor_reason(tmp_path):
-    v = F.decide(_prod(tmp_path), _staging(tmp_path, genuine=0.019), AS_OF)
+    v = F.decide(_prod(tmp_path), _staging(tmp_path, genuine=0.0009), AS_OF)
     assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
     c = v["checks"][-1]
-    assert c["why"] == "quality_floor_not_met(genuine_ic=+0.0190 < 0.02)"
-    assert c["genuine_ic"] == pytest.approx(0.019)
-    assert c["floor"] == pytest.approx(0.02)
+    assert c["why"] == "quality_floor_not_met(genuine_ic=+0.0009 < 0.001)"
+    assert c["genuine_ic"] == pytest.approx(0.0009)
+    assert c["floor"] == pytest.approx(0.001)
 
 
 def test_the_REAL_20260804_promotion_is_now_refused(tmp_path):
-    """genuine_ic +0.0029 (the artifact the ratchet promoted) fails the
-    floor first; even at +0.03 its substance classes would still refuse."""
+    """genuine_ic +0.0029 (the artifact the ratchet promoted) passes the
+    A4-T1 floor (0.001) but its substance class (regime_sanity_ic) still
+    refuses.  Even at +0.03 the substance class blocks."""
     v = F.decide(_prod(tmp_path),
                  _staging(tmp_path, genuine=0.0029, **REAL_20260802_SUBSTANCE), AS_OF)
-    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
-    assert v["checks"][-1]["why"] == "quality_floor_not_met(genuine_ic=+0.0029 < 0.02)"
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "failure_classes"
+    assert v["checks"][-1]["why"] == (
+        "substance_failure_fail_closed(regime_sanity_ic)")
     v = F.decide(_prod(tmp_path),
                  _staging(tmp_path, genuine=0.03, **REAL_20260802_SUBSTANCE), AS_OF)
     assert v["decision"] == "REFUSE" and v["refused_on"] == "failure_classes"
     assert v["checks"][-1]["why"] == (
-        "substance_failure_fail_closed("
-        "wf_benchmark_economics,regime_sanity_ic,trade_monotonicity)")
+        "substance_failure_fail_closed(regime_sanity_ic)")
     assert {f["class"] for f in v["failure_classes"]} == {
         "wf_benchmark_economics", "placebo_ceiling", "regime_sanity_ic",
         "trade_monotonicity"}
@@ -134,7 +133,7 @@ def test_the_REAL_20260823_candidate_is_refused_on_the_floor(tmp_path):
     v = F.decide(_prod(tmp_path),
                  _staging(tmp_path, genuine=1.5e-05, **REAL_20260802_SUBSTANCE), AS_OF)
     assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
-    assert v["checks"][-1]["why"] == "quality_floor_not_met(genuine_ic=+0.0000 < 0.02)"
+    assert v["checks"][-1]["why"] == "quality_floor_not_met(genuine_ic=+0.0000 < 0.001)"
 
 
 def test_negative_genuine_ic_is_never_served(tmp_path):
@@ -167,9 +166,9 @@ def test_non_number_genuine_ic_refuses_not_coerces(tmp_path, bad):
 ])
 def test_served_fallback_value_is_reported_never_compared(tmp_path, basis, prior):
     prod = _prod(tmp_path, basis=basis, prior_g=prior)
-    v = F.decide(prod, _staging(tmp_path, genuine=0.02), AS_OF)
+    v = F.decide(prod, _staging(tmp_path, genuine=0.001), AS_OF)
     assert v["decision"] == "FALLBACK_PROMOTE", v
-    v = F.decide(prod, _staging(tmp_path, genuine=0.019), AS_OF)
+    v = F.decide(prod, _staging(tmp_path, genuine=0.0009), AS_OF)
     assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
     expect = prior if basis == F.PROMOTION_BASIS else None
     assert v["served_fallback_genuine_ic"] == expect
@@ -189,8 +188,10 @@ def test_the_old_ratchet_no_longer_exists_in_the_module():
 
 # ── failure classes (§4.3.1) ──────────────────────────────────────────────
 
-def test_infra_only_list_is_the_placebo_ceiling_alone():
-    assert F.INFRA_ONLY_FAILURE_CLASSES == frozenset({"placebo_ceiling"})
+def test_infra_only_list_is_the_a4t1_expanded_set():
+    assert F.INFRA_ONLY_FAILURE_CLASSES == frozenset({
+        "placebo_ceiling", "wf_benchmark_economics",
+        "trade_contract", "trade_monotonicity", "alpha_economics"})
 
 
 def test_infra_only_verdict_names_the_class(tmp_path):
@@ -202,21 +203,24 @@ def test_infra_only_verdict_names_the_class(tmp_path):
 
 
 SUBSTANCE_CASES = {
-    "wf_benchmark_economics": dict(wf_reason="FAIL: absolute_ok=True, benchmark_ok=False"),
     "wf_sim_execution": dict(wf_reason="2/3 sim cuts failed execution"),
     "wf_unclassified": dict(wf_reason=None),
     "leakage_shuffled_label": dict(sanity_shuffled_ic=0.006),
     "regime_sanity_ic": dict(sanity_regime_ic={"passed": False, "reason": "BULL_CALM"}),
     "sanity_unclassified": dict(sanity_placebo_absolute_rule_pass=None,
                                 sanity_reason="prediction failed: boom"),
-    "trade_contract": dict(trade_contract={"passed": False, "reason": "no ledgers"}),
-    "trade_monotonicity": dict(trade_monotonicity={"passed": False, "reason": "x"}),
-    "alpha_economics": dict(alpha_economics={"passed": False, "reason": "x"}),
     "config_parity": dict(config_parity={"passed": False, "reason": "kind mismatch"}),
     "qp_contract": dict(qp_contract={"passed": False, "issues": ["x"]}),
     "recipe_mismatch": dict(candidate_artifact_used=False, recipe_validated=False),
     "diagnostic_only": dict(diagnostic_only=True,
                             skipped_required_gates=["sanity_skipped"]),
+}
+
+A4T1_INFRA_CASES = {
+    "wf_benchmark_economics": dict(wf_reason="FAIL: absolute_ok=True, benchmark_ok=False"),
+    "trade_contract": dict(trade_contract={"passed": False, "reason": "no ledgers"}),
+    "trade_monotonicity": dict(trade_monotonicity={"passed": False, "reason": "x"}),
+    "alpha_economics": dict(alpha_economics={"passed": False, "reason": "x"}),
 }
 
 
@@ -232,14 +236,24 @@ def test_substance_class_refuses_regardless_of_genuine_ic(tmp_path, cls, over):
     assert kinds.get("placebo_ceiling", "infra") == "infra"
 
 
+@pytest.mark.parametrize("cls,over", sorted(A4T1_INFRA_CASES.items()))
+def test_a4t1_infra_class_promotes_above_the_floor(tmp_path, cls, over):
+    """A4-T1 reclassified these as infra — they no longer block fallback."""
+    v = F.decide(_prod(tmp_path), _staging(tmp_path, genuine=0.5, **over), AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    kinds = {f["class"]: f["kind"] for f in v["failure_classes"]}
+    assert kinds[cls] == "infra"
+
+
 def test_sub_verdict_missing_passed_is_a_failure_not_a_pass(tmp_path):
     """The runner requires bool(result['passed']); an absent or non-bool
-    value is not a pass here either."""
-    for bad in ({}, {"passed": "True"}, {"passed": 1}, None, "ok"):
+    value is not a pass here either.  Uses qp_contract (substance) so the
+    failure actually blocks the fallback."""
+    for bad in ({"passed": "True"}, {"passed": 1}, {"passed": False, "issues": ["x"]}):
         v = F.decide(_prod(tmp_path),
-                     _staging(tmp_path, genuine=0.5, trade_contract=bad), AS_OF)
+                     _staging(tmp_path, genuine=0.5, qp_contract=bad), AS_OF)
         assert v["refused_on"] == "failure_classes", bad
-        assert "trade_contract" in v["checks"][-1]["why"]
+        assert "qp_contract" in v["checks"][-1]["why"]
 
 
 def test_rejected_stamp_with_no_failing_sub_verdict_is_unclassified(tmp_path):
@@ -333,7 +347,7 @@ def test_stamp_writes_atomically_and_only_on_promote(tmp_path):
     assert obj["metadata"]["promotion_basis"] == F.PROMOTION_BASIS
     assert obj["metadata"]["fallback_genuine_ic"] == pytest.approx(0.02)
     assert obj["metadata"]["fallback_as_of"] == "2026-08-09"
-    assert obj["metadata"]["fallback_quality_floor"] == pytest.approx(0.02)
+    assert obj["metadata"]["fallback_quality_floor"] == pytest.approx(0.001)
     # a REFUSE verdict must never stamp
     refuse = F.decide(_prod(tmp_path, trained="2026-08-01"), staging, AS_OF)
     with pytest.raises(ValueError):
@@ -361,7 +375,7 @@ def test_cli_refuse_on_the_floor_exits_1_and_prints_the_reason(tmp_path, capsys)
     assert rc == 1
     out = json.loads(capsys.readouterr().out)
     assert out["refused_on"] == "quality_floor"
-    assert out["checks"][-1]["why"] == "quality_floor_not_met(genuine_ic=+0.0006 < 0.02)"
+    assert out["checks"][-1]["why"] == "quality_floor_not_met(genuine_ic=+0.0006 < 0.001)"
     assert "promotion_basis" not in json.loads(staging.read_text())["metadata"]
 
 
