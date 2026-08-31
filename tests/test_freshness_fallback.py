@@ -370,3 +370,108 @@ def test_verdict_names_every_check_with_values(tmp_path):
     names = [c["check"] for c in v["checks"]]
     assert names == ["gate_rejected", "prod_stale", "candidate_recent",
                      "quality_floor", "failure_classes"]
+
+
+# ── A4-T1 temporary bypass (expires 2026-09-07) ─────────────────────────
+
+ZERO_TRADE_OVERRIDES = dict(
+    wf_reason=("FAIL: zero trades across all WF cuts; decision tree admitted "
+               "no buys, so Sharpe is undefined and SPY benchmark cannot be met"),
+    trade_contract={"passed": False, "reason": "no round-trip ledgers found"},
+    trade_monotonicity={"passed": False, "reason": "no round-trip ledgers found"},
+    alpha_economics={"passed": False, "reason": "no round-trip ledgers found"},
+)
+
+A4T1_AS_OF = dt.date(2026, 9, 1)   # within the A4-T1 window
+A4T1_EXPIRED = dt.date(2026, 9, 8)  # after expiry
+
+
+def test_a4t1_promotes_zero_trade_candidate_above_lowered_floor(tmp_path):
+    """The exact incident: zero trades + genuine_ic=0.0016 < 0.02 but >= 0.001."""
+    v = F.decide(
+        _prod(tmp_path, trained="2026-08-03"),
+        _staging(tmp_path, trained="2026-09-01", genuine=0.0016,
+                 **ZERO_TRADE_OVERRIDES),
+        A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    floor_check = [c for c in v["checks"] if c["check"] == "quality_floor"][0]
+    assert floor_check["a4t1_override"] is True
+    fc_check = [c for c in v["checks"] if c["check"] == "failure_classes"][0]
+    assert fc_check["a4t1_override"] is True
+
+
+def test_a4t1_refuses_after_expiry(tmp_path):
+    """Same candidate, but as_of is past the expiry — standing A4 applies."""
+    v = F.decide(
+        _prod(tmp_path, trained="2026-08-03"),
+        _staging(tmp_path, trained="2026-09-05", genuine=0.0016,
+                 **ZERO_TRADE_OVERRIDES),
+        A4T1_EXPIRED)
+    assert v["decision"] == "REFUSE"
+    assert v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_refuses_below_the_lowered_floor(tmp_path):
+    """genuine_ic=0.0005 < 0.001 — even A4-T1 refuses."""
+    v = F.decide(
+        _prod(tmp_path, trained="2026-08-03"),
+        _staging(tmp_path, trained="2026-09-01", genuine=0.0005,
+                 **ZERO_TRADE_OVERRIDES),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+    assert v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_refuses_non_zero_trade_substance(tmp_path):
+    """A4-T1 does NOT bypass substance failures that are not zero-trade."""
+    non_zero = dict(ZERO_TRADE_OVERRIDES)
+    non_zero["sanity_regime_ic"] = {"passed": False, "reason": "BULL_CALM"}
+    v = F.decide(
+        _prod(tmp_path, trained="2026-08-03"),
+        _staging(tmp_path, trained="2026-09-01", genuine=0.0016, **non_zero),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+    assert v["refused_on"] == "failure_classes"
+    assert "regime_sanity_ic" in v["checks"][-1]["why"]
+
+
+def test_a4t1_refuses_when_wf_reason_is_not_zero_trade(tmp_path):
+    """wf_reason is a benchmark failure, not zero trades — predicate rejects."""
+    non_zero_wf = dict(ZERO_TRADE_OVERRIDES)
+    non_zero_wf["wf_reason"] = "FAIL: absolute_ok=True, benchmark_ok=False"
+    v = F.decide(
+        _prod(tmp_path, trained="2026-08-03"),
+        _staging(tmp_path, trained="2026-09-01", genuine=0.0016, **non_zero_wf),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+    assert v["refused_on"] == "failure_classes"
+
+
+def test_a4t1_refuses_when_trade_detail_is_not_absence(tmp_path):
+    """trade_contract failed on actual quality, not absence of ledgers."""
+    bad_detail = dict(ZERO_TRADE_OVERRIDES)
+    bad_detail["trade_contract"] = {"passed": False, "reason": "cost basis mismatch"}
+    v = F.decide(
+        _prod(tmp_path, trained="2026-08-03"),
+        _staging(tmp_path, trained="2026-09-01", genuine=0.0016, **bad_detail),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+    assert v["refused_on"] == "failure_classes"
+
+
+def test_a4t1_standing_a4_constants_unchanged():
+    """The standing A4 policy constants are NOT modified by A4-T1."""
+    from renquant_backtesting.wf_gate.runner import PLACEBO_GENUINE_IC_MARGIN
+    assert F.FALLBACK_GENUINE_IC_FLOOR is PLACEBO_GENUINE_IC_MARGIN
+    assert F.FALLBACK_GENUINE_IC_FLOOR == pytest.approx(0.02)
+    assert F.INFRA_ONLY_FAILURE_CLASSES == frozenset({"placebo_ceiling"})
+
+
+def test_a4t1_window_is_fail_closed():
+    """The start/expiry dates are hard constants, not configurable."""
+    assert F._A4T1_START == dt.date(2026, 8, 31)
+    assert F._A4T1_EXPIRY == dt.date(2026, 9, 7)
+    assert not F._a4t1_active(dt.date(2026, 8, 30))
+    assert F._a4t1_active(dt.date(2026, 8, 31))
+    assert F._a4t1_active(dt.date(2026, 9, 7))
+    assert not F._a4t1_active(dt.date(2026, 9, 8))
