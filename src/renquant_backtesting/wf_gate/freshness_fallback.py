@@ -43,6 +43,18 @@ The policy, exactly:
        failure the classifier cannot attribute is fail-closed, regardless
        of genuine_ic.
 
+AMENDMENT A4-T1 (TEMPORARY, 2026-08-31 to 2026-09-07, fail-closed). The
+served model lapsed on day 29 and the current recipe produces zero trades in
+all WF cuts. A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass: ONE
+pre-computed eligibility predicate (``_a4t1_active(as_of) and
+_is_zero_trade_structural(failures, wf)``) gates BOTH the floor relaxation
+(0.001) and the failure-class exception. The bypass fires ONLY when ALL of:
+the date is within [2026-08-31, 2026-09-07], wf_reason contains "zero trades
+across all", the substance classes are EXACTLY the four zero-trade classes
+(not a subset), and each trade-dependent detail reports "no round-trip". The
+standing A4 constants are unchanged; the bypass is a separate code path.
+Operator authorization: orchestrator session 428feb92, 2026-08-31.
+
 Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
 structural placebo floor (Fix-3) as bypassable ONLY with the difference test
 as its predicate — check 4 IS that predicate. The other infra classes named
@@ -90,6 +102,60 @@ FALLBACK_GENUINE_IC_FLOOR = PLACEBO_GENUINE_IC_MARGIN
 # See the module docstring for why it is this short. Everything else is
 # QUALITY/SUBSTANCE (fail-closed), including anything unclassified.
 INFRA_ONLY_FAILURE_CLASSES = frozenset({"placebo_ceiling"})
+
+# ── A4-T1 TEMPORARY BYPASS (2026-08-31 to 2026-09-07, fail-closed) ──────
+# Operator authorization: orchestrator session 428feb92, 2026-08-31.
+# Operator chose option 3 ("临时降低 A4 quality floor") from three options
+# presented after the manual promote showed: served model day-29 lapse
+# (trained 2026-08-02), WF gate REJECT (zero trades across all 3 cuts),
+# fallback REFUSE (genuine_ic=0.0016 < 0.02 floor + substance failures
+# from zero-trade outcomes).
+# RESTORE: remove this block after expiry or when a recipe produces
+# non-zero WF trades AND meets genuine_ic >= 0.02.
+_A4T1_START = dt.date(2026, 8, 31)
+_A4T1_EXPIRY = dt.date(2026, 9, 7)
+_A4T1_FLOOR = 0.001
+_A4T1_ZERO_TRADE_CLASSES = frozenset({
+    "wf_benchmark_economics", "trade_contract",
+    "trade_monotonicity", "alpha_economics",
+})
+
+
+def _a4t1_active(as_of: dt.date) -> bool:
+    return _A4T1_START <= as_of <= _A4T1_EXPIRY
+
+
+def _is_zero_trade_structural(
+    failures: list[dict[str, Any]], wf: dict[str, Any],
+) -> bool:
+    """True iff the candidate is a complete zero-trade WF outcome.
+
+    Requires ALL of:
+    - wf_reason contains "zero trades across all" (anti-vacuity: the
+      runner measured all cuts and none produced trades; a partial
+      "zero trades in one cut" does NOT match);
+    - the substance failure classes are EXACTLY _A4T1_ZERO_TRADE_CLASSES
+      (not a subset — all four must be present, and no additional
+      substance classes);
+    - trade_contract/monotonicity/alpha_economics detail mentions
+      "no round-trip" (anti-vacuity: absence-of-data, not a failed
+      quality check on actual trades).
+    """
+    wf_reason = wf.get("wf_reason")
+    if not (isinstance(wf_reason, str)
+            and "zero trades across all" in wf_reason):
+        return False
+    substance = {f["class"] for f in failures if f["kind"] != "infra"}
+    if substance != _A4T1_ZERO_TRADE_CLASSES:
+        return False
+    for f in failures:
+        if f["kind"] == "infra":
+            continue
+        cls = f["class"]
+        if cls in ("trade_contract", "trade_monotonicity", "alpha_economics"):
+            if "no round-trip" not in f.get("detail", "").lower():
+                return False
+    return True
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -339,6 +405,14 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
         return refuse("genuine_ic_present",
                       f"stamped sanity_placebo_genuine_ic is not a finite number "
                       f"(got {wf.get('sanity_placebo_genuine_ic')!r})")
+
+    # Pre-compute failure classes and A4-T1 eligibility BEFORE the floor
+    # check so both checks 4 and 5 use ONE coupled predicate.
+    failures = classify_gate_failures(wf)
+    verdict["failure_classes"] = failures
+    a4t1 = (_a4t1_active(as_of)
+            and _is_zero_trade_structural(failures, wf))
+
     floor_ctx = {
         "genuine_ic": genuine,
         "floor": FALLBACK_GENUINE_IC_FLOOR,
@@ -346,22 +420,39 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
         "served_promotion_basis": served_basis,
     }
     if genuine < FALLBACK_GENUINE_IC_FLOOR:
-        return refuse("quality_floor",
-                      f"quality_floor_not_met(genuine_ic={genuine:+.4f} < "
-                      f"{FALLBACK_GENUINE_IC_FLOOR:g})",
-                      **floor_ctx)
-    ok("quality_floor", why="quality_floor_met", **floor_ctx)
+        if a4t1 and genuine >= _A4T1_FLOOR:
+            floor_ctx["a4t1_override"] = True
+            floor_ctx["a4t1_floor"] = _A4T1_FLOOR
+            floor_ctx["a4t1_expiry"] = _A4T1_EXPIRY.isoformat()
+            ok("quality_floor",
+               why=f"a4t1_override(genuine_ic={genuine:+.4f} >= "
+                   f"{_A4T1_FLOOR:g}, expires {_A4T1_EXPIRY})",
+               **floor_ctx)
+        else:
+            return refuse("quality_floor",
+                          f"quality_floor_not_met(genuine_ic={genuine:+.4f} < "
+                          f"{FALLBACK_GENUINE_IC_FLOOR:g})",
+                          **floor_ctx)
+    else:
+        ok("quality_floor", why="quality_floor_met", **floor_ctx)
 
     # 5. failure classes all infra-only (§4.3.1); any substance class or
     #    anything unclassified is fail-closed regardless of genuine_ic.
-    failures = classify_gate_failures(wf)
-    verdict["failure_classes"] = failures
     substance = [f["class"] for f in failures if f["kind"] != "infra"]
     if substance:
-        return refuse("failure_classes",
-                      f"substance_failure_fail_closed({','.join(substance)})",
-                      failure_classes=failures)
-    ok("failure_classes", why="infra_only_ok", failure_classes=failures)
+        if a4t1:
+            ok("failure_classes",
+               why=f"a4t1_zero_trade_bypass(expires {_A4T1_EXPIRY})",
+               failure_classes=failures,
+               a4t1_override=True,
+               a4t1_expiry=_A4T1_EXPIRY.isoformat())
+        else:
+            return refuse("failure_classes",
+                          f"substance_failure_fail_closed("
+                          f"{','.join(substance)})",
+                          failure_classes=failures)
+    else:
+        ok("failure_classes", why="infra_only_ok", failure_classes=failures)
 
     verdict["decision"] = "FALLBACK_PROMOTE"
     verdict["genuine_ic"] = genuine
