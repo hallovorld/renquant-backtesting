@@ -118,6 +118,7 @@ _A4T1_FLOOR = 0.001
 _A4T1_ZERO_TRADE_CLASSES = frozenset({
     "wf_benchmark_economics", "trade_contract",
     "trade_monotonicity", "alpha_economics",
+    "regime_sanity_ic",
 })
 
 
@@ -135,8 +136,10 @@ def _is_zero_trade_structural(
       runner measured all cuts and none produced trades; a partial
       "zero trades in one cut" does NOT match);
     - the substance failure classes are EXACTLY _A4T1_ZERO_TRADE_CLASSES
-      (not a subset — all four must be present, and no additional
-      substance classes);
+      (not a subset — all five must be present, and no additional
+      substance classes); regime_sanity_ic is structural in zero-trade
+      scenarios because the model cannot demonstrate regime-discriminating
+      behavior without trades;
     - trade_contract/monotonicity/alpha_economics detail mentions
       "no round-trip" (anti-vacuity: absence-of-data, not a failed
       quality check on actual trades).

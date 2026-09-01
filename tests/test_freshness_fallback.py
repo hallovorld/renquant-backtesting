@@ -380,6 +380,8 @@ ZERO_TRADE_OVERRIDES = dict(
     trade_contract={"passed": False, "reason": "no round-trip ledgers found"},
     trade_monotonicity={"passed": False, "reason": "no round-trip ledgers found"},
     alpha_economics={"passed": False, "reason": "no round-trip ledgers found"},
+    sanity_regime_ic={"passed": False,
+                      "reason": "regime sanity IC failed: BULL_CALM,BULL_VOLATILE,CHOPPY"},
 )
 A4T1_AS_OF = dt.date(2026, 9, 1)    # within A4-T1 window
 A4T1_EXPIRED = dt.date(2026, 9, 8)  # after expiry
@@ -479,11 +481,11 @@ def test_a4t1_missing_one_class_refuses(tmp_path):
 
 
 def test_a4t1_extra_substance_class_refuses(tmp_path):
-    """4 zero-trade classes PLUS regime_sanity_ic — substance != EXACTLY the 4."""
+    """5 zero-trade classes PLUS config_parity — substance != EXACTLY the 5."""
     v = F.decide(
         _prod(tmp_path, trained=A4T1_PROD),
         _a4t1_staging(tmp_path,
-                      sanity_regime_ic={"passed": False, "reason": "BULL_CALM"}),
+                      config_parity={"passed": False, "reason": "kind mismatch"}),
         A4T1_AS_OF)
     assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
 
