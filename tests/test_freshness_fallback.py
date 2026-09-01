@@ -519,8 +519,30 @@ def test_a4t1_stamp_carries_bypass_metadata(tmp_path):
                        genuine=0.0016, **ZERO_TRADE_OVERRIDES)
     v = F.decide(_prod(tmp_path, trained=A4T1_PROD), staging, A4T1_AS_OF)
     assert v["decision"] == "FALLBACK_PROMOTE"
+    assert v["quality_floor"] == pytest.approx(0.001)
+    assert v["quality_floor_standing"] == pytest.approx(0.02)
+    assert v["a4t1_override"] is True
     F.stamp(staging, v)
     obj = json.loads(staging.read_text())
-    assert obj["metadata"]["promotion_basis"] == F.PROMOTION_BASIS
-    assert obj["metadata"]["fallback_genuine_ic"] == pytest.approx(0.0016)
-    assert obj["metadata"]["fallback_quality_floor"] == pytest.approx(0.02)
+    m = obj["metadata"]
+    assert m["promotion_basis"] == F.PROMOTION_BASIS
+    assert m["fallback_genuine_ic"] == pytest.approx(0.0016)
+    assert m["fallback_quality_floor"] == pytest.approx(0.001)
+    assert m["fallback_standing_quality_floor"] == pytest.approx(0.02)
+    assert m["fallback_a4t1_override"] is True
+    assert m["fallback_a4t1_expiry"] == "2026-09-07"
+    assert "orch-session-428feb92" in m["fallback_a4t1_authorization"]
+
+
+def test_standing_stamp_has_no_a4t1_fields(tmp_path):
+    """An ordinary A4 promotion stamps quality_floor=0.02 with no A4-T1 keys."""
+    staging = _staging(tmp_path, genuine=0.025)
+    v = F.decide(_prod(tmp_path), staging, AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    assert v["quality_floor"] == pytest.approx(0.02)
+    assert "a4t1_override" not in v
+    F.stamp(staging, v)
+    m = json.loads(staging.read_text())["metadata"]
+    assert m["fallback_quality_floor"] == pytest.approx(0.02)
+    assert "fallback_a4t1_override" not in m
+    assert "fallback_standing_quality_floor" not in m

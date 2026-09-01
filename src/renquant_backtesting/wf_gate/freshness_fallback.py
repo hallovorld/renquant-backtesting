@@ -421,6 +421,11 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     }
     if genuine < FALLBACK_GENUINE_IC_FLOOR:
         if a4t1 and genuine >= _A4T1_FLOOR:
+            verdict["quality_floor"] = _A4T1_FLOOR
+            verdict["quality_floor_standing"] = FALLBACK_GENUINE_IC_FLOOR
+            verdict["a4t1_override"] = True
+            verdict["a4t1_expiry"] = _A4T1_EXPIRY.isoformat()
+            verdict["a4t1_authorization"] = "orch-session-428feb92-2026-08-31"
             floor_ctx["a4t1_override"] = True
             floor_ctx["a4t1_floor"] = _A4T1_FLOOR
             floor_ctx["a4t1_expiry"] = _A4T1_EXPIRY.isoformat()
@@ -479,6 +484,11 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
     meta["fallback_as_of"] = verdict["as_of"]
     meta["fallback_prod_staleness_days"] = verdict["prod_staleness_days"]
     meta["fallback_quality_floor"] = verdict["quality_floor"]
+    if verdict.get("a4t1_override"):
+        meta["fallback_a4t1_override"] = True
+        meta["fallback_a4t1_expiry"] = verdict["a4t1_expiry"]
+        meta["fallback_a4t1_authorization"] = verdict["a4t1_authorization"]
+        meta["fallback_standing_quality_floor"] = verdict["quality_floor_standing"]
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
                                prefix=staging_path.name + ".")
     try:
