@@ -370,3 +370,179 @@ def test_verdict_names_every_check_with_values(tmp_path):
     names = [c["check"] for c in v["checks"]]
     assert names == ["gate_rejected", "prod_stale", "candidate_recent",
                      "quality_floor", "failure_classes"]
+
+
+# ── Amendment A4-T1: temporary zero-trade bypass (2026-08-31..09-07) ─────
+
+ZERO_TRADE_OVERRIDES = dict(
+    wf_reason=("FAIL: zero trades across all WF cuts; decision tree admitted "
+               "no buys, so Sharpe is undefined and SPY benchmark cannot be met"),
+    trade_contract={"passed": False, "reason": "no round-trip ledgers found"},
+    trade_monotonicity={"passed": False, "reason": "no round-trip ledgers found"},
+    alpha_economics={"passed": False, "reason": "no round-trip ledgers found"},
+)
+A4T1_AS_OF = dt.date(2026, 9, 1)    # within A4-T1 window
+A4T1_EXPIRED = dt.date(2026, 9, 8)  # after expiry
+A4T1_BEFORE = dt.date(2026, 8, 30)  # before start
+A4T1_TRAINED = "2026-08-25"         # within 10d of A4T1_AS_OF
+A4T1_PROD = "2026-07-20"            # >28d stale from A4T1_AS_OF
+
+
+def _a4t1_staging(tmp_path, genuine=0.0016, **extra):
+    over = dict(ZERO_TRADE_OVERRIDES)
+    over.update(extra)
+    return _staging(tmp_path, trained=A4T1_TRAINED, genuine=genuine, **over)
+
+
+def test_a4t1_zero_trade_candidate_promotes_within_window(tmp_path):
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _a4t1_staging(tmp_path),
+                 A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    floor_c = [c for c in v["checks"] if c["check"] == "quality_floor"][0]
+    assert floor_c["a4t1_override"] is True
+    assert "a4t1_override" in floor_c["why"]
+    assert f"expires {F._A4T1_EXPIRY}" in floor_c["why"]
+    fc_c = [c for c in v["checks"] if c["check"] == "failure_classes"][0]
+    assert fc_c["a4t1_override"] is True
+    assert "a4t1_zero_trade_bypass" in fc_c["why"]
+
+
+def test_a4t1_at_the_floor_boundary_promotes(tmp_path):
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _a4t1_staging(tmp_path, genuine=0.001),
+                 A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+
+
+def test_a4t1_below_the_temporary_floor_refuses(tmp_path):
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _a4t1_staging(tmp_path, genuine=0.0009),
+                 A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_expired_refuses(tmp_path):
+    trained_for_expired = "2026-09-01"  # within 10d of A4T1_EXPIRED
+    prod_for_expired = "2026-07-20"
+    v = F.decide(
+        _prod(tmp_path, trained=prod_for_expired),
+        _staging(tmp_path, trained=trained_for_expired,
+                 genuine=0.0016, **ZERO_TRADE_OVERRIDES),
+        A4T1_EXPIRED)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_before_start_refuses(tmp_path):
+    trained_for_before = "2026-08-25"  # within 10d of A4T1_BEFORE
+    prod_for_before = "2026-07-20"
+    v = F.decide(
+        _prod(tmp_path, trained=prod_for_before),
+        _staging(tmp_path, trained=trained_for_before,
+                 genuine=0.0016, **ZERO_TRADE_OVERRIDES),
+        A4T1_BEFORE)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_coupled_predicate_non_zero_trade_refuses(tmp_path):
+    """The v2 gap: genuine_ic=0.0016 with only placebo_ceiling (no zero-trade
+    wf_reason) must REFUSE — the floor relaxation is COUPLED to the zero-trade
+    predicate, not independent."""
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _staging(tmp_path, trained=A4T1_TRAINED, genuine=0.0016),
+                 A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+    assert "quality_floor_not_met" in v["checks"][-1]["why"]
+
+
+def test_a4t1_partial_wf_reason_refuses(tmp_path):
+    """'zero trades in one cut' does NOT match — requires 'across all'."""
+    v = F.decide(
+        _prod(tmp_path, trained=A4T1_PROD),
+        _a4t1_staging(tmp_path,
+                      wf_reason="FAIL: zero trades in one cut of 3"),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_missing_one_class_refuses(tmp_path):
+    """Only 3 of 4 zero-trade classes present — the predicate requires EXACT
+    match of all 4, not a subset."""
+    v = F.decide(
+        _prod(tmp_path, trained=A4T1_PROD),
+        _staging(tmp_path, trained=A4T1_TRAINED, genuine=0.0016,
+                 wf_reason=ZERO_TRADE_OVERRIDES["wf_reason"],
+                 trade_contract=ZERO_TRADE_OVERRIDES["trade_contract"],
+                 trade_monotonicity=ZERO_TRADE_OVERRIDES["trade_monotonicity"]),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_extra_substance_class_refuses(tmp_path):
+    """4 zero-trade classes PLUS regime_sanity_ic — substance != EXACTLY the 4."""
+    v = F.decide(
+        _prod(tmp_path, trained=A4T1_PROD),
+        _a4t1_staging(tmp_path,
+                      sanity_regime_ic={"passed": False, "reason": "BULL_CALM"}),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_non_roundtrip_detail_refuses(tmp_path):
+    """trade_contract fails with a real quality failure (not 'no round-trip')
+    — the anti-vacuity check rejects it."""
+    v = F.decide(
+        _prod(tmp_path, trained=A4T1_PROD),
+        _a4t1_staging(tmp_path,
+                      trade_contract={"passed": False,
+                                      "reason": "ledger contract violated: max_drawdown"}),
+        A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_above_standing_floor_uses_standing_path(tmp_path):
+    """genuine_ic=0.025 (above 0.02) within the A4-T1 window — the standing
+    floor passes without the bypass; substance classes still bypassed by a4t1."""
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _a4t1_staging(tmp_path, genuine=0.025),
+                 A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    floor_c = [c for c in v["checks"] if c["check"] == "quality_floor"][0]
+    assert floor_c["why"] == "quality_floor_met"
+    assert "a4t1_override" not in floor_c
+    fc_c = [c for c in v["checks"] if c["check"] == "failure_classes"][0]
+    assert fc_c["a4t1_override"] is True
+
+
+def test_a4t1_stamp_carries_bypass_metadata(tmp_path):
+    staging = _staging(tmp_path, trained=A4T1_TRAINED,
+                       genuine=0.0016, **ZERO_TRADE_OVERRIDES)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), staging, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    assert v["quality_floor"] == pytest.approx(0.001)
+    assert v["quality_floor_standing"] == pytest.approx(0.02)
+    assert v["a4t1_override"] is True
+    F.stamp(staging, v)
+    obj = json.loads(staging.read_text())
+    m = obj["metadata"]
+    assert m["promotion_basis"] == F.PROMOTION_BASIS
+    assert m["fallback_genuine_ic"] == pytest.approx(0.0016)
+    assert m["fallback_quality_floor"] == pytest.approx(0.001)
+    assert m["fallback_standing_quality_floor"] == pytest.approx(0.02)
+    assert m["fallback_a4t1_override"] is True
+    assert m["fallback_a4t1_expiry"] == "2026-09-07"
+    assert "orch-session-428feb92" in m["fallback_a4t1_authorization"]
+
+
+def test_standing_stamp_has_no_a4t1_fields(tmp_path):
+    """An ordinary A4 promotion stamps quality_floor=0.02 with no A4-T1 keys."""
+    staging = _staging(tmp_path, genuine=0.025)
+    v = F.decide(_prod(tmp_path), staging, AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    assert v["quality_floor"] == pytest.approx(0.02)
+    assert "a4t1_override" not in v
+    F.stamp(staging, v)
+    m = json.loads(staging.read_text())["metadata"]
+    assert m["fallback_quality_floor"] == pytest.approx(0.02)
+    assert "fallback_a4t1_override" not in m
+    assert "fallback_standing_quality_floor" not in m
