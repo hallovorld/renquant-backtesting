@@ -42,10 +42,14 @@ Gates BOTH the floor relaxation (0.001) and the failure-class exception.
 Covers the actual staging artifact (5 substance classes: 4 zero-trade +
 regime_sanity_ic) that the structural path rejects.
 
-Consumption model: atomic O_CREAT|O_EXCL file marker in a global ledger
-directory, keyed by `a4t1_{RUN_ID}.consumed`. Written in `stamp()` BEFORE
-the staging artifact is modified. Cross-directory replay is impossible with
-a shared ledger. Corrupt/unreadable marker → fail-closed (file exists = consumed).
+Consumption model: atomic O_CREAT|O_EXCL file marker in a CANONICAL ledger
+at `~/.renquant/governance/` (module constant `_A4T1_LEDGER_DIR`), keyed by
+`a4t1_{RUN_ID}.consumed`. The location is NOT a caller-supplied parameter —
+it is a hardcoded constant, preventing ledger substitution. Written in
+`stamp()` BEFORE the staging artifact is modified. Cross-directory replay
+is impossible because all callers use the same canonical location.
+Corrupt/unreadable marker → fail-closed (file exists = consumed).
+Nonexistent ledger dir → fail-closed (candidate exception refuses).
 
 Standing A4 constants UNCHANGED. The bypass is a separate code path.
 
@@ -56,12 +60,12 @@ Standing A4 constants UNCHANGED. The bypass is a separate code path.
 - Tampered wf_gate_metadata: digest mismatch refuses
 - Tampered trained_date: digest mismatch refuses
 - Wrong run-ID: refuses
-- Cross-directory shared ledger: second directory refuses (codex blocker fix)
+- Cross-directory replay: canonical ledger blocks (codex blocker fix)
 - Expired: refuses
-- Stamp carries digest + authority
-- No ledger: fail-closed refuses (codex blocker fix)
+- Stamp carries digest + authority + governance file reference
+- No ledger dir: fail-closed refuses (codex blocker fix)
 - Corrupt ledger marker: fail-closed refuses (codex blocker fix)
-- Stamp without ledger: raises ValueError
+- Ledger not substitutable: two artifact dirs share one canonical ledger
 
 ## Evidence
 
@@ -89,9 +93,14 @@ non-zero WF trades AND meets genuine_ic >= 0.02.
 - v9 (bt#124): full-artifact digest + directory-level marker. Codex rejected
   (directory-local marker not a global ledger; corrupt state fails open;
   regime_sanity_ic authority scope gap).
-- v10 (this PR): global consumption ledger with O_CREAT|O_EXCL atomic marker,
+- v10 (bt#125): global consumption ledger with O_CREAT|O_EXCL atomic marker,
   fail-closed on corrupt state, separate operator authorization for
-  regime_sanity_ic. 75 tests (52+13+10).
+  regime_sanity_ic. Codex rejected: ledger path caller-substitutable,
+  authority not independently verifiable.
+- v11 (this PR): canonical ledger at `~/.renquant/governance/` (module
+  constant, not caller parameter), committed governance authority file
+  `doc/governance/a4t1-candidate-exception-authority.json`. 75 tests
+  (52+13+10).
 
 ## Operator authorization
 

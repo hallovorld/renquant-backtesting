@@ -136,17 +136,22 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
 # The staging artifact has 5 substance classes (4 zero-trade +
 # regime_sanity_ic), so the structural predicate rejects it. The
 # candidate exception binds to the EXACT run-ID and FULL-ARTIFACT digest.
-# Operator authorization for regime_sanity_ic bypass:
-#   orchestrator session 428feb92, 2026-09-02 (explicit "go" to bypass
-#   regime_sanity_ic for this specific candidate).
+# Authorization: doc/governance/a4t1-candidate-exception-authority.json
+# (committed, reviewable governance artifact).
 _A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
 _A4T1_CANDIDATE_ARTIFACT_DIGEST = (
     "760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e"
 )
 _A4T1_CANDIDATE_AUTHORITY = (
-    "orch-session-428feb92-2026-09-02:regime_sanity_ic+zero_trade_classes"
+    "doc/governance/a4t1-candidate-exception-authority.json"
 )
 _RUN_ID_RE = re.compile(r"weekly_(\d{8}T\d{6}Z)\.staging\.json$")
+
+# Canonical governance ledger: a FIXED user-level directory, not a
+# caller-supplied parameter. The same path is used regardless of which
+# directory the staging artifact resides in, preventing cross-directory
+# replay. Tests monkeypatch this constant.
+_A4T1_LEDGER_DIR = Path.home() / ".renquant" / "governance"
 
 
 def _artifact_digest(obj: dict) -> str:
@@ -155,15 +160,14 @@ def _artifact_digest(obj: dict) -> str:
     ).hexdigest()
 
 
-def _a4t1_is_consumed(run_id: str, ledger_dir: Path) -> bool:
-    marker = ledger_dir / f"a4t1_{run_id}.consumed"
+def _a4t1_is_consumed(run_id: str) -> bool:
+    marker = _A4T1_LEDGER_DIR / f"a4t1_{run_id}.consumed"
     return marker.exists()
 
 
-def _a4t1_mark_consumed(
-    run_id: str, digest: str, ledger_dir: Path, staging_path: Path,
-) -> None:
-    marker = ledger_dir / f"a4t1_{run_id}.consumed"
+def _a4t1_mark_consumed(run_id: str, digest: str, staging_path: Path) -> None:
+    _A4T1_LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    marker = _A4T1_LEDGER_DIR / f"a4t1_{run_id}.consumed"
     fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -180,18 +184,15 @@ def _a4t1_mark_consumed(
         raise
 
 
-def _is_a4t1_candidate(
-    staging_path: Path, staging: dict,
-    ledger_dir: Path | None,
-) -> bool:
+def _is_a4t1_candidate(staging_path: Path, staging: dict) -> bool:
     m = _RUN_ID_RE.search(staging_path.name)
     if not m or m.group(1) != _A4T1_CANDIDATE_RUN_ID:
         return False
     if _artifact_digest(staging) != _A4T1_CANDIDATE_ARTIFACT_DIGEST:
         return False
-    if ledger_dir is None:
+    if not _A4T1_LEDGER_DIR.is_dir():
         return False
-    if _a4t1_is_consumed(_A4T1_CANDIDATE_RUN_ID, ledger_dir):
+    if _a4t1_is_consumed(_A4T1_CANDIDATE_RUN_ID):
         return False
     return True
 
@@ -379,8 +380,7 @@ def classify_gate_failures(wf: dict[str, Any]) -> list[dict[str, Any]]:
     return failures
 
 
-def decide(prod_path: Path, staging_path: Path, as_of: dt.date,
-           *, consumption_ledger: Path | None = None) -> dict[str, Any]:
+def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any]:
     """The pure decision. Returns a verdict dict; never raises on bad input."""
     checks: list[dict[str, Any]] = []
     verdict: dict[str, Any] = {
@@ -487,8 +487,7 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date,
     failures = classify_gate_failures(wf)
     verdict["failure_classes"] = failures
     a4t1_structural = _is_zero_trade_structural(failures, wf)
-    a4t1_candidate = _is_a4t1_candidate(
-        staging_path, staging, consumption_ledger)
+    a4t1_candidate = _is_a4t1_candidate(staging_path, staging)
     a4t1 = _a4t1_active(as_of) and (a4t1_structural or a4t1_candidate)
 
     floor_ctx = {
@@ -547,14 +546,13 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date,
     return verdict
 
 
-def stamp(staging_path: Path, verdict: dict[str, Any],
-          *, consumption_ledger: Path | None = None) -> None:
+def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
     """Write the promotion-basis stamp into the staging artifact, atomically.
 
     Refuses (ValueError) unless the verdict IS a FALLBACK_PROMOTE — a stamp
     without a decision would be an unexplained governance marker. When the
     verdict carries an A4-T1 candidate exception, the consumption marker is
-    written BEFORE the artifact (O_CREAT|O_EXCL atomic unique insert).
+    written to ``_A4T1_LEDGER_DIR`` BEFORE the artifact (O_CREAT|O_EXCL).
     """
     if verdict.get("decision") != "FALLBACK_PROMOTE":
         raise ValueError("stamp() requires a FALLBACK_PROMOTE verdict")
@@ -578,13 +576,9 @@ def stamp(staging_path: Path, verdict: dict[str, Any],
         meta["fallback_a4t1_candidate_run_id"] = verdict["a4t1_candidate_run_id"]
         meta["fallback_a4t1_candidate_digest"] = verdict["a4t1_candidate_artifact_digest"]
         meta["fallback_a4t1_candidate_authority"] = verdict["a4t1_candidate_authority"]
-        if consumption_ledger is None:
-            raise ValueError(
-                "A4-T1 candidate exception requires a consumption ledger")
         _a4t1_mark_consumed(
             verdict["a4t1_candidate_run_id"],
             verdict["a4t1_candidate_artifact_digest"],
-            consumption_ledger,
             staging_path,
         )
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
@@ -609,16 +603,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="YYYY-MM-DD (default: today)")
     ap.add_argument("--stamp", action="store_true",
                     help="on FALLBACK_PROMOTE, stamp the staging artifact")
-    ap.add_argument("--consumption-ledger", default=None, type=Path,
-                    help="directory for A4-T1 candidate exception consumption")
     args = ap.parse_args(argv)
     as_of = (dt.date.fromisoformat(args.as_of) if args.as_of
              else dt.date.today())
-    verdict = decide(args.prod, args.staging, as_of,
-                     consumption_ledger=args.consumption_ledger)
+    verdict = decide(args.prod, args.staging, as_of)
     if args.stamp and verdict.get("decision") == "FALLBACK_PROMOTE":
-        stamp(args.staging, verdict,
-              consumption_ledger=args.consumption_ledger)
+        stamp(args.staging, verdict)
         verdict["stamped"] = True
     print(json.dumps(verdict, indent=2, sort_keys=True))
     return 0 if verdict.get("decision") == "FALLBACK_PROMOTE" else 1
