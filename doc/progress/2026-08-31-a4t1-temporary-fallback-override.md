@@ -14,47 +14,61 @@ The standing A4 policy correctly REFUSES this candidate:
 - 4 substance failure classes from zero-trade outcomes (wf_benchmark_economics,
   trade_contract, trade_monotonicity, alpha_economics)
 
+The staging artifact also carries a 5th substance failure (regime_sanity_ic),
+which prevents the structural zero-trade predicate from matching (it requires
+EXACTLY the 4 zero-trade classes, not 5).
+
 ## Solution
 
-Amendment A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass:
+Amendment A4-T1 provides TWO eligibility paths, both gated by temporal
+bounds [2026-08-31, 2026-09-07]:
 
-1. ONE pre-computed eligibility predicate (`_a4t1_active(as_of) and
-   _is_zero_trade_structural(failures, wf)`) gates BOTH the floor
-   relaxation and the failure-class exception. The floor relaxation
-   ONLY applies when the zero-trade predicate is also met (the v2
-   coupling gap fixed in v3).
+### Path 1 — Structural
 
-2. Temporal bounds: [2026-08-31, 2026-09-07], hard-coded, fail-closed.
+`_is_zero_trade_structural(failures, wf)` requires ALL of:
+- wf_reason contains "zero trades across all" (not partial)
+- substance classes are EXACTLY the 4 zero-trade classes (not a subset)
+- trade-dependent details report "no round-trip" (absence-of-data)
 
-3. Floor lowered to 0.001 (from 0.02) ONLY under the coupled predicate.
+Gates BOTH the floor relaxation (0.001) and the failure-class exception.
 
-4. `_is_zero_trade_structural()` requires ALL of:
-   - wf_reason contains "zero trades across all" (not partial)
-   - substance classes are EXACTLY the 4 zero-trade classes (not a subset)
-   - trade-dependent details report "no round-trip" (absence-of-data)
+### Path 2 — Candidate exception (v10)
+
+`_is_a4t1_candidate(staging_path, staging, ledger_dir)` binds to:
+- EXACT run-ID: `20260831T141820Z`
+- FULL-ARTIFACT SHA-256 digest: `760912ec...4af1e`
+- Global consumption ledger (fail-closed without one)
+
+Covers the actual staging artifact (5 substance classes: 4 zero-trade +
+regime_sanity_ic) that the structural path rejects.
+
+Consumption model: atomic O_CREAT|O_EXCL file marker in a global ledger
+directory, keyed by `a4t1_{RUN_ID}.consumed`. Written in `stamp()` BEFORE
+the staging artifact is modified. Cross-directory replay is impossible with
+a shared ledger. Corrupt/unreadable marker → fail-closed (file exists = consumed).
 
 Standing A4 constants UNCHANGED. The bypass is a separate code path.
 
 ## Tests
 
-64 tests total (52 standing A4 + 12 new A4-T1):
-- Happy path: zero-trade candidate within window promotes
-- Floor boundary: genuine_ic=0.001 promotes, 0.0009 refuses
-- Temporal: expired and before-start both refuse
-- Coupled predicate: placebo-only (non-zero-trade) refuses at 0.0016
-- Partial wf_reason ("one cut"): refuses
-- Missing one of 4 classes: refuses
-- Extra substance class: refuses
-- Non-"no round-trip" detail: refuses
-- Above standing floor: uses standing path, not bypass
-- Stamp carries bypass metadata
+75 tests total (52 standing A4 + 13 structural + 10 candidate exception):
+- Candidate happy path: correct run-ID + digest within window promotes
+- Tampered wf_gate_metadata: digest mismatch refuses
+- Tampered trained_date: digest mismatch refuses
+- Wrong run-ID: refuses
+- Cross-directory shared ledger: second directory refuses (codex blocker fix)
+- Expired: refuses
+- Stamp carries digest + authority
+- No ledger: fail-closed refuses (codex blocker fix)
+- Corrupt ledger marker: fail-closed refuses (codex blocker fix)
+- Stamp without ledger: raises ValueError
 
 ## Evidence
 
 - Staging artifact: `panel-ltr.alpha158_fund.weekly_20260831T141820Z.staging.json`
-  genuine_ic=0.001554, all trade sub-verdicts "no round-trip ledgers found"
-- Fallback verdict: `20260831T141820Z.fallback_verdict.json`
-  refused_on=quality_floor
+  genuine_ic=0.001554, all trade sub-verdicts "no round-trip ledgers found",
+  regime_sanity_ic failed
+- Full-artifact SHA-256: `760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e`
 
 ## Restore condition
 
@@ -66,7 +80,21 @@ non-zero WF trades AND meets genuine_ic >= 0.02.
 - v1 (bt#116): globally reclassified substance as infra. Codex rejected (4 blockers).
 - v2 (bt#117): separate narrow bypass. Codex rejected (2 gaps: decoupled
   predicate, loose zero-trade check).
-- v3 (this PR): pre-computed coupled predicate, stricter zero-trade check,
-  13 gap-closing tests.
+- v3 (bt#118): pre-computed coupled predicate, stricter zero-trade check,
+  13 gap-closing tests. Codex approved, merged.
+- v4-v7: incremental cleanups merged to main.
+- v8 (bt#123): candidate exception with wf_gate_metadata digest. Codex
+  rejected (wf_gate_metadata-only digest doesn't cover trained_date;
+  promotion_basis check not atomic).
+- v9 (bt#124): full-artifact digest + directory-level marker. Codex rejected
+  (directory-local marker not a global ledger; corrupt state fails open;
+  regime_sanity_ic authority scope gap).
+- v10 (this PR): global consumption ledger with O_CREAT|O_EXCL atomic marker,
+  fail-closed on corrupt state, separate operator authorization for
+  regime_sanity_ic. 75 tests (52+13+10).
 
-Operator authorization: orchestrator session 428feb92, 2026-08-31.
+## Operator authorization
+
+- Structural path: orchestrator session 428feb92, 2026-08-31.
+- Candidate exception + regime_sanity_ic bypass: orchestrator session
+  428feb92, 2026-09-02 (explicit "go" in response to authorization request).

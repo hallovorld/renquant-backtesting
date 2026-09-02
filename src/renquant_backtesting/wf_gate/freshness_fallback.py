@@ -45,15 +45,25 @@ The policy, exactly:
 
 AMENDMENT A4-T1 (TEMPORARY, 2026-08-31 to 2026-09-07, fail-closed). The
 served model lapsed on day 29 and the current recipe produces zero trades in
-all WF cuts. A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass: ONE
-pre-computed eligibility predicate (``_a4t1_active(as_of) and
-_is_zero_trade_structural(failures, wf)``) gates BOTH the floor relaxation
-(0.001) and the failure-class exception. The bypass fires ONLY when ALL of:
-the date is within [2026-08-31, 2026-09-07], wf_reason contains "zero trades
-across all", the substance classes are EXACTLY the four zero-trade classes
-(not a subset), and each trade-dependent detail reports "no round-trip". The
-standing A4 constants are unchanged; the bypass is a separate code path.
-Operator authorization: orchestrator session 428feb92, 2026-08-31.
+all WF cuts. A4-T1 provides TWO eligibility paths, both gated by
+``_a4t1_active(as_of)``:
+
+  Path 1 — STRUCTURAL: ``_is_zero_trade_structural(failures, wf)`` requires
+  wf_reason "zero trades across all", substance classes EXACTLY the four
+  zero-trade classes, and "no round-trip" in trade details. Gates BOTH the
+  floor relaxation (0.001) and the failure-class exception.
+
+  Path 2 — CANDIDATE EXCEPTION: ``_is_a4t1_candidate(staging_path, staging,
+  ledger_dir)`` binds to an EXACT run-ID and FULL-ARTIFACT SHA-256 digest.
+  Covers the actual staging artifact (5 substance classes: 4 zero-trade +
+  regime_sanity_ic) that the structural path rejects. Requires a global
+  consumption ledger (fail-closed without one); the exception is consumed
+  atomically (O_CREAT|O_EXCL) in ``stamp()`` BEFORE the artifact is written,
+  preventing replay from any directory.
+
+Operator authorization: session 428feb92, 2026-08-31 (structural path);
+session 428feb92, 2026-09-02 (candidate exception + regime_sanity_ic bypass).
+The standing A4 constants are unchanged; the bypass is a separate code path.
 
 Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
 structural placebo floor (Fix-3) as bypassable ONLY with the difference test
@@ -79,8 +89,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -119,6 +131,69 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
     "wf_benchmark_economics", "trade_contract",
     "trade_monotonicity", "alpha_economics",
 })
+
+# ── A4-T1 CANDIDATE EXCEPTION ─────────────────────────────────────────
+# The staging artifact has 5 substance classes (4 zero-trade +
+# regime_sanity_ic), so the structural predicate rejects it. The
+# candidate exception binds to the EXACT run-ID and FULL-ARTIFACT digest.
+# Operator authorization for regime_sanity_ic bypass:
+#   orchestrator session 428feb92, 2026-09-02 (explicit "go" to bypass
+#   regime_sanity_ic for this specific candidate).
+_A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
+_A4T1_CANDIDATE_ARTIFACT_DIGEST = (
+    "760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e"
+)
+_A4T1_CANDIDATE_AUTHORITY = (
+    "orch-session-428feb92-2026-09-02:regime_sanity_ic+zero_trade_classes"
+)
+_RUN_ID_RE = re.compile(r"weekly_(\d{8}T\d{6}Z)\.staging\.json$")
+
+
+def _artifact_digest(obj: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
+
+
+def _a4t1_is_consumed(run_id: str, ledger_dir: Path) -> bool:
+    marker = ledger_dir / f"a4t1_{run_id}.consumed"
+    return marker.exists()
+
+
+def _a4t1_mark_consumed(
+    run_id: str, digest: str, ledger_dir: Path, staging_path: Path,
+) -> None:
+    marker = ledger_dir / f"a4t1_{run_id}.consumed"
+    fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({
+                "exception_id": f"a4t1_{run_id}",
+                "artifact_digest": digest,
+                "consumed_by": str(staging_path),
+            }, fh)
+    except BaseException:
+        try:
+            os.unlink(str(marker))
+        except OSError:
+            pass
+        raise
+
+
+def _is_a4t1_candidate(
+    staging_path: Path, staging: dict,
+    ledger_dir: Path | None,
+) -> bool:
+    m = _RUN_ID_RE.search(staging_path.name)
+    if not m or m.group(1) != _A4T1_CANDIDATE_RUN_ID:
+        return False
+    if _artifact_digest(staging) != _A4T1_CANDIDATE_ARTIFACT_DIGEST:
+        return False
+    if ledger_dir is None:
+        return False
+    if _a4t1_is_consumed(_A4T1_CANDIDATE_RUN_ID, ledger_dir):
+        return False
+    return True
 
 
 def _a4t1_active(as_of: dt.date) -> bool:
@@ -304,7 +379,8 @@ def classify_gate_failures(wf: dict[str, Any]) -> list[dict[str, Any]]:
     return failures
 
 
-def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any]:
+def decide(prod_path: Path, staging_path: Path, as_of: dt.date,
+           *, consumption_ledger: Path | None = None) -> dict[str, Any]:
     """The pure decision. Returns a verdict dict; never raises on bad input."""
     checks: list[dict[str, Any]] = []
     verdict: dict[str, Any] = {
@@ -410,8 +486,10 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     # check so both checks 4 and 5 use ONE coupled predicate.
     failures = classify_gate_failures(wf)
     verdict["failure_classes"] = failures
-    a4t1 = (_a4t1_active(as_of)
-            and _is_zero_trade_structural(failures, wf))
+    a4t1_structural = _is_zero_trade_structural(failures, wf)
+    a4t1_candidate = _is_a4t1_candidate(
+        staging_path, staging, consumption_ledger)
+    a4t1 = _a4t1_active(as_of) and (a4t1_structural or a4t1_candidate)
 
     floor_ctx = {
         "genuine_ic": genuine,
@@ -462,14 +540,21 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     verdict["decision"] = "FALLBACK_PROMOTE"
     verdict["genuine_ic"] = genuine
     verdict["prod_staleness_days"] = staleness
+    if verdict.get("a4t1_override") and a4t1_candidate and not a4t1_structural:
+        verdict["a4t1_candidate_run_id"] = _A4T1_CANDIDATE_RUN_ID
+        verdict["a4t1_candidate_artifact_digest"] = _artifact_digest(staging)
+        verdict["a4t1_candidate_authority"] = _A4T1_CANDIDATE_AUTHORITY
     return verdict
 
 
-def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
+def stamp(staging_path: Path, verdict: dict[str, Any],
+          *, consumption_ledger: Path | None = None) -> None:
     """Write the promotion-basis stamp into the staging artifact, atomically.
 
     Refuses (ValueError) unless the verdict IS a FALLBACK_PROMOTE — a stamp
-    without a decision would be an unexplained governance marker.
+    without a decision would be an unexplained governance marker. When the
+    verdict carries an A4-T1 candidate exception, the consumption marker is
+    written BEFORE the artifact (O_CREAT|O_EXCL atomic unique insert).
     """
     if verdict.get("decision") != "FALLBACK_PROMOTE":
         raise ValueError("stamp() requires a FALLBACK_PROMOTE verdict")
@@ -489,6 +574,19 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
         meta["fallback_a4t1_expiry"] = verdict["a4t1_expiry"]
         meta["fallback_a4t1_authorization"] = verdict["a4t1_authorization"]
         meta["fallback_standing_quality_floor"] = verdict["quality_floor_standing"]
+    if verdict.get("a4t1_candidate_run_id"):
+        meta["fallback_a4t1_candidate_run_id"] = verdict["a4t1_candidate_run_id"]
+        meta["fallback_a4t1_candidate_digest"] = verdict["a4t1_candidate_artifact_digest"]
+        meta["fallback_a4t1_candidate_authority"] = verdict["a4t1_candidate_authority"]
+        if consumption_ledger is None:
+            raise ValueError(
+                "A4-T1 candidate exception requires a consumption ledger")
+        _a4t1_mark_consumed(
+            verdict["a4t1_candidate_run_id"],
+            verdict["a4t1_candidate_artifact_digest"],
+            consumption_ledger,
+            staging_path,
+        )
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
                                prefix=staging_path.name + ".")
     try:
@@ -511,12 +609,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="YYYY-MM-DD (default: today)")
     ap.add_argument("--stamp", action="store_true",
                     help="on FALLBACK_PROMOTE, stamp the staging artifact")
+    ap.add_argument("--consumption-ledger", default=None, type=Path,
+                    help="directory for A4-T1 candidate exception consumption")
     args = ap.parse_args(argv)
     as_of = (dt.date.fromisoformat(args.as_of) if args.as_of
              else dt.date.today())
-    verdict = decide(args.prod, args.staging, as_of)
+    verdict = decide(args.prod, args.staging, as_of,
+                     consumption_ledger=args.consumption_ledger)
     if args.stamp and verdict.get("decision") == "FALLBACK_PROMOTE":
-        stamp(args.staging, verdict)
+        stamp(args.staging, verdict,
+              consumption_ledger=args.consumption_ledger)
         verdict["stamped"] = True
     print(json.dumps(verdict, indent=2, sort_keys=True))
     return 0 if verdict.get("decision") == "FALLBACK_PROMOTE" else 1

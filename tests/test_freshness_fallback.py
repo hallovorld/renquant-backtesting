@@ -534,6 +534,169 @@ def test_a4t1_stamp_carries_bypass_metadata(tmp_path):
     assert "orch-session-428feb92" in m["fallback_a4t1_authorization"]
 
 
+# ── Amendment A4-T1: candidate exception (digest-bound, ledger-consumed) ──
+
+CANDIDATE_OVERRIDES = dict(
+    **ZERO_TRADE_OVERRIDES,
+    sanity_regime_ic={"passed": False,
+                      "reason": "regime sanity IC failed: BULL_CALM,BULL_VOLATILE,CHOPPY"},
+)
+
+
+def _candidate_staging(tmp_path, genuine=0.0016,
+                       run_id=None, **extra):
+    if run_id is None:
+        run_id = F._A4T1_CANDIDATE_RUN_ID
+    over = dict(CANDIDATE_OVERRIDES)
+    over.update(extra)
+    wf = _wf(genuine=genuine, **over)
+    obj = {"trained_date": A4T1_TRAINED, "metadata": {"wf_gate_metadata": wf}}
+    digest = F._artifact_digest(obj)
+    fname = f"panel-ltr.alpha158_fund.weekly_{run_id}.staging.json"
+    path = tmp_path / fname
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    return path, digest
+
+
+def test_a4t1_candidate_promotes_within_window(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    assert v["a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert v["a4t1_candidate_artifact_digest"] == digest
+    assert v["a4t1_candidate_authority"] == F._A4T1_CANDIDATE_AUTHORITY
+    assert "regime_sanity_ic" in v["a4t1_candidate_authority"]
+
+
+def test_a4t1_candidate_tampered_wf_refuses(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    obj = json.loads(path.read_text())
+    obj["metadata"]["wf_gate_metadata"]["sanity_placebo_genuine_ic"] = 0.05
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_tampered_trained_date_refuses(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    obj = json.loads(path.read_text())
+    obj["trained_date"] = "2026-09-01"
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_wrong_run_id_refuses(tmp_path, monkeypatch):
+    wrong_id = "20260901T120000Z"
+    path, digest = _candidate_staging(tmp_path, run_id=wrong_id)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_cross_dir_shared_ledger_refuses(tmp_path, monkeypatch):
+    """The codex blocker: cross-directory replay with a shared ledger refuses."""
+    dir1 = tmp_path / "dir1"
+    dir1.mkdir()
+    dir2 = tmp_path / "dir2"
+    dir2.mkdir()
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    path1, digest = _candidate_staging(dir1)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v1 = F.decide(_prod(dir1, trained=A4T1_PROD), path1, A4T1_AS_OF,
+                  consumption_ledger=ledger)
+    assert v1["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path1, v1, consumption_ledger=ledger)
+    path2, _ = _candidate_staging(dir2)
+    v2 = F.decide(_prod(dir2, trained=A4T1_PROD), path2, A4T1_AS_OF,
+                  consumption_ledger=ledger)
+    assert v2["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_expired_refuses(tmp_path, monkeypatch):
+    trained_for_expired = "2026-09-01"
+    path, _ = _candidate_staging(tmp_path)
+    obj = json.loads(path.read_text())
+    obj["trained_date"] = trained_for_expired
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    digest = F._artifact_digest(obj)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained="2026-07-20"), path, A4T1_EXPIRED,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_stamp_carries_digest_and_authority(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path, v, consumption_ledger=ledger)
+    m = json.loads(path.read_text())["metadata"]
+    assert m["fallback_a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert m["fallback_a4t1_candidate_digest"] == digest
+    assert "regime_sanity_ic" in m["fallback_a4t1_candidate_authority"]
+    marker = ledger / f"a4t1_{F._A4T1_CANDIDATE_RUN_ID}.consumed"
+    assert marker.exists()
+    consumed = json.loads(marker.read_text())
+    assert consumed["artifact_digest"] == digest
+
+
+def test_a4t1_candidate_no_ledger_refuses(tmp_path, monkeypatch):
+    """Without a consumption ledger, the candidate exception is fail-closed."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_corrupt_ledger_fails_closed(tmp_path, monkeypatch):
+    """A consumed marker that exists (regardless of content) blocks replay."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    marker = ledger / f"a4t1_{F._A4T1_CANDIDATE_RUN_ID}.consumed"
+    marker.write_text("CORRUPT", encoding="utf-8")
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_stamp_without_ledger_raises(tmp_path, monkeypatch):
+    """stamp() with a candidate verdict but no ledger is an error."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF,
+                 consumption_ledger=ledger)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    with pytest.raises(ValueError, match="consumption ledger"):
+        F.stamp(path, v)
+
+
 def test_standing_stamp_has_no_a4t1_fields(tmp_path):
     """An ordinary A4 promotion stamps quality_floor=0.02 with no A4-T1 keys."""
     staging = _staging(tmp_path, genuine=0.025)
