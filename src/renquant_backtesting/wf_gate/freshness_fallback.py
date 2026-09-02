@@ -55,6 +55,15 @@ across all", the substance classes are EXACTLY the four zero-trade classes
 standing A4 constants are unchanged; the bypass is a separate code path.
 Operator authorization: orchestrator session 428feb92, 2026-08-31.
 
+The ACTUAL staging artifact (run ``20260831T141820Z``) has 5 substance
+classes: the 4 trade-derived zero-trade classes plus ``regime_sanity_ic``
+(which fails independently of trade count). The exact-match predicate
+correctly excludes it. A ONE-SHOT candidate exception, bound to the
+immutable run ID and the A4-T1 temporal window, bypasses the zero-trade
+predicate for this single artifact. ``regime_sanity_ic`` remains substance
+for every other candidate. Separate operator authorization:
+orchestrator session 428feb92, 2026-09-01.
+
 Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
 structural placebo floor (Fix-3) as bypassable ONLY with the difference test
 as its predicate — check 4 IS that predicate. The other infra classes named
@@ -119,6 +128,14 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
     "wf_benchmark_economics", "trade_contract",
     "trade_monotonicity", "alpha_economics",
 })
+
+# One-shot candidate exception (codex review bt#120, #121): the actual
+# staging artifact has regime_sanity_ic alongside the 4 trade-derived
+# classes, so the exact-match predicate correctly excludes it. This
+# exception is bound to ONE immutable run ID and expires with the A4-T1
+# window. regime_sanity_ic stays substance for every other candidate.
+# Separate operator authorization: orch-session-428feb92-2026-09-01.
+_A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
 
 
 def _a4t1_active(as_of: dt.date) -> bool:
@@ -410,8 +427,9 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     # check so both checks 4 and 5 use ONE coupled predicate.
     failures = classify_gate_failures(wf)
     verdict["failure_classes"] = failures
-    a4t1 = (_a4t1_active(as_of)
-            and _is_zero_trade_structural(failures, wf))
+    a4t1_structural = _is_zero_trade_structural(failures, wf)
+    a4t1_candidate = _A4T1_CANDIDATE_RUN_ID in staging_path.name
+    a4t1 = _a4t1_active(as_of) and (a4t1_structural or a4t1_candidate)
 
     floor_ctx = {
         "genuine_ic": genuine,
@@ -425,12 +443,17 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
             verdict["quality_floor_standing"] = FALLBACK_GENUINE_IC_FLOOR
             verdict["a4t1_override"] = True
             verdict["a4t1_expiry"] = _A4T1_EXPIRY.isoformat()
-            verdict["a4t1_authorization"] = "orch-session-428feb92-2026-08-31"
+            verdict["a4t1_authorization"] = (
+                "orch-session-428feb92-2026-09-01-candidate"
+                if a4t1_candidate and not a4t1_structural
+                else "orch-session-428feb92-2026-08-31")
             floor_ctx["a4t1_override"] = True
             floor_ctx["a4t1_floor"] = _A4T1_FLOOR
             floor_ctx["a4t1_expiry"] = _A4T1_EXPIRY.isoformat()
+            a4t1_why = ("a4t1_candidate_exception" if a4t1_candidate
+                       and not a4t1_structural else "a4t1_override")
             ok("quality_floor",
-               why=f"a4t1_override(genuine_ic={genuine:+.4f} >= "
+               why=f"{a4t1_why}(genuine_ic={genuine:+.4f} >= "
                    f"{_A4T1_FLOOR:g}, expires {_A4T1_EXPIRY})",
                **floor_ctx)
         else:
@@ -446,8 +469,11 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     substance = [f["class"] for f in failures if f["kind"] != "infra"]
     if substance:
         if a4t1:
+            fc_why = ("a4t1_candidate_exception" if a4t1_candidate
+                      and not a4t1_structural
+                      else "a4t1_zero_trade_bypass")
             ok("failure_classes",
-               why=f"a4t1_zero_trade_bypass(expires {_A4T1_EXPIRY})",
+               why=f"{fc_why}(expires {_A4T1_EXPIRY})",
                failure_classes=failures,
                a4t1_override=True,
                a4t1_expiry=_A4T1_EXPIRY.isoformat())

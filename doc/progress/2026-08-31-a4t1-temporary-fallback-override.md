@@ -11,50 +11,52 @@ all 3 WF cuts, Sharpe is undefined, and the SPY benchmark cannot be met.
 
 The standing A4 policy correctly REFUSES this candidate:
 - genuine_ic = 0.001554 < 0.02 floor (quality_floor_not_met)
-- 4 substance failure classes from zero-trade outcomes (wf_benchmark_economics,
-  trade_contract, trade_monotonicity, alpha_economics)
+- 5 substance failure classes: 4 from zero-trade outcomes (wf_benchmark_economics,
+  trade_contract, trade_monotonicity, alpha_economics) + 1 non-trade
+  (regime_sanity_ic — fails independently of trade count)
 
 ## Solution
 
-Amendment A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass:
+Two layers, both time-limited and fail-closed:
 
-1. ONE pre-computed eligibility predicate (`_a4t1_active(as_of) and
-   _is_zero_trade_structural(failures, wf)`) gates BOTH the floor
-   relaxation and the failure-class exception. The floor relaxation
-   ONLY applies when the zero-trade predicate is also met (the v2
-   coupling gap fixed in v3).
+### Layer 1: zero-trade structural bypass (v4, merged as bt#119)
 
-2. Temporal bounds: [2026-08-31, 2026-09-07], hard-coded, fail-closed.
+ONE pre-computed eligibility predicate (`_a4t1_active(as_of) and
+_is_zero_trade_structural(failures, wf)`) gates BOTH the floor relaxation
+(0.001) and the failure-class exception. Requires EXACT match of the 4
+trade-derived zero-trade classes — no extras tolerated. This covers
+pure zero-trade candidates with only those 4 classes.
 
-3. Floor lowered to 0.001 (from 0.02) ONLY under the coupled predicate.
+### Layer 2: one-shot candidate exception (v7, this PR)
 
-4. `_is_zero_trade_structural()` requires ALL of:
-   - wf_reason contains "zero trades across all" (not partial)
-   - substance classes are EXACTLY the 4 zero-trade classes (not a subset)
-   - trade-dependent details report "no round-trip" (absence-of-data)
+The actual staging artifact (run `20260831T141820Z`) has 5 substance
+classes: the 4 trade-derived plus `regime_sanity_ic`. The exact-match
+predicate correctly excludes it. A ONE-SHOT exception, bound to the
+immutable run ID `20260831T141820Z` and the A4-T1 temporal window,
+bypasses the predicate for this single artifact. `regime_sanity_ic`
+remains substance for EVERY other candidate.
 
 Standing A4 constants UNCHANGED. The bypass is a separate code path.
 
 ## Tests
 
-64 tests total (52 standing A4 + 12 new A4-T1):
-- Happy path: zero-trade candidate within window promotes
-- Floor boundary: genuine_ic=0.001 promotes, 0.0009 refuses
-- Temporal: expired and before-start both refuse
-- Coupled predicate: placebo-only (non-zero-trade) refuses at 0.0016
-- Partial wf_reason ("one cut"): refuses
-- Missing one of 4 classes: refuses
-- Extra substance class: refuses
-- Non-"no round-trip" detail: refuses
-- Above standing floor: uses standing path, not bypass
-- Stamp carries bypass metadata
+70 tests total (52 standing A4 + 13 zero-trade predicate + 5 candidate exception):
+- Zero-trade happy path: 4-class candidate within window promotes
+- Candidate exception: 5-class artifact with correct run ID promotes
+- Wrong run ID: refuses (exception is bound to ONE artifact)
+- Expired: refuses
+- Below floor: refuses even with correct run ID
+- Stamp metadata: records candidate-specific authorization
+- All v4 tests preserved: exact-match, coupling, temporal bounds, etc.
 
 ## Evidence
 
 - Staging artifact: `panel-ltr.alpha158_fund.weekly_20260831T141820Z.staging.json`
-  genuine_ic=0.001554, all trade sub-verdicts "no round-trip ledgers found"
-- Fallback verdict: `20260831T141820Z.fallback_verdict.json`
-  refused_on=quality_floor
+  genuine_ic=0.001554, 5 substance classes (4 trade-derived + regime_sanity_ic),
+  all trade sub-verdicts "no round-trip ledgers found"
+- v5 codex review: regime_sanity_ic is NOT trade-derived; adding to set is post-hoc
+- v6 codex review: subset-match is same post-hoc problem, just broader
+- v7 solution: one-shot run-ID exception, preserves exact-match safeguard
 
 ## Restore condition
 
@@ -66,7 +68,15 @@ non-zero WF trades AND meets genuine_ic >= 0.02.
 - v1 (bt#116): globally reclassified substance as infra. Codex rejected (4 blockers).
 - v2 (bt#117): separate narrow bypass. Codex rejected (2 gaps: decoupled
   predicate, loose zero-trade check).
-- v3 (this PR): pre-computed coupled predicate, stricter zero-trade check,
-  13 gap-closing tests.
+- v3 (bt#118): pre-computed coupled predicate, stricter zero-trade check.
+  Codex rejected (stamp recorded standing floor, not effective).
+- v4 (bt#119): stamp audit fix. Codex APPROVED, MERGED (d081670c).
+- v5 (bt#120): added regime_sanity_ic to zero-trade class set. Codex
+  rejected: not trade-derived, post-hoc gate fitting.
+- v6 (bt#121): subset-match. Codex rejected: same post-hoc problem, broader.
+- v7 (this PR): one-shot candidate exception bound to immutable run ID
+  `20260831T141820Z`. Exact-match preserved. regime_sanity_ic stays substance.
 
-Operator authorization: orchestrator session 428feb92, 2026-08-31.
+Operator authorization:
+- Layer 1 (zero-trade bypass): orch-session-428feb92-2026-08-31
+- Layer 2 (candidate exception): orch-session-428feb92-2026-09-01

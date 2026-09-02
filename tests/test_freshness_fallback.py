@@ -546,3 +546,90 @@ def test_standing_stamp_has_no_a4t1_fields(tmp_path):
     assert m["fallback_quality_floor"] == pytest.approx(0.02)
     assert "fallback_a4t1_override" not in m
     assert "fallback_standing_quality_floor" not in m
+
+
+# ── A4-T1 one-shot candidate exception (run ID bound) ───────────────────
+
+CANDIDATE_OVERRIDES = dict(
+    wf_reason=("FAIL: zero trades across all WF cuts; decision tree admitted "
+               "no buys, so Sharpe is undefined and SPY benchmark cannot be met"),
+    trade_contract={"passed": False, "reason": "no round-trip ledgers found"},
+    trade_monotonicity={"passed": False, "reason": "no round-trip ledgers found"},
+    alpha_economics={"passed": False, "reason": "no round-trip ledgers found"},
+    sanity_regime_ic={"passed": False,
+                      "reason": "regime sanity IC failed: BULL_CALM,BULL_VOLATILE,CHOPPY"},
+)
+
+
+def _candidate_staging(tmp_path, genuine=0.0016, run_id=F._A4T1_CANDIDATE_RUN_ID,
+                        **extra):
+    """Staging artifact whose FILENAME contains the run ID."""
+    over = dict(CANDIDATE_OVERRIDES)
+    over.update(extra)
+    wf = _wf(genuine=genuine, **over)
+    fname = f"panel-ltr.alpha158_fund.weekly_{run_id}.staging.json"
+    path = tmp_path / fname
+    path.write_text(json.dumps(
+        {"trained_date": A4T1_TRAINED,
+         "metadata": {"wf_gate_metadata": wf}}), encoding="utf-8")
+    return path
+
+
+def test_a4t1_candidate_exception_promotes_the_real_artifact(tmp_path):
+    """The actual 20260831T141820Z artifact has 5 substance classes (4 trade-
+    derived + regime_sanity_ic). The exact-match predicate rejects it, but the
+    one-shot candidate exception promotes it."""
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _candidate_staging(tmp_path),
+                 A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    floor_c = [c for c in v["checks"] if c["check"] == "quality_floor"][0]
+    assert floor_c["a4t1_override"] is True
+    assert "a4t1_candidate_exception" in floor_c["why"]
+    fc_c = [c for c in v["checks"] if c["check"] == "failure_classes"][0]
+    assert fc_c["a4t1_override"] is True
+    assert "a4t1_candidate_exception" in fc_c["why"]
+
+
+def test_a4t1_candidate_exception_wrong_run_id_refuses(tmp_path):
+    """A different run ID with the same 5 substance classes refuses — the
+    exception is bound to ONE immutable run ID."""
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _candidate_staging(tmp_path, run_id="20260901T201006Z"),
+                 A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_candidate_exception_expired_refuses(tmp_path):
+    """The candidate exception expires with the A4-T1 window."""
+    fname = f"panel-ltr.alpha158_fund.weekly_{F._A4T1_CANDIDATE_RUN_ID}.staging.json"
+    over = dict(CANDIDATE_OVERRIDES)
+    wf = _wf(genuine=0.0016, **over)
+    path = tmp_path / fname
+    path.write_text(json.dumps(
+        {"trained_date": "2026-09-01",
+         "metadata": {"wf_gate_metadata": wf}}), encoding="utf-8")
+    v = F.decide(
+        _prod(tmp_path, trained="2026-07-20"),
+        path,
+        A4T1_EXPIRED)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_candidate_exception_below_floor_refuses(tmp_path):
+    """Even the excepted candidate must meet the A4-T1 floor (0.001)."""
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD),
+                 _candidate_staging(tmp_path, genuine=0.0009),
+                 A4T1_AS_OF)
+    assert v["decision"] == "REFUSE" and v["refused_on"] == "quality_floor"
+
+
+def test_a4t1_candidate_exception_stamp_metadata(tmp_path):
+    staging = _candidate_staging(tmp_path)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), staging, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    assert v["a4t1_authorization"] == "orch-session-428feb92-2026-09-01-candidate"
+    F.stamp(staging, v)
+    m = json.loads(staging.read_text())["metadata"]
+    assert m["fallback_a4t1_override"] is True
+    assert "2026-09-01-candidate" in m["fallback_a4t1_authorization"]
