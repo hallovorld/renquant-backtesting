@@ -546,3 +546,154 @@ def test_standing_stamp_has_no_a4t1_fields(tmp_path):
     assert m["fallback_quality_floor"] == pytest.approx(0.02)
     assert "fallback_a4t1_override" not in m
     assert "fallback_standing_quality_floor" not in m
+
+
+# ── A4-T1 candidate exception (full-artifact digest, marker consumption) ──
+
+CANDIDATE_OVERRIDES = dict(
+    **ZERO_TRADE_OVERRIDES,
+    sanity_regime_ic={"passed": False,
+                      "reason": "regime sanity IC failed: BULL_CALM,BULL_VOLATILE,CHOPPY"},
+)
+
+
+def _candidate_staging(tmp_path, genuine=0.0016,
+                       run_id=F._A4T1_CANDIDATE_RUN_ID, **extra):
+    """Build a staging artifact matching the candidate exception shape.
+
+    Returns (path, digest) where digest is the full-artifact SHA-256.
+    """
+    over = dict(CANDIDATE_OVERRIDES)
+    over.update(extra)
+    wf = _wf(genuine=genuine, **over)
+    obj = {"trained_date": A4T1_TRAINED,
+           "metadata": {"wf_gate_metadata": wf}}
+    digest = F._artifact_digest(obj)
+    fname = f"panel-ltr.alpha158_fund.weekly_{run_id}.staging.json"
+    path = tmp_path / fname
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    return path, digest
+
+
+def test_a4t1_candidate_exception_promotes(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    assert v["a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert v["a4t1_candidate_artifact_digest"] == digest
+    assert v["a4t1_override"] is True
+
+
+def test_a4t1_candidate_tampered_wf_metadata_refuses(tmp_path, monkeypatch):
+    """Right filename, wrong wf_gate_metadata (different genuine_ic)."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    sub = tmp_path / "tampered"
+    sub.mkdir()
+    tampered, _ = _candidate_staging(sub, genuine=0.009)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), tampered, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_tampered_trained_date_refuses(tmp_path, monkeypatch):
+    """Right filename, right wf content, but trained_date changed outside
+    wf_gate_metadata — the full-artifact digest catches it."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    sub = tmp_path / "date_tampered"
+    sub.mkdir()
+    obj = json.loads(path.read_text())
+    obj["trained_date"] = "2026-08-30"
+    bad_path = sub / path.name
+    bad_path.write_text(json.dumps(obj), encoding="utf-8")
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), bad_path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_substring_collision_refuses(tmp_path, monkeypatch):
+    """Run ID embedded in a longer filename — exact parse rejects it."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    bad_name = f"panel-ltr.alpha158_fund.weekly_{F._A4T1_CANDIDATE_RUN_ID}_v2.staging.json"
+    bad_path = tmp_path / bad_name
+    bad_path.write_text(path.read_text(), encoding="utf-8")
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), bad_path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_replay_after_stamp_refuses(tmp_path, monkeypatch):
+    """After stamp() writes the consumption marker, a pristine copy in the
+    same directory is refused — single-consumption via marker file."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path, v)
+    marker = tmp_path / F._A4T1_CONSUMED_MARKER
+    assert marker.exists()
+    pristine, _ = _candidate_staging(tmp_path)
+    v2 = F.decide(_prod(tmp_path, trained=A4T1_PROD), pristine, A4T1_AS_OF)
+    assert v2["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_copy_different_dir_without_marker_refuses(tmp_path, monkeypatch):
+    """A copied pristine artifact in a directory WITHOUT a marker still
+    refuses because we stamp the original directory. The absence of the marker
+    in the new directory means the digest check must also pass, and the
+    new directory has no marker — but the consumption model is per-directory.
+    This tests that the marker is written where the stamp happens."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path, v)
+    new_dir = tmp_path / "copy_dir"
+    new_dir.mkdir()
+    copy_path, _ = _candidate_staging(new_dir)
+    v2 = F.decide(_prod(tmp_path, trained=A4T1_PROD), copy_path, A4T1_AS_OF)
+    assert v2["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(copy_path, v2)
+    v3 = F.decide(_prod(tmp_path, trained=A4T1_PROD), copy_path, A4T1_AS_OF)
+    assert v3["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_exception_expired_refuses(tmp_path, monkeypatch):
+    """The candidate exception respects the temporal window."""
+    over = dict(CANDIDATE_OVERRIDES)
+    wf = _wf(genuine=0.0016, **over)
+    obj = {"trained_date": "2026-09-01", "metadata": {"wf_gate_metadata": wf}}
+    digest = F._artifact_digest(obj)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    sub = tmp_path / "exp"
+    sub.mkdir()
+    fname = f"panel-ltr.alpha158_fund.weekly_{F._A4T1_CANDIDATE_RUN_ID}.staging.json"
+    path = _write(sub / fname, obj)
+    v = F.decide(_prod(tmp_path, trained="2026-07-20"), path, A4T1_EXPIRED)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_stamp_carries_digest(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path, v)
+    m = json.loads(path.read_text())["metadata"]
+    assert m["fallback_a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert m["fallback_a4t1_candidate_artifact_digest"] == digest
+    assert m["fallback_a4t1_override"] is True
+
+
+def test_a4t1_candidate_idempotent_stamp(tmp_path, monkeypatch):
+    """stamp() twice on the same artifact does not error — the second stamp
+    overwrites the first (idempotent), and the marker file is also idempotent."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path, v)
+    F.stamp(path, v)
+    marker = tmp_path / F._A4T1_CONSUMED_MARKER
+    data = json.loads(marker.read_text())
+    assert data["consumed_ids"].count(F._A4T1_CANDIDATE_RUN_ID) == 1

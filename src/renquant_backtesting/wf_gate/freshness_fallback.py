@@ -45,15 +45,28 @@ The policy, exactly:
 
 AMENDMENT A4-T1 (TEMPORARY, 2026-08-31 to 2026-09-07, fail-closed). The
 served model lapsed on day 29 and the current recipe produces zero trades in
-all WF cuts. A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass: ONE
-pre-computed eligibility predicate (``_a4t1_active(as_of) and
-_is_zero_trade_structural(failures, wf)``) gates BOTH the floor relaxation
-(0.001) and the failure-class exception. The bypass fires ONLY when ALL of:
-the date is within [2026-08-31, 2026-09-07], wf_reason contains "zero trades
-across all", the substance classes are EXACTLY the four zero-trade classes
-(not a subset), and each trade-dependent detail reports "no round-trip". The
-standing A4 constants are unchanged; the bypass is a separate code path.
-Operator authorization: orchestrator session 428feb92, 2026-08-31.
+all WF cuts. A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass with TWO
+eligibility paths:
+
+  Path 1 (structural zero-trade): ``_is_zero_trade_structural(failures, wf)``
+  — wf_reason "zero trades across all", substance classes EXACTLY the four
+  zero-trade classes, trade-dependent details "no round-trip".
+
+  Path 2 (candidate exception): ``_is_a4t1_candidate(staging_path, staging)``
+  — run-ID parsed exactly from filename (regex, not substring), FULL
+  pre-stamp artifact content verified by SHA-256 digest against a hardcoded
+  constant (canonicalization boundary: ``json.dumps(staging_dict, sort_keys=
+  True)`` — covers trained_date, metadata, wf_gate_metadata, everything).
+  Single-consumption via a directory-level marker file
+  (``.a4t1_exception_consumed``) written atomically by ``stamp()``; a copied
+  pristine artifact in the same directory still sees the marker. The digest
+  and run-ID are recorded in verdict and stamp.
+
+Either path, combined with ``_a4t1_active(as_of)``, gates BOTH the floor
+relaxation (0.001) and the failure-class exception. The standing A4 constants
+are unchanged; the bypass is a separate code path.
+Operator authorization: orchestrator session 428feb92, 2026-08-31;
+candidate exception authorized in same session, same directive.
 
 Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
 structural placebo floor (Fix-3) as bypassable ONLY with the difference test
@@ -79,8 +92,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -119,6 +134,18 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
     "wf_benchmark_economics", "trade_contract",
     "trade_monotonicity", "alpha_economics",
 })
+_A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
+_A4T1_CANDIDATE_ARTIFACT_DIGEST = (
+    "760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e"
+)
+_A4T1_CONSUMED_MARKER = ".a4t1_exception_consumed"
+_RUN_ID_RE = re.compile(r"weekly_(\d{8}T\d{6}Z)\.staging\.json$")
+
+
+def _artifact_digest(obj: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
 
 
 def _a4t1_active(as_of: dt.date) -> bool:
@@ -155,6 +182,49 @@ def _is_zero_trade_structural(
         if cls in ("trade_contract", "trade_monotonicity", "alpha_economics"):
             if "no round-trip" not in f.get("detail", "").lower():
                 return False
+    return True
+
+
+def _a4t1_is_consumed(staging_path: Path) -> bool:
+    marker = staging_path.parent / _A4T1_CONSUMED_MARKER
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return _A4T1_CANDIDATE_RUN_ID in (data.get("consumed_ids") or [])
+
+
+def _a4t1_mark_consumed(staging_path: Path) -> None:
+    marker = staging_path.parent / _A4T1_CONSUMED_MARKER
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    ids = data.setdefault("consumed_ids", [])
+    if _A4T1_CANDIDATE_RUN_ID not in ids:
+        ids.append(_A4T1_CANDIDATE_RUN_ID)
+    fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
+                               prefix=_A4T1_CONSUMED_MARKER + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, marker)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _is_a4t1_candidate(staging_path: Path, staging: dict) -> bool:
+    m = _RUN_ID_RE.search(staging_path.name)
+    if not m or m.group(1) != _A4T1_CANDIDATE_RUN_ID:
+        return False
+    if _artifact_digest(staging) != _A4T1_CANDIDATE_ARTIFACT_DIGEST:
+        return False
+    if _a4t1_is_consumed(staging_path):
+        return False
     return True
 
 
@@ -410,8 +480,9 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     # check so both checks 4 and 5 use ONE coupled predicate.
     failures = classify_gate_failures(wf)
     verdict["failure_classes"] = failures
-    a4t1 = (_a4t1_active(as_of)
-            and _is_zero_trade_structural(failures, wf))
+    a4t1_structural = _is_zero_trade_structural(failures, wf)
+    a4t1_candidate = _is_a4t1_candidate(staging_path, staging)
+    a4t1 = _a4t1_active(as_of) and (a4t1_structural or a4t1_candidate)
 
     floor_ctx = {
         "genuine_ic": genuine,
@@ -462,6 +533,9 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     verdict["decision"] = "FALLBACK_PROMOTE"
     verdict["genuine_ic"] = genuine
     verdict["prod_staleness_days"] = staleness
+    if verdict.get("a4t1_override") and a4t1_candidate and not a4t1_structural:
+        verdict["a4t1_candidate_run_id"] = _A4T1_CANDIDATE_RUN_ID
+        verdict["a4t1_candidate_artifact_digest"] = _artifact_digest(staging)
     return verdict
 
 
@@ -489,6 +563,9 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
         meta["fallback_a4t1_expiry"] = verdict["a4t1_expiry"]
         meta["fallback_a4t1_authorization"] = verdict["a4t1_authorization"]
         meta["fallback_standing_quality_floor"] = verdict["quality_floor_standing"]
+        if verdict.get("a4t1_candidate_run_id"):
+            meta["fallback_a4t1_candidate_run_id"] = verdict["a4t1_candidate_run_id"]
+            meta["fallback_a4t1_candidate_artifact_digest"] = verdict["a4t1_candidate_artifact_digest"]
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
                                prefix=staging_path.name + ".")
     try:
@@ -501,6 +578,8 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+    if verdict.get("a4t1_candidate_run_id"):
+        _a4t1_mark_consumed(staging_path)
 
 
 def main(argv: list[str] | None = None) -> int:
