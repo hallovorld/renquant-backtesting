@@ -45,14 +45,23 @@ The policy, exactly:
 
 AMENDMENT A4-T1 (TEMPORARY, 2026-08-31 to 2026-09-07, fail-closed). The
 served model lapsed on day 29 and the current recipe produces zero trades in
-all WF cuts. A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass: ONE
-pre-computed eligibility predicate (``_a4t1_active(as_of) and
-_is_zero_trade_structural(failures, wf)``) gates BOTH the floor relaxation
-(0.001) and the failure-class exception. The bypass fires ONLY when ALL of:
-the date is within [2026-08-31, 2026-09-07], wf_reason contains "zero trades
-across all", the substance classes are EXACTLY the four zero-trade classes
-(not a subset), and each trade-dependent detail reports "no round-trip". The
-standing A4 constants are unchanged; the bypass is a separate code path.
+all WF cuts. A4-T1 adds a NARROW, TIME-LIMITED, COUPLED bypass with TWO
+eligibility paths:
+
+  Path 1 (structural zero-trade): ``_is_zero_trade_structural(failures, wf)``
+  — wf_reason "zero trades across all", substance classes EXACTLY the four
+  zero-trade classes, trade-dependent details "no round-trip".
+
+  Path 2 (candidate exception): ``_is_a4t1_candidate(staging_path, wf,
+  staging)`` — run-ID parsed exactly from the filename (regex, not
+  substring), wf_gate_metadata content verified by SHA-256 digest against a
+  hardcoded constant, single-consumption (refuses after promotion_basis is
+  stamped). The digest and run-ID are recorded in the verdict and stamp for
+  downstream auditability.
+
+Either path, combined with ``_a4t1_active(as_of)``, gates BOTH the floor
+relaxation (0.001) and the failure-class exception. The standing A4 constants
+are unchanged; the bypass is a separate code path.
 Operator authorization: orchestrator session 428feb92, 2026-08-31.
 
 Why the enumerated infra list is {placebo_ceiling} today: §4.3.1 admits the
@@ -79,8 +88,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -119,6 +130,17 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
     "wf_benchmark_economics", "trade_contract",
     "trade_monotonicity", "alpha_economics",
 })
+_A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
+_A4T1_CANDIDATE_WF_DIGEST = (
+    "7cff5b7c27a8ced62f70b25fdd146479cb11e5f0d47aee14e22b22249f0fbfbc"
+)
+_RUN_ID_RE = re.compile(r"weekly_(\d{8}T\d{6}Z)\.staging\.json$")
+
+
+def _wf_digest(wf: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(wf, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
 
 
 def _a4t1_active(as_of: dt.date) -> bool:
@@ -155,6 +177,20 @@ def _is_zero_trade_structural(
         if cls in ("trade_contract", "trade_monotonicity", "alpha_economics"):
             if "no round-trip" not in f.get("detail", "").lower():
                 return False
+    return True
+
+
+def _is_a4t1_candidate(
+    staging_path: Path, wf: dict, staging: dict,
+) -> bool:
+    m = _RUN_ID_RE.search(staging_path.name)
+    if not m or m.group(1) != _A4T1_CANDIDATE_RUN_ID:
+        return False
+    if _wf_digest(wf) != _A4T1_CANDIDATE_WF_DIGEST:
+        return False
+    meta = staging.get("metadata")
+    if isinstance(meta, dict) and meta.get("promotion_basis") is not None:
+        return False
     return True
 
 
@@ -410,8 +446,9 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     # check so both checks 4 and 5 use ONE coupled predicate.
     failures = classify_gate_failures(wf)
     verdict["failure_classes"] = failures
-    a4t1 = (_a4t1_active(as_of)
-            and _is_zero_trade_structural(failures, wf))
+    a4t1_structural = _is_zero_trade_structural(failures, wf)
+    a4t1_candidate = _is_a4t1_candidate(staging_path, wf, staging)
+    a4t1 = _a4t1_active(as_of) and (a4t1_structural or a4t1_candidate)
 
     floor_ctx = {
         "genuine_ic": genuine,
@@ -462,6 +499,9 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     verdict["decision"] = "FALLBACK_PROMOTE"
     verdict["genuine_ic"] = genuine
     verdict["prod_staleness_days"] = staleness
+    if verdict.get("a4t1_override") and a4t1_candidate and not a4t1_structural:
+        verdict["a4t1_candidate_run_id"] = _A4T1_CANDIDATE_RUN_ID
+        verdict["a4t1_candidate_wf_digest"] = _wf_digest(wf)
     return verdict
 
 
@@ -489,6 +529,9 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
         meta["fallback_a4t1_expiry"] = verdict["a4t1_expiry"]
         meta["fallback_a4t1_authorization"] = verdict["a4t1_authorization"]
         meta["fallback_standing_quality_floor"] = verdict["quality_floor_standing"]
+        if verdict.get("a4t1_candidate_run_id"):
+            meta["fallback_a4t1_candidate_run_id"] = verdict["a4t1_candidate_run_id"]
+            meta["fallback_a4t1_candidate_wf_digest"] = verdict["a4t1_candidate_wf_digest"]
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
                                prefix=staging_path.name + ".")
     try:

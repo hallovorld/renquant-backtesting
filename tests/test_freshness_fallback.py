@@ -546,3 +546,97 @@ def test_standing_stamp_has_no_a4t1_fields(tmp_path):
     assert m["fallback_quality_floor"] == pytest.approx(0.02)
     assert "fallback_a4t1_override" not in m
     assert "fallback_standing_quality_floor" not in m
+
+
+# ── A4-T1 candidate exception (digest-bound, single-consumption) ──────────
+
+CANDIDATE_OVERRIDES = dict(
+    **ZERO_TRADE_OVERRIDES,
+    sanity_regime_ic={"passed": False,
+                      "reason": "regime sanity IC failed: BULL_CALM,BULL_VOLATILE,CHOPPY"},
+)
+
+
+def _candidate_staging(tmp_path, genuine=0.0016,
+                       run_id=F._A4T1_CANDIDATE_RUN_ID,
+                       already_promoted=False, **extra):
+    over = dict(CANDIDATE_OVERRIDES)
+    over.update(extra)
+    wf = _wf(genuine=genuine, **over)
+    digest = F._wf_digest(wf)
+    fname = f"panel-ltr.alpha158_fund.weekly_{run_id}.staging.json"
+    meta = {"wf_gate_metadata": wf}
+    if already_promoted:
+        meta["promotion_basis"] = F.PROMOTION_BASIS
+    path = tmp_path / fname
+    path.write_text(json.dumps({"trained_date": A4T1_TRAINED,
+                                "metadata": meta}), encoding="utf-8")
+    return path, digest
+
+
+def test_a4t1_candidate_exception_promotes(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_WF_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    assert v["a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert v["a4t1_candidate_wf_digest"] == digest
+    assert v["a4t1_override"] is True
+
+
+def test_a4t1_candidate_tampered_content_refuses(tmp_path, monkeypatch):
+    """Right filename, wrong content (different genuine_ic → digest mismatch)."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_WF_DIGEST", digest)
+    sub = tmp_path / "tampered"
+    sub.mkdir()
+    tampered, _ = _candidate_staging(sub, genuine=0.009)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), tampered, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_substring_collision_refuses(tmp_path, monkeypatch):
+    """Run ID embedded in a longer filename — exact parse rejects it."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_WF_DIGEST", digest)
+    bad_name = f"panel-ltr.alpha158_fund.weekly_{F._A4T1_CANDIDATE_RUN_ID}_v2.staging.json"
+    bad_path = tmp_path / bad_name
+    bad_path.write_text(path.read_text(), encoding="utf-8")
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), bad_path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_replay_after_promotion_refuses(tmp_path, monkeypatch):
+    """Already stamped with promotion_basis → single-consumption refuses."""
+    path, digest = _candidate_staging(tmp_path, already_promoted=True)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_WF_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_exception_expired_refuses(tmp_path, monkeypatch):
+    """The candidate exception respects the temporal window."""
+    over = dict(CANDIDATE_OVERRIDES)
+    wf = _wf(genuine=0.0016, **over)
+    digest = F._wf_digest(wf)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_WF_DIGEST", digest)
+    fname = f"panel-ltr.alpha158_fund.weekly_{F._A4T1_CANDIDATE_RUN_ID}.staging.json"
+    sub = tmp_path / "exp"
+    sub.mkdir()
+    path = _write(sub / fname,
+                  {"trained_date": "2026-09-01",
+                   "metadata": {"wf_gate_metadata": wf}})
+    v = F.decide(_prod(tmp_path, trained="2026-07-20"), path, A4T1_EXPIRED)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_stamp_carries_digest(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_WF_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    F.stamp(path, v)
+    m = json.loads(path.read_text())["metadata"]
+    assert m["fallback_a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert m["fallback_a4t1_candidate_wf_digest"] == digest
+    assert m["fallback_a4t1_override"] is True
