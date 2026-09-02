@@ -32,40 +32,35 @@ bounds [2026-08-31, 2026-09-07]:
 
 Gates BOTH the floor relaxation (0.001) and the failure-class exception.
 
-### Path 2 — Candidate exception (v10)
+### Path 2 — Candidate exception (v12)
 
-`_is_a4t1_candidate(staging_path, staging, ledger_dir)` binds to:
+`_is_a4t1_candidate(staging_path, staging)` binds to:
 - EXACT run-ID: `20260831T141820Z`
 - FULL-ARTIFACT SHA-256 digest: `760912ec...4af1e`
-- Global consumption ledger (fail-closed without one)
 
 Covers the actual staging artifact (5 substance classes: 4 zero-trade +
 regime_sanity_ic) that the structural path rejects.
 
-Consumption model: atomic O_CREAT|O_EXCL file marker in a CANONICAL ledger
-at `~/.renquant/governance/` (module constant `_A4T1_LEDGER_DIR`), keyed by
-`a4t1_{RUN_ID}.consumed`. The location is NOT a caller-supplied parameter —
-it is a hardcoded constant, preventing ledger substitution. Written in
-`stamp()` BEFORE the staging artifact is modified. Cross-directory replay
-is impossible because all callers use the same canonical location.
-Corrupt/unreadable marker → fail-closed (file exists = consumed).
-Nonexistent ledger dir → fail-closed (candidate exception refuses).
+Backtesting IDENTIFIES the candidate only. Consumption (single-use
+enforcement) is the ORCHESTRATOR's responsibility via a paired PR. The
+`stamp()` function requires an `a4t1_consumption_proof` dict from the
+orchestrator's governance ledger; without it, stamp() raises ValueError.
+This separation addresses codex's v11 rejection: backtesting should not
+own governance state (hardcoded user-home dir, first-use deadlock).
 
 Standing A4 constants UNCHANGED. The bypass is a separate code path.
 
 ## Tests
 
-75 tests total (52 standing A4 + 13 structural + 10 candidate exception):
+73 tests total (52 standing A4 + 13 structural + 8 candidate exception):
 - Candidate happy path: correct run-ID + digest within window promotes
 - Tampered wf_gate_metadata: digest mismatch refuses
 - Tampered trained_date: digest mismatch refuses
 - Wrong run-ID: refuses
-- Cross-directory replay: canonical ledger blocks (codex blocker fix)
 - Expired: refuses
-- Stamp carries digest + authority + governance file reference
-- No ledger dir: fail-closed refuses (codex blocker fix)
-- Corrupt ledger marker: fail-closed refuses (codex blocker fix)
-- Ledger not substitutable: two artifact dirs share one canonical ledger
+- Stamp without proof: raises ValueError (consumption proof required)
+- Stamp with empty proof: raises ValueError
+- Stamp records proof: proof dict written to artifact metadata
 
 ## Evidence
 
@@ -97,10 +92,17 @@ non-zero WF trades AND meets genuine_ic >= 0.02.
   fail-closed on corrupt state, separate operator authorization for
   regime_sanity_ic. Codex rejected: ledger path caller-substitutable,
   authority not independently verifiable.
-- v11 (this PR): canonical ledger at `~/.renquant/governance/` (module
+- v11 (bt#126): canonical ledger at `~/.renquant/governance/` (module
   constant, not caller parameter), committed governance authority file
   `doc/governance/a4t1-candidate-exception-authority.json`. 75 tests
-  (52+13+10).
+  (52+13+10). Codex rejected: hardcoded user-home dir is host-local,
+  decide() refuses before stamp() can create dir (first-use deadlock),
+  orchestrator should own governance state, authority JSON is
+  self-attestation.
+- v12 (this PR): split concerns — backtesting identifies only,
+  orchestrator owns consumption. stamp() requires a4t1_consumption_proof
+  from the caller. Paired orchestrator PR carries the governance ledger
+  + atomic consumption. 73 tests (52+13+8).
 
 ## Operator authorization
 

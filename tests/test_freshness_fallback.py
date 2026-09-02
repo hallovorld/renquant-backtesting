@@ -534,7 +534,9 @@ def test_a4t1_stamp_carries_bypass_metadata(tmp_path):
     assert "orch-session-428feb92" in m["fallback_a4t1_authorization"]
 
 
-# ── Amendment A4-T1: candidate exception (digest-bound, ledger-consumed) ──
+# ── Amendment A4-T1: candidate exception (identification only) ────────────
+# Consumption is the ORCHESTRATOR's responsibility; backtesting only identifies
+# the candidate and requires proof at stamp() time.
 
 CANDIDATE_OVERRIDES = dict(
     **ZERO_TRADE_OVERRIDES,
@@ -558,18 +560,20 @@ def _candidate_staging(tmp_path, genuine=0.0016,
     return path, digest
 
 
-def _patch_candidate(monkeypatch, tmp_path):
-    """Set up the canonical ledger in tmp_path and return the ledger dir."""
-    ledger = tmp_path / "ledger"
-    ledger.mkdir(exist_ok=True)
-    monkeypatch.setattr(F, "_A4T1_LEDGER_DIR", ledger)
-    return ledger
+_MOCK_PROOF = {
+    "consumed_at": "2026-09-02T00:00:00Z",
+    "consumed_by": "orchestrator_test",
+    "artifact_digest": "placeholder",
+}
+
+
+def _proof(digest):
+    return {**_MOCK_PROOF, "artifact_digest": digest}
 
 
 def test_a4t1_candidate_promotes_within_window(tmp_path, monkeypatch):
     path, digest = _candidate_staging(tmp_path)
     monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    _patch_candidate(monkeypatch, tmp_path)
     v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
     assert v["decision"] == "FALLBACK_PROMOTE", v
     assert v["a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
@@ -580,7 +584,6 @@ def test_a4t1_candidate_promotes_within_window(tmp_path, monkeypatch):
 def test_a4t1_candidate_tampered_wf_refuses(tmp_path, monkeypatch):
     path, digest = _candidate_staging(tmp_path)
     monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    _patch_candidate(monkeypatch, tmp_path)
     obj = json.loads(path.read_text())
     obj["metadata"]["wf_gate_metadata"]["sanity_placebo_genuine_ic"] = 0.05
     path.write_text(json.dumps(obj), encoding="utf-8")
@@ -591,7 +594,6 @@ def test_a4t1_candidate_tampered_wf_refuses(tmp_path, monkeypatch):
 def test_a4t1_candidate_tampered_trained_date_refuses(tmp_path, monkeypatch):
     path, digest = _candidate_staging(tmp_path)
     monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    _patch_candidate(monkeypatch, tmp_path)
     obj = json.loads(path.read_text())
     obj["trained_date"] = "2026-09-01"
     path.write_text(json.dumps(obj), encoding="utf-8")
@@ -603,27 +605,8 @@ def test_a4t1_candidate_wrong_run_id_refuses(tmp_path, monkeypatch):
     wrong_id = "20260901T120000Z"
     path, digest = _candidate_staging(tmp_path, run_id=wrong_id)
     monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    _patch_candidate(monkeypatch, tmp_path)
     v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
     assert v["decision"] == "REFUSE"
-
-
-def test_a4t1_candidate_cross_dir_replay_refuses(tmp_path, monkeypatch):
-    """Cross-directory replay: the canonical ledger is global, so the second
-    directory sees the consumption marker from the first."""
-    dir1 = tmp_path / "dir1"
-    dir1.mkdir()
-    dir2 = tmp_path / "dir2"
-    dir2.mkdir()
-    ledger = _patch_candidate(monkeypatch, tmp_path)
-    path1, digest = _candidate_staging(dir1)
-    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    v1 = F.decide(_prod(dir1, trained=A4T1_PROD), path1, A4T1_AS_OF)
-    assert v1["decision"] == "FALLBACK_PROMOTE"
-    F.stamp(path1, v1)
-    path2, _ = _candidate_staging(dir2)
-    v2 = F.decide(_prod(dir2, trained=A4T1_PROD), path2, A4T1_AS_OF)
-    assert v2["decision"] == "REFUSE"
 
 
 def test_a4t1_candidate_expired_refuses(tmp_path, monkeypatch):
@@ -634,63 +617,43 @@ def test_a4t1_candidate_expired_refuses(tmp_path, monkeypatch):
     path.write_text(json.dumps(obj), encoding="utf-8")
     digest = F._artifact_digest(obj)
     monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    _patch_candidate(monkeypatch, tmp_path)
     v = F.decide(_prod(tmp_path, trained="2026-07-20"), path, A4T1_EXPIRED)
     assert v["decision"] == "REFUSE"
 
 
-def test_a4t1_candidate_stamp_carries_digest_and_authority(tmp_path, monkeypatch):
+def test_a4t1_candidate_stamp_without_proof_raises(tmp_path, monkeypatch):
+    """stamp() on a candidate verdict WITHOUT consumption proof → ValueError."""
     path, digest = _candidate_staging(tmp_path)
     monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    ledger = _patch_candidate(monkeypatch, tmp_path)
     v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
     assert v["decision"] == "FALLBACK_PROMOTE"
-    F.stamp(path, v)
+    with pytest.raises(ValueError, match="a4t1_consumption_proof"):
+        F.stamp(path, v)
+
+
+def test_a4t1_candidate_stamp_empty_proof_raises(tmp_path, monkeypatch):
+    """stamp() with empty dict proof → ValueError."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    with pytest.raises(ValueError, match="a4t1_consumption_proof"):
+        F.stamp(path, v, a4t1_consumption_proof={})
+
+
+def test_a4t1_candidate_stamp_records_proof(tmp_path, monkeypatch):
+    """stamp() with valid proof records it in the artifact metadata."""
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE"
+    proof = _proof(digest)
+    F.stamp(path, v, a4t1_consumption_proof=proof)
     m = json.loads(path.read_text())["metadata"]
     assert m["fallback_a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
     assert m["fallback_a4t1_candidate_digest"] == digest
     assert m["fallback_a4t1_candidate_authority"] == F._A4T1_CANDIDATE_AUTHORITY
-    marker = ledger / f"a4t1_{F._A4T1_CANDIDATE_RUN_ID}.consumed"
-    assert marker.exists()
-    consumed = json.loads(marker.read_text())
-    assert consumed["artifact_digest"] == digest
-
-
-def test_a4t1_candidate_no_ledger_dir_refuses(tmp_path, monkeypatch):
-    """Ledger directory does not exist → candidate exception fail-closed."""
-    path, digest = _candidate_staging(tmp_path)
-    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    monkeypatch.setattr(F, "_A4T1_LEDGER_DIR", tmp_path / "nonexistent")
-    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
-    assert v["decision"] == "REFUSE"
-
-
-def test_a4t1_candidate_corrupt_ledger_fails_closed(tmp_path, monkeypatch):
-    """A consumed marker that exists (regardless of content) blocks replay."""
-    path, digest = _candidate_staging(tmp_path)
-    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    ledger = _patch_candidate(monkeypatch, tmp_path)
-    marker = ledger / f"a4t1_{F._A4T1_CANDIDATE_RUN_ID}.consumed"
-    marker.write_text("CORRUPT", encoding="utf-8")
-    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
-    assert v["decision"] == "REFUSE"
-
-
-def test_a4t1_candidate_ledger_not_substitutable(tmp_path, monkeypatch):
-    """The ledger location is a module constant, not a caller parameter.
-    Two callers with different artifact directories share the same ledger."""
-    path, digest = _candidate_staging(tmp_path)
-    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
-    ledger = _patch_candidate(monkeypatch, tmp_path)
-    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
-    assert v["decision"] == "FALLBACK_PROMOTE"
-    F.stamp(path, v)
-    assert (ledger / f"a4t1_{F._A4T1_CANDIDATE_RUN_ID}.consumed").exists()
-    alt_dir = tmp_path / "alt"
-    alt_dir.mkdir()
-    path2, _ = _candidate_staging(alt_dir)
-    v2 = F.decide(_prod(alt_dir, trained=A4T1_PROD), path2, A4T1_AS_OF)
-    assert v2["decision"] == "REFUSE"
+    assert m["fallback_a4t1_consumption_proof"] == proof
 
 
 def test_standing_stamp_has_no_a4t1_fields(tmp_path):

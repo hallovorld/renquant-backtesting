@@ -136,8 +136,9 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
 # The staging artifact has 5 substance classes (4 zero-trade +
 # regime_sanity_ic), so the structural predicate rejects it. The
 # candidate exception binds to the EXACT run-ID and FULL-ARTIFACT digest.
+# This module IDENTIFIES the candidate; the CALLER (orchestrator) owns
+# atomic single-consumption and passes proof into stamp().
 # Authorization: doc/governance/a4t1-candidate-exception-authority.json
-# (committed, reviewable governance artifact).
 _A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
 _A4T1_CANDIDATE_ARTIFACT_DIGEST = (
     "760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e"
@@ -147,12 +148,6 @@ _A4T1_CANDIDATE_AUTHORITY = (
 )
 _RUN_ID_RE = re.compile(r"weekly_(\d{8}T\d{6}Z)\.staging\.json$")
 
-# Canonical governance ledger: a FIXED user-level directory, not a
-# caller-supplied parameter. The same path is used regardless of which
-# directory the staging artifact resides in, preventing cross-directory
-# replay. Tests monkeypatch this constant.
-_A4T1_LEDGER_DIR = Path.home() / ".renquant" / "governance"
-
 
 def _artifact_digest(obj: dict) -> str:
     return hashlib.sha256(
@@ -160,39 +155,11 @@ def _artifact_digest(obj: dict) -> str:
     ).hexdigest()
 
 
-def _a4t1_is_consumed(run_id: str) -> bool:
-    marker = _A4T1_LEDGER_DIR / f"a4t1_{run_id}.consumed"
-    return marker.exists()
-
-
-def _a4t1_mark_consumed(run_id: str, digest: str, staging_path: Path) -> None:
-    _A4T1_LEDGER_DIR.mkdir(parents=True, exist_ok=True)
-    marker = _A4T1_LEDGER_DIR / f"a4t1_{run_id}.consumed"
-    fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({
-                "exception_id": f"a4t1_{run_id}",
-                "artifact_digest": digest,
-                "consumed_by": str(staging_path),
-            }, fh)
-    except BaseException:
-        try:
-            os.unlink(str(marker))
-        except OSError:
-            pass
-        raise
-
-
 def _is_a4t1_candidate(staging_path: Path, staging: dict) -> bool:
     m = _RUN_ID_RE.search(staging_path.name)
     if not m or m.group(1) != _A4T1_CANDIDATE_RUN_ID:
         return False
     if _artifact_digest(staging) != _A4T1_CANDIDATE_ARTIFACT_DIGEST:
-        return False
-    if not _A4T1_LEDGER_DIR.is_dir():
-        return False
-    if _a4t1_is_consumed(_A4T1_CANDIDATE_RUN_ID):
         return False
     return True
 
@@ -546,13 +513,15 @@ def decide(prod_path: Path, staging_path: Path, as_of: dt.date) -> dict[str, Any
     return verdict
 
 
-def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
+def stamp(staging_path: Path, verdict: dict[str, Any],
+          *, a4t1_consumption_proof: dict[str, Any] | None = None) -> None:
     """Write the promotion-basis stamp into the staging artifact, atomically.
 
     Refuses (ValueError) unless the verdict IS a FALLBACK_PROMOTE — a stamp
     without a decision would be an unexplained governance marker. When the
-    verdict carries an A4-T1 candidate exception, the consumption marker is
-    written to ``_A4T1_LEDGER_DIR`` BEFORE the artifact (O_CREAT|O_EXCL).
+    verdict carries an A4-T1 candidate exception, the caller MUST supply
+    ``a4t1_consumption_proof`` — a dict from the orchestrator's governance
+    ledger proving the exception was atomically consumed before this stamp.
     """
     if verdict.get("decision") != "FALLBACK_PROMOTE":
         raise ValueError("stamp() requires a FALLBACK_PROMOTE verdict")
@@ -573,14 +542,14 @@ def stamp(staging_path: Path, verdict: dict[str, Any]) -> None:
         meta["fallback_a4t1_authorization"] = verdict["a4t1_authorization"]
         meta["fallback_standing_quality_floor"] = verdict["quality_floor_standing"]
     if verdict.get("a4t1_candidate_run_id"):
+        if not isinstance(a4t1_consumption_proof, dict) or not a4t1_consumption_proof:
+            raise ValueError(
+                "A4-T1 candidate exception requires a4t1_consumption_proof "
+                "from the orchestrator's governance ledger")
         meta["fallback_a4t1_candidate_run_id"] = verdict["a4t1_candidate_run_id"]
         meta["fallback_a4t1_candidate_digest"] = verdict["a4t1_candidate_artifact_digest"]
         meta["fallback_a4t1_candidate_authority"] = verdict["a4t1_candidate_authority"]
-        _a4t1_mark_consumed(
-            verdict["a4t1_candidate_run_id"],
-            verdict["a4t1_candidate_artifact_digest"],
-            staging_path,
-        )
+        meta["fallback_a4t1_consumption_proof"] = a4t1_consumption_proof
     fd, tmp = tempfile.mkstemp(dir=str(staging_path.parent),
                                prefix=staging_path.name + ".")
     try:
