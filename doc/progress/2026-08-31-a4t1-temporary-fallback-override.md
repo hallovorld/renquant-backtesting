@@ -1,6 +1,31 @@
-# A4-T1: temporary zero-trade fallback override (2026-08-31..09-07)
+# A4-T1: temporary zero-trade fallback override (2026-08-31..09-07)   (PR #128)
 
-STATUS: amendment to RFC#210 A4, TIME-LIMITED, FAIL-CLOSED
+STATUS:    delivered — v13 of the RFC#210 A4-T1 amendment, TIME-LIMITED
+           [2026-08-31, 2026-09-07], FAIL-CLOSED; supersedes #127.
+WHAT:      backtesting IDENTIFIES the one authorized candidate (exact run id +
+           full-artifact digest) and VALIDATES a versioned consumption proof
+           (`a4t1_consumption_proof.v1`: 8 bound fields + `receipt_id`) before
+           `stamp()` touches the artifact; the direct CLI refuses to stamp a
+           candidate (exit 1); the authority constant names the orchestrator's
+           committed governance record and the local JSON is a pointer.
+WHY/DIR:   closes the codex #127 blocker (`stamp()` accepted any non-empty dict
+           as proof, so single consumption was not enforced). Direction:
+           governance state (authorization record, ledger, atomic single
+           consumption) is orchestrator-owned; backtesting stays the fail-closed
+           verdict + proof validator. Paired with renquant-orchestrator#1110.
+EVIDENCE:  `tests/test_freshness_fallback.py` 100 passed (52 standing A4 + 13
+           structural + 35 candidate/proof) [VERIFIED — pytest 2026-09-03 at
+           885d3ce, the last code-touching commit]. No model-quality claim is
+           made; the artifact facts below are identification inputs only.
+           artifact:      `backtesting/renquant_104/artifacts/prod/panel-ltr.alpha158_fund.weekly_20260831T141820Z.staging.json` (umbrella live tree)
+           prod or exp:   prod (staging candidate for the production pair promotion)
+           existing data: canonical-JSON SHA-256 recomputed from the live artifact = `760912ec…4af1e`, equal to `_A4T1_CANDIDATE_DIGEST` and to the orchestrator authorization record [VERIFIED — python hashlib + record read, 2026-09-03]; genuine_ic 0.001554 (`sanity_placebo_genuine_ic`) and `wf_reason` = zero trades across all 3 WF cuts [VERIFIED — `metadata.wf_gate_metadata` of the live artifact read 2026-09-03]; regime_sanity_ic failed [VERIFIED — prior work, §Evidence below / bt#123–#127]
+           best-known?:   no — a zero-trade candidate the standing A4 policy REFUSES; the served prod model (trained 2026-08-02) is the best-known artifact but lapsed the 28-day SLA
+           scope:         "this is the 20260831T141820Z staging artifact, prod, vs the served 2026-08-02 model — a time-limited, operator-authorized fallback, not a signal claim"
+NEXT:      merge this first; then renquant-orchestrator#1110 (record + data-root
+           ledger + `promote_candidate` wrapper); then the umbrella PR (pins +
+           `weekly_wf_promote.sh --promote-staged` rewired to the wrapper);
+           remove the A4-T1 block at expiry (2026-09-07) per §Restore condition.
 
 ## Problem
 
