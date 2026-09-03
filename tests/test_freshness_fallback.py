@@ -534,6 +534,259 @@ def test_a4t1_stamp_carries_bypass_metadata(tmp_path):
     assert "orch-session-428feb92" in m["fallback_a4t1_authorization"]
 
 
+# ── Amendment A4-T1: candidate exception (identification only) ────────────
+# Consumption is the ORCHESTRATOR's responsibility; backtesting only identifies
+# the candidate and requires proof at stamp() time.
+
+CANDIDATE_OVERRIDES = dict(
+    **ZERO_TRADE_OVERRIDES,
+    sanity_regime_ic={"passed": False,
+                      "reason": "regime sanity IC failed: BULL_CALM,BULL_VOLATILE,CHOPPY"},
+)
+
+
+def _candidate_staging(tmp_path, genuine=0.0016,
+                       run_id=None, **extra):
+    if run_id is None:
+        run_id = F._A4T1_CANDIDATE_RUN_ID
+    over = dict(CANDIDATE_OVERRIDES)
+    over.update(extra)
+    wf = _wf(genuine=genuine, **over)
+    obj = {"trained_date": A4T1_TRAINED, "metadata": {"wf_gate_metadata": wf}}
+    digest = F._artifact_digest(obj)
+    fname = f"panel-ltr.alpha158_fund.weekly_{run_id}.staging.json"
+    path = tmp_path / fname
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    return path, digest
+
+
+def _valid_proof(v, ledger_path="/ledger/a4t1_x.consumed.json",
+                 consumed_at="2026-09-03T00:00:00+00:00"):
+    """A proof the orchestrator wrapper would produce for verdict ``v``."""
+    p = {"schema": F.A4T1_PROOF_SCHEMA,
+         "exception_id": f"a4t1_{v['a4t1_candidate_run_id']}",
+         "run_id": v["a4t1_candidate_run_id"],
+         "artifact_digest": v["a4t1_candidate_artifact_digest"],
+         "authority": v["a4t1_candidate_authority"],
+         "consumed_at": consumed_at, "consumed_by": F.A4T1_CONSUMER,
+         "ledger_path": ledger_path}
+    p["receipt_id"] = F.a4t1_receipt_id(p)
+    return p
+
+
+def _edited(v, **changes):
+    """A self-consistent proof (receipt recomputed) with fields overridden,
+    so the test isolates ONE binding check rather than the receipt check."""
+    p = _valid_proof(v)
+    p.update(changes)
+    p["receipt_id"] = F.a4t1_receipt_id(p)
+    return p
+
+
+def _candidate_verdict(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    return path, v
+
+
+def _assert_stamp_rejects(path, v, proof, match):
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match=match):
+        F.stamp(path, v, a4t1_consumption_proof=proof)
+    assert path.read_bytes() == before, "a refused stamp must not touch the artifact"
+
+
+def test_a4t1_candidate_promotes_within_window(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE", v
+    assert v["a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert v["a4t1_candidate_artifact_digest"] == digest
+    assert v["a4t1_candidate_authority"] == F._A4T1_CANDIDATE_AUTHORITY
+
+
+def test_a4t1_candidate_tampered_wf_refuses(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    obj = json.loads(path.read_text())
+    obj["metadata"]["wf_gate_metadata"]["sanity_placebo_genuine_ic"] = 0.05
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_tampered_trained_date_refuses(tmp_path, monkeypatch):
+    path, digest = _candidate_staging(tmp_path)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    obj = json.loads(path.read_text())
+    obj["trained_date"] = "2026-09-01"
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_wrong_run_id_refuses(tmp_path, monkeypatch):
+    wrong_id = "20260901T120000Z"
+    path, digest = _candidate_staging(tmp_path, run_id=wrong_id)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained=A4T1_PROD), path, A4T1_AS_OF)
+    assert v["decision"] == "REFUSE"
+
+
+def test_a4t1_candidate_expired_refuses(tmp_path, monkeypatch):
+    trained_for_expired = "2026-09-01"
+    path, _ = _candidate_staging(tmp_path)
+    obj = json.loads(path.read_text())
+    obj["trained_date"] = trained_for_expired
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    digest = F._artifact_digest(obj)
+    monkeypatch.setattr(F, "_A4T1_CANDIDATE_ARTIFACT_DIGEST", digest)
+    v = F.decide(_prod(tmp_path, trained="2026-07-20"), path, A4T1_EXPIRED)
+    assert v["decision"] == "REFUSE"
+
+
+# ── proof validation: every rejection reason, each leaving the artifact intact ──
+
+def test_a4t1_proof_none_rejected(tmp_path, monkeypatch):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    _assert_stamp_rejects(path, v, None, "not a dict")
+
+
+def test_a4t1_proof_arbitrary_dict_rejected(tmp_path, monkeypatch):
+    """The v12 hole: any non-empty dict was accepted. {'x': 1} must not be."""
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    _assert_stamp_rejects(path, v, {"x": 1}, "unknown keys")
+
+
+def test_a4t1_proof_empty_dict_rejected(tmp_path, monkeypatch):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    _assert_stamp_rejects(path, v, {}, "missing keys")
+
+
+@pytest.mark.parametrize("key", sorted(F.A4T1_PROOF_KEYS))
+def test_a4t1_proof_missing_key_rejected(tmp_path, monkeypatch, key):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v)
+    del p[key]
+    _assert_stamp_rejects(path, v, p, f"missing keys.*{key}")
+
+
+def test_a4t1_proof_extra_key_rejected(tmp_path, monkeypatch):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v)
+    p["extra"] = "x"
+    _assert_stamp_rejects(path, v, p, "unknown keys.*extra")
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("schema", "a4t1_consumption_proof.v0", "schema"),
+    ("run_id", "20260901T120000Z", "run_id mismatch"),
+    ("exception_id", "a4t1_20260901T120000Z", "exception_id mismatch"),
+    ("artifact_digest", "0" * 64, "artifact_digest mismatch"),
+    ("authority", "someone-else", "authority mismatch"),
+    ("consumed_by", "a-shell-script", "consumed_by"),
+    ("consumed_at", "2026-09-03T00:00:00", "timezone-aware"),
+    ("consumed_at", "yesterday", "not ISO-8601"),
+    ("ledger_path", "", "empty or non-string"),
+])
+def test_a4t1_proof_field_defect_rejected(tmp_path, monkeypatch,
+                                          field, value, match):
+    """Each binding check fires on its own: the receipt is recomputed after
+    the edit so the receipt check cannot mask the field check."""
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    _assert_stamp_rejects(path, v, _edited(v, **{field: value}), match)
+
+
+def test_a4t1_proof_non_string_value_rejected(tmp_path, monkeypatch):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v)
+    p["ledger_path"] = 7
+    _assert_stamp_rejects(path, v, p, "empty or non-string")
+
+
+def test_a4t1_proof_receipt_edited_rejected(tmp_path, monkeypatch):
+    """A fabricated proof: bound fields fine, receipt not recomputed."""
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v)
+    r = p["receipt_id"]
+    p["receipt_id"] = ("0" if r[0] != "0" else "1") + r[1:]
+    _assert_stamp_rejects(path, v, p, "receipt_id")
+
+
+def test_a4t1_proof_bound_fields_edited_without_receipt_rejected(tmp_path, monkeypatch):
+    """Editing a bound field WITHOUT recomputing the receipt trips the
+    receipt check even when the edited value would otherwise be accepted."""
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v)
+    p["consumed_at"] = "2026-09-04T12:34:56+00:00"
+    _assert_stamp_rejects(path, v, p, "receipt_id")
+
+
+def test_a4t1_proof_rebound_time_accepted(tmp_path, monkeypatch):
+    """Binding is to the verdict fields, not to a particular time: a
+    self-consistent proof with a different consumed_at is valid."""
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v, consumed_at="2026-09-04T12:34:56+00:00")
+    F.stamp(path, v, a4t1_consumption_proof=p)
+    m = json.loads(path.read_text())["metadata"]
+    assert m["fallback_a4t1_consumption_proof"] == p
+
+
+def test_a4t1_proof_valid_stamps_metadata(tmp_path, monkeypatch):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    proof = _valid_proof(v)
+    F.stamp(path, v, a4t1_consumption_proof=proof)
+    m = json.loads(path.read_text())["metadata"]
+    assert m["promotion_basis"] == F.PROMOTION_BASIS
+    assert m["fallback_a4t1_candidate_run_id"] == F._A4T1_CANDIDATE_RUN_ID
+    assert m["fallback_a4t1_candidate_digest"] == v["a4t1_candidate_artifact_digest"]
+    assert m["fallback_a4t1_candidate_authority"] == F._A4T1_CANDIDATE_AUTHORITY
+    assert m["fallback_a4t1_candidate_authority"].startswith("renquant-orchestrator:")
+    assert m["fallback_a4t1_consumption_proof"] == proof
+    assert (m["fallback_a4t1_consumption_proof"]["receipt_id"]
+            == F.a4t1_receipt_id(proof))
+
+
+def test_a4t1_proof_on_non_candidate_verdict_rejected(tmp_path):
+    """A proof handed to an ordinary A4 promotion is an unexplained marker."""
+    staging = _staging(tmp_path, genuine=0.025)
+    v = F.decide(_prod(tmp_path), staging, AS_OF)
+    assert v["decision"] == "FALLBACK_PROMOTE" and "a4t1_candidate_run_id" not in v
+    before = staging.read_bytes()
+    with pytest.raises(ValueError, match="non-candidate"):
+        F.stamp(staging, v, a4t1_consumption_proof={"schema": F.A4T1_PROOF_SCHEMA})
+    assert staging.read_bytes() == before
+
+
+def test_a4t1_receipt_id_is_canonical(tmp_path, monkeypatch):
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    p = _valid_proof(v)
+    shuffled = dict(reversed(list(p.items())))
+    assert F.a4t1_receipt_id(shuffled) == p["receipt_id"]
+    without_receipt = {k: x for k, x in p.items() if k != "receipt_id"}
+    assert F.a4t1_receipt_id(without_receipt) == p["receipt_id"]
+    assert F.a4t1_receipt_id(_valid_proof(v, ledger_path="/elsewhere")) != p["receipt_id"]
+
+
+def test_a4t1_cli_refuses_to_stamp_a_candidate(tmp_path, monkeypatch, capsys):
+    """The direct CLI has no ledger: it must exit 1 and leave the artifact
+    untouched, so every shell caller stays fail-closed on the candidate."""
+    path, v = _candidate_verdict(tmp_path, monkeypatch)
+    before = path.read_bytes()
+    rc = F.main(["--prod", str(tmp_path / "prod.json"), "--staging", str(path),
+                 "--as-of", A4T1_AS_OF.isoformat(), "--stamp"])
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["decision"] == "FALLBACK_PROMOTE"
+    assert out["stamped"] is False
+    assert out["stamp_refused"] == "a4t1_candidate_requires_orchestrator_consumption"
+    assert path.read_bytes() == before
+    assert "promotion_basis" not in json.loads(path.read_text())["metadata"]
+
+
 def test_standing_stamp_has_no_a4t1_fields(tmp_path):
     """An ordinary A4 promotion stamps quality_floor=0.02 with no A4-T1 keys."""
     staging = _staging(tmp_path, genuine=0.025)
