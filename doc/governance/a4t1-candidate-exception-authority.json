@@ -1,24 +1,6 @@
 {
   "exception_id": "a4t1_20260831T141820Z",
   "artifact_digest": "760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e",
-  "authorized_bypasses": [
-    "regime_sanity_ic",
-    "wf_benchmark_economics",
-    "trade_contract",
-    "trade_monotonicity",
-    "alpha_economics"
-  ],
-  "quality_floor_override": 0.001,
-  "temporal_bounds": ["2026-08-31", "2026-09-07"],
-  "structural_authorization": {
-    "operator_session": "428feb92",
-    "date": "2026-08-31",
-    "scope": "zero-trade structural predicate (4 classes)"
-  },
-  "candidate_authorization": {
-    "operator_session": "428feb92",
-    "date": "2026-09-02",
-    "scope": "regime_sanity_ic bypass for specific candidate 20260831T141820Z",
-    "evidence": "explicit 'go' in response to authorization request for regime_sanity_ic bypass"
-  }
+  "system_of_record": "renquant-orchestrator:ops/governance/a4t1/20260831T141820Z.authorization.json",
+  "note": "Authorization evidence lives in the orchestrator governance record; this file is a cross-repo pointer only. The ledger of consumed exceptions is orchestrator-owned as well."
 }

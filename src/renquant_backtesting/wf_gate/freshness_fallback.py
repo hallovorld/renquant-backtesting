@@ -136,23 +136,97 @@ _A4T1_ZERO_TRADE_CLASSES = frozenset({
 # The staging artifact has 5 substance classes (4 zero-trade +
 # regime_sanity_ic), so the structural predicate rejects it. The
 # candidate exception binds to the EXACT run-ID and FULL-ARTIFACT digest.
-# This module IDENTIFIES the candidate; the CALLER (orchestrator) owns
-# atomic single-consumption and passes proof into stamp().
-# Authorization: doc/governance/a4t1-candidate-exception-authority.json
+# This module IDENTIFIES the candidate and VALIDATES the consumption proof
+# it is handed; the ORCHESTRATOR owns the authorization record, the ledger
+# and atomic single-consumption, and is the only producer of proofs
+# (renquant_orchestrator.a4t1_governance.promote_candidate). The direct CLI
+# refuses to stamp a candidate exception (see main()).
+# System of record: the orchestrator governance record named below;
+# doc/governance/a4t1-candidate-exception-authority.json is a pointer only.
 _A4T1_CANDIDATE_RUN_ID = "20260831T141820Z"
 _A4T1_CANDIDATE_ARTIFACT_DIGEST = (
     "760912ec122fa6e02628077df8b35e58145209ea3b6b395bd670d8ead9e4af1e"
 )
 _A4T1_CANDIDATE_AUTHORITY = (
-    "doc/governance/a4t1-candidate-exception-authority.json"
+    "renquant-orchestrator:ops/governance/a4t1/"
+    "20260831T141820Z.authorization.json"
 )
 _RUN_ID_RE = re.compile(r"weekly_(\d{8}T\d{6}Z)\.staging\.json$")
+
+# Consumption-proof contract (v1). The orchestrator imports these names; they
+# are frozen. A proof is bound to a verdict by exact equality on the exception
+# id, run id, full-artifact digest and authority, and carries a receipt id
+# that is the sha256 of the canonical JSON of the eight bound fields — an
+# edited proof no longer matches its own receipt.
+A4T1_PROOF_SCHEMA = "a4t1_consumption_proof.v1"
+A4T1_PROOF_FIELDS = (
+    "schema", "exception_id", "run_id", "artifact_digest",
+    "authority", "consumed_at", "consumed_by", "ledger_path",
+)
+A4T1_PROOF_KEYS = frozenset(A4T1_PROOF_FIELDS) | {"receipt_id"}
+A4T1_CONSUMER = "renquant-orchestrator"
 
 
 def _artifact_digest(obj: dict) -> str:
     return hashlib.sha256(
         json.dumps(obj, sort_keys=True).encode("utf-8"),
     ).hexdigest()
+
+
+def a4t1_receipt_id(proof: dict) -> str:
+    """sha256 over the canonical JSON of the 8 bound fields (receipt_id
+    excluded). Key order and the presence of receipt_id do not matter."""
+    bound = {k: proof[k] for k in A4T1_PROOF_FIELDS}
+    return hashlib.sha256(
+        json.dumps(bound, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    ).hexdigest()
+
+
+def validate_a4t1_proof(proof: Any, verdict: dict[str, Any]) -> None:
+    """Raise ValueError('a4t1 proof: <reason>') unless ``proof`` is a
+    well-formed v1 consumption proof bound to THIS verdict.
+
+    Every defect has its own reason so a refusal is diagnosable. This checks
+    structure and binding only; whether the receipt exists in the ledger is
+    the orchestrator's knowledge, not this module's.
+    """
+    if not isinstance(proof, dict):
+        raise ValueError("a4t1 proof: not a dict")
+    keys = set(proof)
+    missing = A4T1_PROOF_KEYS - keys
+    unknown = keys - A4T1_PROOF_KEYS
+    if missing or unknown:
+        parts = []
+        if missing:
+            parts.append(f"missing keys {sorted(missing)}")
+        if unknown:
+            parts.append(f"unknown keys {sorted(unknown)}")
+        raise ValueError("a4t1 proof: " + "; ".join(parts))
+    for k in A4T1_PROOF_KEYS:
+        if not isinstance(proof[k], str) or not proof[k]:
+            raise ValueError(f"a4t1 proof: empty or non-string value for {k}")
+    if proof["schema"] != A4T1_PROOF_SCHEMA:
+        raise ValueError(
+            f"a4t1 proof: schema {proof['schema']!r} != {A4T1_PROOF_SCHEMA!r}")
+    run_id = verdict.get("a4t1_candidate_run_id")
+    if proof["run_id"] != run_id:
+        raise ValueError("a4t1 proof: run_id mismatch against the verdict")
+    if proof["exception_id"] != f"a4t1_{run_id}":
+        raise ValueError("a4t1 proof: exception_id mismatch against the verdict")
+    if proof["artifact_digest"] != verdict.get("a4t1_candidate_artifact_digest"):
+        raise ValueError("a4t1 proof: artifact_digest mismatch against the verdict")
+    if proof["authority"] != verdict.get("a4t1_candidate_authority"):
+        raise ValueError("a4t1 proof: authority mismatch against the verdict")
+    if proof["consumed_by"] != A4T1_CONSUMER:
+        raise ValueError(f"a4t1 proof: consumed_by must be {A4T1_CONSUMER!r}")
+    try:
+        consumed_at = dt.datetime.fromisoformat(proof["consumed_at"])
+    except ValueError as exc:
+        raise ValueError("a4t1 proof: consumed_at is not ISO-8601") from exc
+    if consumed_at.tzinfo is None:
+        raise ValueError("a4t1 proof: consumed_at must be timezone-aware")
+    if proof["receipt_id"] != a4t1_receipt_id(proof):
+        raise ValueError("a4t1 proof: receipt_id does not match the bound fields")
 
 
 def _is_a4t1_candidate(staging_path: Path, staging: dict) -> bool:
@@ -520,11 +594,18 @@ def stamp(staging_path: Path, verdict: dict[str, Any],
     Refuses (ValueError) unless the verdict IS a FALLBACK_PROMOTE — a stamp
     without a decision would be an unexplained governance marker. When the
     verdict carries an A4-T1 candidate exception, the caller MUST supply
-    ``a4t1_consumption_proof`` — a dict from the orchestrator's governance
-    ledger proving the exception was atomically consumed before this stamp.
+    ``a4t1_consumption_proof`` — produced ONLY by the orchestrator wrapper
+    after it atomically consumed the exception in its ledger. The proof is
+    validated for structure and binding to this verdict
+    (``validate_a4t1_proof``) BEFORE the artifact is touched; a proof on a
+    non-candidate verdict is refused as an unexplained governance marker.
     """
     if verdict.get("decision") != "FALLBACK_PROMOTE":
         raise ValueError("stamp() requires a FALLBACK_PROMOTE verdict")
+    if verdict.get("a4t1_candidate_run_id"):
+        validate_a4t1_proof(a4t1_consumption_proof, verdict)
+    elif a4t1_consumption_proof is not None:
+        raise ValueError("a4t1 proof: supplied on a non-candidate verdict")
     obj = _read_json(staging_path)
     if obj is None:
         raise ValueError(f"staging artifact unreadable for stamping: {staging_path}")
@@ -542,10 +623,6 @@ def stamp(staging_path: Path, verdict: dict[str, Any],
         meta["fallback_a4t1_authorization"] = verdict["a4t1_authorization"]
         meta["fallback_standing_quality_floor"] = verdict["quality_floor_standing"]
     if verdict.get("a4t1_candidate_run_id"):
-        if not isinstance(a4t1_consumption_proof, dict) or not a4t1_consumption_proof:
-            raise ValueError(
-                "A4-T1 candidate exception requires a4t1_consumption_proof "
-                "from the orchestrator's governance ledger")
         meta["fallback_a4t1_candidate_run_id"] = verdict["a4t1_candidate_run_id"]
         meta["fallback_a4t1_candidate_digest"] = verdict["a4t1_candidate_artifact_digest"]
         meta["fallback_a4t1_candidate_authority"] = verdict["a4t1_candidate_authority"]
@@ -577,6 +654,16 @@ def main(argv: list[str] | None = None) -> int:
              else dt.date.today())
     verdict = decide(args.prod, args.staging, as_of)
     if args.stamp and verdict.get("decision") == "FALLBACK_PROMOTE":
+        if verdict.get("a4t1_candidate_run_id"):
+            # The candidate exception is consumed and stamped ONLY by the
+            # orchestrator wrapper (identify -> atomic consume -> stamp).
+            # The direct CLI has no ledger, so it cannot produce a proof and
+            # must not promote: exit 1 keeps every shell caller fail-closed.
+            verdict["stamped"] = False
+            verdict["stamp_refused"] = (
+                "a4t1_candidate_requires_orchestrator_consumption")
+            print(json.dumps(verdict, indent=2, sort_keys=True))
+            return 1
         stamp(args.staging, verdict)
         verdict["stamped"] = True
     print(json.dumps(verdict, indent=2, sort_keys=True))

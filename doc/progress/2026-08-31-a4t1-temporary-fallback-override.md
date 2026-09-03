@@ -32,7 +32,7 @@ bounds [2026-08-31, 2026-09-07]:
 
 Gates BOTH the floor relaxation (0.001) and the failure-class exception.
 
-### Path 2 — Candidate exception (v12)
+### Path 2 — Candidate exception (v13)
 
 `_is_a4t1_candidate(staging_path, staging)` binds to:
 - EXACT run-ID: `20260831T141820Z`
@@ -41,26 +41,71 @@ Gates BOTH the floor relaxation (0.001) and the failure-class exception.
 Covers the actual staging artifact (5 substance classes: 4 zero-trade +
 regime_sanity_ic) that the structural path rejects.
 
-Backtesting IDENTIFIES the candidate only. Consumption (single-use
-enforcement) is the ORCHESTRATOR's responsibility via a paired PR. The
-`stamp()` function requires an `a4t1_consumption_proof` dict from the
-orchestrator's governance ledger; without it, stamp() raises ValueError.
-This separation addresses codex's v11 rejection: backtesting should not
-own governance state (hardcoded user-home dir, first-use deadlock).
+Division of labour (codex v11/v12 findings applied):
+
+- **Backtesting IDENTIFIES** the candidate and **VALIDATES the consumption
+  proof** it is handed. It exports the proof contract the orchestrator
+  imports (names frozen): `A4T1_PROOF_SCHEMA = "a4t1_consumption_proof.v1"`,
+  `A4T1_PROOF_FIELDS` (schema, exception_id, run_id, artifact_digest,
+  authority, consumed_at, consumed_by, ledger_path), `A4T1_PROOF_KEYS`
+  (+ receipt_id), `A4T1_CONSUMER = "renquant-orchestrator"`,
+  `a4t1_receipt_id(proof)` = sha256 of the canonical JSON of the 8 bound
+  fields, `validate_a4t1_proof(proof, verdict)`.
+- **`stamp()`** on a candidate verdict validates the proof BEFORE touching
+  the artifact: exact key set, non-empty strings, schema, run_id /
+  exception_id / artifact_digest / authority equal to the verdict,
+  consumed_by == the orchestrator, timezone-aware consumed_at, and
+  receipt_id == recomputed receipt (an edited proof no longer matches its
+  own receipt). A proof on a NON-candidate verdict is refused. Each defect
+  has its own reason string.
+- **The direct CLI refuses to stamp a candidate** (`--stamp` on a candidate
+  verdict prints `stamp_refused =
+  a4t1_candidate_requires_orchestrator_consumption`, `stamped: false`, exit
+  1). The umbrella `weekly_wf_promote.sh --promote-staged` keys pair
+  promotion off exit 0, so the pre-existing shell path is fail-closed on
+  the candidate until it is rewired to the orchestrator wrapper.
+- **The ORCHESTRATOR owns** the authorization record
+  (`renquant-orchestrator:ops/governance/a4t1/20260831T141820Z.authorization.json`
+  — the value of `_A4T1_CANDIDATE_AUTHORITY`), the ledger, atomic
+  single-consumption and the ONLY producer of proofs
+  (`renquant_orchestrator.a4t1_governance.promote_candidate`: identify →
+  atomic consume → stamp). `doc/governance/a4t1-candidate-exception-authority.json`
+  in this repo is reduced to a cross-repo pointer.
+
+**What this enforces / what it cannot.** This module can reject malformed,
+unbound or fabricated proofs and refuses to stamp candidates from the CLI,
+so no shell caller and no lazy Python caller can promote the candidate
+without a proof shaped exactly like the orchestrator's. It cannot verify
+that a receipt exists in the ledger — that knowledge is the orchestrator's,
+and the audit trail is the ledger receipt the orchestrator writes before
+calling `stamp()`. A Python caller that deliberately reconstructs a valid
+proof is not stopped here; it is visible, because the stamped artifact
+carries a receipt_id that the ledger does not.
 
 Standing A4 constants UNCHANGED. The bypass is a separate code path.
 
 ## Tests
 
-73 tests total (52 standing A4 + 13 structural + 8 candidate exception):
-- Candidate happy path: correct run-ID + digest within window promotes
-- Tampered wf_gate_metadata: digest mismatch refuses
-- Tampered trained_date: digest mismatch refuses
-- Wrong run-ID: refuses
-- Expired: refuses
-- Stamp without proof: raises ValueError (consumption proof required)
-- Stamp with empty proof: raises ValueError
-- Stamp records proof: proof dict written to artifact metadata
+100 tests total (52 standing A4 + 13 structural + 35 candidate exception)
+[VERIFIED — pytest 2026-09-03]:
+- Identification (5): happy path promotes within window; tampered
+  wf_gate_metadata / tampered trained_date (digest mismatch) refuse;
+  wrong run-ID refuses; expired refuses.
+- Proof rejected, artifact byte-identical after each (26): None; `{"x": 1}`
+  (the v12 hole); `{}`; every one of the 9 keys missing (parametrized);
+  an extra key; each binding field defective with the receipt recomputed so
+  the field check fires on its own (schema, run_id, exception_id,
+  artifact_digest, authority, consumed_by, naive consumed_at, non-ISO
+  consumed_at, empty ledger_path); a non-string value; receipt edited;
+  a bound field edited without recomputing the receipt.
+- Proof accepted (2): valid proof stamps run_id / digest / authority / the
+  full proof; a self-consistent proof with a different consumed_at is
+  accepted (binding is to the verdict, not to time).
+- Boundary (2): a proof on a non-candidate promotion is refused; receipt id
+  is canonical (key order, presence of receipt_id irrelevant; different
+  ledger_path → different receipt).
+- CLI (1): `--stamp` on the candidate exits 1 with `stamp_refused`, artifact
+  untouched.
 
 ## Evidence
 
@@ -99,10 +144,20 @@ non-zero WF trades AND meets genuine_ic >= 0.02.
   decide() refuses before stamp() can create dir (first-use deadlock),
   orchestrator should own governance state, authority JSON is
   self-attestation.
-- v12 (this PR): split concerns — backtesting identifies only,
-  orchestrator owns consumption. stamp() requires a4t1_consumption_proof
-  from the caller. Paired orchestrator PR carries the governance ledger
-  + atomic consumption. 73 tests (52+13+8).
+- v12 (bt#127): split concerns — backtesting identifies only,
+  orchestrator owns consumption; stamp() requires a4t1_consumption_proof
+  from the caller. 73 tests (52+13+8). Codex rejected: any non-empty dict
+  passed as proof (`{"x": 1}` stamped the candidate), so the boundary did
+  not enforce single consumption; authority JSON still self-attestation.
+- v13 (this PR): versioned proof contract exported (schema v1, 8 bound
+  fields + receipt_id = sha256 of their canonical JSON); stamp() validates
+  structure and exact binding to the verdict before touching the artifact,
+  with a distinct reason per defect; a proof on a non-candidate verdict is
+  refused; the direct CLI refuses to stamp candidates (exit 1); the
+  authority constant now names the orchestrator governance record and the
+  local JSON is a pointer. 100 tests (52+13+35). Paired orchestrator PR
+  carries the authorization record, the data-root ledger, the narrow
+  identify→consume→stamp wrapper and the e2e / concurrency tests.
 
 ## Operator authorization
 
